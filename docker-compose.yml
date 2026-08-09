@@ -1,0 +1,321 @@
+name: local-data-infra
+
+services:
+  mysql:
+    image: mysql:${MYSQL_VERSION:-8.4.10}
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-dev_root_password}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-app}
+      MYSQL_USER: ${MYSQL_USER:-app}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-dev_app_password}
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      - "${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    networks:
+      - infra
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - mysqladmin ping -h 127.0.0.1 -uroot -p"$${MYSQL_ROOT_PASSWORD}" --silent
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    mem_limit: ${MYSQL_MEMORY_LIMIT:-1g}
+    cpus: ${MYSQL_CPUS:-2.0}
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+
+  kafka:
+    image: apache/kafka:${KAFKA_VERSION:-4.3.1}
+    restart: unless-stopped
+    environment:
+      CLUSTER_ID: ${KAFKA_CLUSTER_ID:-MkU3OEVBNTcwNTJENDM2Qk}
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:${KAFKA_PORT:-9092}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 1
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    ports:
+      - "${KAFKA_PORT:-9092}:9092"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    networks:
+      - infra
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - /opt/kafka/bin/kafka-topics.sh --bootstrap-server 127.0.0.1:9092 --list >/dev/null 2>&1
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
+    mem_limit: ${KAFKA_MEMORY_LIMIT:-2g}
+    cpus: ${KAFKA_CPUS:-2.0}
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+
+  starrocks:
+    image: starrocks/allin1-ubuntu:${STARROCKS_VERSION:-4.0.13}
+    restart: unless-stopped
+    ports:
+      - "${STARROCKS_SQL_PORT:-9030}:9030"
+      - "${STARROCKS_FE_HTTP_PORT:-8030}:8030"
+      - "${STARROCKS_BE_HTTP_PORT:-8040}:8040"
+    volumes:
+      - starrocks-fe-meta:/data/deploy/starrocks/fe/meta
+      - starrocks-be-storage:/data/deploy/starrocks/be/storage
+    networks:
+      - infra
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          curl --fail --silent http://127.0.0.1:8030/api/health >/dev/null
+          && curl --fail --silent http://127.0.0.1:8040/api/health >/dev/null
+          && mysql --connect-timeout 3 -h 127.0.0.1 -P 9030 -u root -e "SELECT 1" >/dev/null
+      interval: 10s
+      timeout: 5s
+      retries: 24
+      start_period: 60s
+    mem_limit: ${STARROCKS_MEMORY_LIMIT:-8g}
+    cpus: ${STARROCKS_CPUS:-4.0}
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+
+  dolphinscheduler-postgresql:
+    image: postgres:${DOLPHINSCHEDULER_POSTGRES_VERSION:-16.14-bookworm}
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DOLPHINSCHEDULER_DB_NAME:-dolphinscheduler}
+      POSTGRES_USER: ${DOLPHINSCHEDULER_DB_USER:-dolphinscheduler}
+      POSTGRES_PASSWORD: ${DOLPHINSCHEDULER_DB_PASSWORD:-dev_dolphinscheduler_password}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - dolphinscheduler-postgresql-data:/var/lib/postgresql/data
+    networks:
+      - infra
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          pg_isready
+          -U "$${POSTGRES_USER}"
+          -d "$${POSTGRES_DB}"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    mem_limit: ${DOLPHINSCHEDULER_POSTGRES_MEMORY_LIMIT:-768m}
+    cpus: ${DOLPHINSCHEDULER_POSTGRES_CPUS:-1.0}
+
+  dolphinscheduler-zookeeper:
+    image: zookeeper:${DOLPHINSCHEDULER_ZOOKEEPER_VERSION:-3.8.4}
+    restart: unless-stopped
+    environment:
+      ZOO_4LW_COMMANDS_WHITELIST: ruok,srvr
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - dolphinscheduler-zookeeper-data:/data
+      - dolphinscheduler-zookeeper-datalog:/datalog
+    networks:
+      - infra
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - zkServer.sh status 2>/dev/null | grep -q 'Mode:'
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 20s
+    mem_limit: ${DOLPHINSCHEDULER_ZOOKEEPER_MEMORY_LIMIT:-512m}
+    cpus: ${DOLPHINSCHEDULER_ZOOKEEPER_CPUS:-0.5}
+
+  dolphinscheduler-schema-initializer:
+    image: apache/dolphinscheduler-tools:${DOLPHINSCHEDULER_VERSION:-3.4.1}
+    restart: "no"
+    command:
+      - tools/bin/upgrade-schema.sh
+    environment: &dolphinscheduler-environment
+      DATABASE: postgresql
+      SPRING_DATASOURCE_URL: jdbc:postgresql://dolphinscheduler-postgresql:5432/${DOLPHINSCHEDULER_DB_NAME:-dolphinscheduler}
+      SPRING_DATASOURCE_USERNAME: ${DOLPHINSCHEDULER_DB_USER:-dolphinscheduler}
+      SPRING_DATASOURCE_PASSWORD: ${DOLPHINSCHEDULER_DB_PASSWORD:-dev_dolphinscheduler_password}
+      SPRING_JACKSON_TIME_ZONE: ${TZ:-Asia/Shanghai}
+      REGISTRY_ZOOKEEPER_CONNECT_STRING: dolphinscheduler-zookeeper:2181
+    depends_on:
+      dolphinscheduler-postgresql:
+        condition: service_healthy
+    volumes:
+      - dolphinscheduler-logs:/opt/dolphinscheduler/logs
+      - dolphinscheduler-shared-local:/opt/soft
+      - dolphinscheduler-resource-local:/dolphinscheduler
+    networks:
+      - infra
+    mem_limit: ${DOLPHINSCHEDULER_SCHEMA_MEMORY_LIMIT:-1g}
+    cpus: ${DOLPHINSCHEDULER_SCHEMA_CPUS:-1.0}
+
+  dolphinscheduler-api:
+    image: apache/dolphinscheduler-api:${DOLPHINSCHEDULER_VERSION:-3.4.1}
+    restart: unless-stopped
+    environment:
+      <<: *dolphinscheduler-environment
+      JAVA_OPTS: >-
+        -server -Xms256m -Xmx512m -XX:+UseG1GC
+        -Duser.timezone=${TZ:-Asia/Shanghai}
+    ports:
+      - "${DOLPHINSCHEDULER_API_PORT:-12345}:12345"
+      - "${DOLPHINSCHEDULER_PYTHON_GATEWAY_PORT:-25333}:25333"
+    depends_on: &dolphinscheduler-runtime-dependencies
+      dolphinscheduler-zookeeper:
+        condition: service_healthy
+      dolphinscheduler-schema-initializer:
+        condition: service_completed_successfully
+    volumes:
+      - dolphinscheduler-logs:/opt/dolphinscheduler/logs
+      - dolphinscheduler-shared-local:/opt/soft
+      - dolphinscheduler-resource-local:/dolphinscheduler
+      - ./infra/dolphinscheduler/plugins/dolphinscheduler-task-shell-${DOLPHINSCHEDULER_VERSION:-3.4.1}.jar:/opt/dolphinscheduler/api-server/libs/dolphinscheduler-task-shell-${DOLPHINSCHEDULER_VERSION:-3.4.1}.jar:ro
+    networks:
+      - infra
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - --fail
+        - --silent
+        - http://127.0.0.1:12345/dolphinscheduler/actuator/health
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+    mem_limit: ${DOLPHINSCHEDULER_API_MEMORY_LIMIT:-1280m}
+    cpus: ${DOLPHINSCHEDULER_API_CPUS:-1.0}
+
+  dolphinscheduler-alert:
+    image: apache/dolphinscheduler-alert-server:${DOLPHINSCHEDULER_VERSION:-3.4.1}
+    restart: unless-stopped
+    environment:
+      <<: *dolphinscheduler-environment
+      JAVA_OPTS: >-
+        -server -Xms256m -Xmx384m -XX:+UseG1GC
+        -Duser.timezone=${TZ:-Asia/Shanghai}
+    depends_on: *dolphinscheduler-runtime-dependencies
+    volumes:
+      - dolphinscheduler-logs:/opt/dolphinscheduler/logs
+    networks:
+      - infra
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - --fail
+        - --silent
+        - http://127.0.0.1:50053/actuator/health
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+    mem_limit: ${DOLPHINSCHEDULER_ALERT_MEMORY_LIMIT:-1g}
+    cpus: ${DOLPHINSCHEDULER_ALERT_CPUS:-0.5}
+
+  dolphinscheduler-master:
+    image: apache/dolphinscheduler-master:${DOLPHINSCHEDULER_VERSION:-3.4.1}
+    restart: unless-stopped
+    environment:
+      <<: *dolphinscheduler-environment
+      JAVA_OPTS: >-
+        -server -Xms512m -Xmx1g -XX:+UseG1GC
+        -Duser.timezone=${TZ:-Asia/Shanghai}
+    depends_on: *dolphinscheduler-runtime-dependencies
+    volumes:
+      - dolphinscheduler-logs:/opt/dolphinscheduler/logs
+      - dolphinscheduler-shared-local:/opt/soft
+      - ./infra/dolphinscheduler/plugins/dolphinscheduler-task-shell-${DOLPHINSCHEDULER_VERSION:-3.4.1}.jar:/opt/dolphinscheduler/master-server/libs/dolphinscheduler-task-shell-${DOLPHINSCHEDULER_VERSION:-3.4.1}.jar:ro
+    networks:
+      - infra
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - --fail
+        - --silent
+        - http://127.0.0.1:5679/actuator/health
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+    mem_limit: ${DOLPHINSCHEDULER_MASTER_MEMORY_LIMIT:-2g}
+    cpus: ${DOLPHINSCHEDULER_MASTER_CPUS:-1.0}
+
+  dolphinscheduler-worker:
+    image: apache/dolphinscheduler-worker:${DOLPHINSCHEDULER_VERSION:-3.4.1}
+    restart: unless-stopped
+    environment:
+      <<: *dolphinscheduler-environment
+      SENTINEL_API_BASE_URL: ${SENTINEL_API_BASE_URL:-http://host.docker.internal:8000}
+      SENTINEL_INTERNAL_TOKEN: ${INTERNAL_EXECUTION_TOKEN:-change-this-internal-token}
+      WORKER_TENANT_CONFIG_DEFAULT_TENANT_ENABLED: "true"
+      JAVA_OPTS: >-
+        -server -Xms512m -Xmx1536m -XX:+UseG1GC
+        -Duser.timezone=${TZ:-Asia/Shanghai}
+    depends_on: *dolphinscheduler-runtime-dependencies
+    volumes:
+      - dolphinscheduler-worker-data:/tmp/dolphinscheduler
+      - dolphinscheduler-logs:/opt/dolphinscheduler/logs
+      - dolphinscheduler-shared-local:/opt/soft
+      - dolphinscheduler-resource-local:/dolphinscheduler
+      - ./infra/dolphinscheduler/plugins/dolphinscheduler-task-shell-${DOLPHINSCHEDULER_VERSION:-3.4.1}.jar:/opt/dolphinscheduler/worker-server/libs/dolphinscheduler-task-shell-${DOLPHINSCHEDULER_VERSION:-3.4.1}.jar:ro
+    networks:
+      - infra
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - --fail
+        - --silent
+        - http://127.0.0.1:1235/actuator/health
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+    mem_limit: ${DOLPHINSCHEDULER_WORKER_MEMORY_LIMIT:-2g}
+    cpus: ${DOLPHINSCHEDULER_WORKER_CPUS:-1.5}
+
+networks:
+  infra:
+    name: project-infra
+
+volumes:
+  mysql-data:
+  kafka-data:
+  starrocks-fe-meta:
+  starrocks-be-storage:
+  dolphinscheduler-postgresql-data:
+  dolphinscheduler-zookeeper-data:
+  dolphinscheduler-zookeeper-datalog:
+  dolphinscheduler-worker-data:
+  dolphinscheduler-logs:
+  dolphinscheduler-shared-local:
+  dolphinscheduler-resource-local:

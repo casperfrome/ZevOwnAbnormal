@@ -1,0 +1,104 @@
+from __future__ import annotations
+
+import json
+import time
+
+import httpx
+
+
+class FeishuError(RuntimeError):
+    pass
+
+
+class FeishuConfigurationError(RuntimeError):
+    pass
+
+
+class FeishuClient:
+    def __init__(self, app_id: str, app_secret: str, transport=None):
+        self.app_id = app_id
+        self.app_secret = app_secret
+        self._client = httpx.Client(base_url="https://open.feishu.cn", timeout=10, transport=transport)
+        self._token = ""
+        self._token_expires_at = 0.0
+
+    def close(self):
+        self._client.close()
+
+    @staticmethod
+    def _response_body(response: httpx.Response, operation: str) -> dict:
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise FeishuError(f"{operation}: 飞书返回了无效 JSON") from exc
+        if not isinstance(body, dict):
+            raise FeishuError(f"{operation}: 飞书返回格式无效")
+        return body
+
+    @classmethod
+    def _ensure_success(cls, response: httpx.Response, operation: str) -> None:
+        if response.is_success:
+            return
+        body = cls._response_body(response, operation)
+        message = body.get("msg") or f"HTTP {response.status_code}"
+        code = body.get("code")
+        suffix = f" (code: {code})" if code is not None else ""
+        raise FeishuError(f"{operation}: {message}{suffix}")
+
+    def _tenant_token(self) -> str:
+        if self._token and time.monotonic() < self._token_expires_at:
+            return self._token
+        response = self._client.post(
+            "/open-apis/auth/v3/tenant_access_token/internal/",
+            json={"app_id": self.app_id, "app_secret": self.app_secret},
+        )
+        self._ensure_success(response, "获取 tenant_access_token 失败")
+        body = self._response_body(response, "获取 tenant_access_token 失败")
+        token = body.get("tenant_access_token")
+        if body.get("code") != 0 or not isinstance(token, str) or not token:
+            raise FeishuError(f"获取 tenant_access_token 失败: {body.get('msg', body)}")
+        try:
+            expire = int(body.get("expire", 7200))
+        except (TypeError, ValueError) as exc:
+            raise FeishuError("获取 tenant_access_token 失败: expire 格式无效") from exc
+        self._token = token
+        self._token_expires_at = time.monotonic() + max(expire - 300, 60)
+        return self._token
+
+    def send_text(self, receive_id_type: str, recipient: str, text: str) -> str:
+        token = self._tenant_token()
+        response = self._client.post(
+            "/open-apis/im/v1/messages",
+            params={"receive_id_type": receive_id_type},
+            headers={"Authorization": f"Bearer {token}"},
+            json={"receive_id": recipient, "msg_type": "text", "content": json.dumps({"text": text}, ensure_ascii=False)},
+        )
+        self._ensure_success(response, "发送飞书消息失败")
+        body = self._response_body(response, "发送飞书消息失败")
+        if body.get("code") != 0:
+            raise FeishuError(f"发送飞书消息失败: {body.get('msg', body)}")
+        message_id = body.get("data", {}).get("message_id") if isinstance(body.get("data"), dict) else None
+        if not isinstance(message_id, str) or not message_id:
+            raise FeishuError("发送飞书消息失败: 飞书响应缺少 message_id")
+        return message_id
+
+
+def send_configured_text(
+    app_id: str,
+    app_secret: str,
+    receive_id_type: str,
+    recipient: str,
+    text: str,
+    *,
+    client: FeishuClient | None = None,
+) -> str:
+    if not app_id or not app_secret:
+        raise FeishuConfigurationError("未配置飞书 App ID/App Secret")
+
+    owns_client = client is None
+    active_client = client or FeishuClient(app_id, app_secret)
+    try:
+        return active_client.send_text(receive_id_type, recipient, text)
+    finally:
+        if owns_client:
+            active_client.close()
