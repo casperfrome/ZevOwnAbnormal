@@ -111,6 +111,7 @@ window.RecordsModule = (function () {
         tab.classList.add('active');
         state.statusFilter = tab.dataset.status;
         state.page = 1;
+        state.selected.clear();
         renderList();
       });
     });
@@ -137,9 +138,9 @@ window.RecordsModule = (function () {
       <div class="toolbar-divider"></div>
       <span class="text-xs text-muted" id="rec-count-text"></span>
     `;
-    document.getElementById('rec-search').addEventListener('input', (e) => { state.search = e.target.value; state.page = 1; renderList(); });
-    document.getElementById('rec-severity-filter').addEventListener('change', (e) => { state.severityFilter = e.target.value; state.page = 1; renderList(); });
-    document.getElementById('rec-rule-filter').addEventListener('change', (e) => { state.ruleFilter = e.target.value; state.page = 1; renderList(); });
+    document.getElementById('rec-search').addEventListener('input', (e) => { state.search = e.target.value; state.page = 1; state.selected.clear(); renderList(); });
+    document.getElementById('rec-severity-filter').addEventListener('change', (e) => { state.severityFilter = e.target.value; state.page = 1; state.selected.clear(); renderList(); });
+    document.getElementById('rec-rule-filter').addEventListener('change', (e) => { state.ruleFilter = e.target.value; state.page = 1; state.selected.clear(); renderList(); });
   }
 
   function getFiltered() {
@@ -178,9 +179,11 @@ window.RecordsModule = (function () {
           severity: state.severityFilter === 'all' ? null : state.severityFilter,
           ruleId: state.ruleFilter === 'all' ? null : state.ruleFilter,
           search: state.search,
+          sortKey: state.sortKey,
+          sortOrder: state.sortDir,
         });
         if (requestSequence !== state.requestSequence) return;
-        all = getFiltered();
+        all = result.items;
         total = result.total;
         pageItems = all;
       } catch (error) {
@@ -197,8 +200,13 @@ window.RecordsModule = (function () {
       pageItems = all.slice((state.page - 1) * state.pageSize, state.page * state.pageSize);
     }
     const totalPages = Math.max(1, Math.ceil(total / state.pageSize));
-    if (state.page > totalPages) state.page = totalPages;
-    const selectedRecords = Store.getRecords().filter(record => state.selected.has(record.id));
+    if (state.page > totalPages) {
+      state.page = totalPages;
+      state.selected.clear();
+      return renderList();
+    }
+    const selectedRecords = pageItems.filter(record => state.selected.has(record.id));
+    const selectedIds = selectedRecords.map(record => record.id);
 
     const countText = document.getElementById('rec-count-text');
     if (countText) countText.textContent = `共 ${total} 条记录`;
@@ -223,7 +231,7 @@ window.RecordsModule = (function () {
         <table class="data-table">
           <thead>
             <tr>
-              <th style="width:36px;"><label class="checkbox"><input type="checkbox" id="rec-select-all" ${state.selected.size === pageItems.length && pageItems.length > 0 ? 'checked' : ''} /><span class="checkbox-box">${Icon.check({ size: 12 })}</span></label></th>
+              <th style="width:36px;"><label class="checkbox"><input type="checkbox" id="rec-select-all" ${pageItems.length > 0 && pageItems.every(r => state.selected.has(r.id)) ? 'checked' : ''} /><span class="checkbox-box">${Icon.check({ size: 12 })}</span></label></th>
               <th>异常</th>
               <th class="sortable" data-sort="severity"><span class="th-sort">严重程度 ${sortIcon('severity')}</span></th>
               <th>触发规则</th>
@@ -269,10 +277,10 @@ window.RecordsModule = (function () {
           </tbody>
         </table>
       </div>
-      ${state.selected.size > 0 ? `
+      ${selectedIds.length > 0 ? `
         <div class="table-footer" style="background: var(--color-primary-soft); border-color: var(--color-primary-line);">
           <div class="flex items-center gap-3">
-            <span class="text-sm" style="color: var(--color-primary-hover);">已选择 <strong>${state.selected.size}</strong> 项</span>
+            <span class="text-sm" style="color: var(--color-primary-hover);">已选择 <strong>${selectedIds.length}</strong> 项</span>
             <button class="btn btn-ghost btn-sm" id="rec-clear-sel">取消</button>
           </div>
           <div class="flex items-center gap-2">
@@ -290,6 +298,8 @@ window.RecordsModule = (function () {
         const key = th.dataset.sort;
         if (state.sortKey === key) state.sortDir = state.sortDir === 'asc' ? 'desc' : 'asc';
         else { state.sortKey = key; state.sortDir = 'desc'; }
+        state.page = 1;
+        state.selected.clear();
         renderList();
       });
     });
@@ -321,10 +331,10 @@ window.RecordsModule = (function () {
     tableEl.querySelectorAll('[data-bulk]').forEach(btn => {
       btn.addEventListener('click', async () => {
         const action = btn.dataset.bulk;
-        if (action === 'export') { UI.toast({ type: 'success', title: '导出已开始', desc: `${state.selected.size} 条记录 · CSV` }); return; }
+        if (action === 'export') { UI.toast({ type: 'success', title: '导出已开始', desc: `${selectedIds.length} 条记录 · CSV` }); return; }
         try {
-          await Store.bulkUpdateRecords([...state.selected], action);
-          UI.toast({ type: 'success', title: '已批量更新', desc: `${state.selected.size} 条记录 → ${action === 'resolved' ? '已解决' : '处理中'}` });
+          await Store.bulkUpdateRecords(selectedIds, action);
+          UI.toast({ type: 'success', title: '已批量更新', desc: `${selectedIds.length} 条记录 → ${action === 'resolved' ? '已解决' : '处理中'}` });
           state.selected.clear(); renderList(); renderStats(); renderTabs();
         } catch (error) { UI.toast({ type: 'error', title: '批量更新失败', desc: error.message }); }
       });
@@ -332,7 +342,7 @@ window.RecordsModule = (function () {
 
     // Pagination
     tableEl.querySelectorAll('.page-btn[data-page]').forEach(btn => {
-      btn.addEventListener('click', () => { state.page = parseInt(btn.dataset.page); renderList(); });
+      btn.addEventListener('click', () => { state.page = parseInt(btn.dataset.page); state.selected.clear(); renderList(); });
     });
   }
 

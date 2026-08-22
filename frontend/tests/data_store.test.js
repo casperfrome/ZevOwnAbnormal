@@ -210,6 +210,54 @@ test('updating one record refreshes authoritative overview counts immediately', 
   assert.equal(requests.filter(item => item.url === '/api/v1/overview').length, 2);
 });
 
+test('a successful record mutation remains successful when the overview refresh fails', async () => {
+  let overviewRequests = 0;
+  const apiRecord = status => ({
+    id: 'record-1', rule_id: 'rule-1', rule_name: 'GMV check', dataset_name: 'Orders',
+    severity: 'critical', status, business_key: {}, row_details: { gmv: 999 },
+    matched_conditions: [{ field: 'gmv', operator: 'gt', actual: 999 }], hit_count: 1,
+    first_seen_at: '2026-08-22T09:00:00', last_seen_at: '2026-08-22T09:10:00',
+    resolved_at: status === 'resolved' ? '2026-08-22T09:20:00' : null, assignee: null,
+    description: '', validation_deadline: null, timed_out_at: status === 'timed_out' ? '2026-08-22T09:15:00' : null,
+    resolution_source: status === 'resolved' ? 'manual' : null,
+    resolved_by_user_id: status === 'resolved' ? 'admin' : null, delivery_status: 'none',
+  });
+  const context = {
+    window: {},
+    fetch: async (url, options = {}) => {
+      let body;
+      if (url === '/api/v1/auth/me') body = { username: 'admin' };
+      else if (url === '/api/v1/datasources' || url === '/api/v1/datasets' || url === '/api/v1/rules') body = [];
+      else if (url === '/api/v1/anomalies?page=1&page_size=10') body = { items: [apiRecord('timed_out')], total: 1, page: 1, page_size: 10 };
+      else if (url === '/api/v1/anomalies/record-1/status') body = apiRecord('resolved');
+      else if (url === '/api/v1/overview') {
+        overviewRequests += 1;
+        if (overviewRequests > 1) return { ok: false, status: 503, statusText: 'Unavailable', json: async () => ({ detail: 'overview offline' }) };
+        body = {
+          stats: {
+            pending_records: 0, processing_records: 0, timed_out_records: 1,
+            resolved_records: 0, critical_anomalies: 1, active_rules: 0,
+            total_rules: 0, online_datasources: 0, total_datasources: 0, total_datasets: 0,
+          }, recent_anomalies: [], top_rules: [],
+        };
+      } else throw new Error(`unexpected request ${url}`);
+      return { ok: true, status: 200, json: async () => body };
+    },
+  };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'scripts', 'data.js'), 'utf8'), context);
+  const store = context.window.Store;
+  await store.init();
+
+  const updated = await store.updateRecord('record-1', { status: 'resolved' });
+
+  assert.equal(updated.status, 'resolved');
+  assert.equal(store.getRecord('record-1').status, 'resolved');
+  assert.equal(store.getStats().timedOutRecords, 0);
+  assert.equal(store.getStats().resolvedToday, 1);
+  assert.equal(store.getStats().criticalAnomalies, 0);
+  assert.equal(store.getStats().unresolvedRecords, 0);
+});
+
 test('record pages are loaded from the backend with status and pagination filters', async () => {
   const requests = [];
   const context = {
@@ -239,9 +287,10 @@ test('record pages are loaded from the backend with status and pagination filter
 
   const result = await store.loadRecordsPage({
     page: 3, pageSize: 10, status: 'timed_out', severity: 'high', ruleId: 'rule-1', search: 'GMV',
+    sortKey: 'severity', sortOrder: 'asc',
   });
 
-  assert.equal(requests[0].url, '/api/v1/anomalies?page=3&page_size=10&status_filter=timed_out&severity=high&rule_id=rule-1&search=GMV');
+  assert.equal(requests[0].url, '/api/v1/anomalies?page=3&page_size=10&status_filter=timed_out&severity=high&rule_id=rule-1&search=GMV&sort_key=severity&sort_order=asc');
   assert.equal(result.total, 27);
   assert.equal(result.page, 3);
   assert.equal(result.pageSize, 10);

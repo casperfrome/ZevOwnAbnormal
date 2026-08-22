@@ -99,6 +99,8 @@ window.Store = (function () {
       ['severity', filters.severity],
       ['rule_id', filters.ruleId],
       ['search', filters.search],
+      ['sort_key', filters.sortKey],
+      ['sort_order', filters.sortOrder],
     ].filter(([, value]) => value !== null && value !== undefined && value !== '');
     const query = entries.map(([key, value]) => `${key}=${encodeURIComponent(value)}`).join('&');
     const result = await request(`/anomalies?${query}`);
@@ -125,6 +127,24 @@ window.Store = (function () {
   async function refreshOverview() {
     state.overview = await request('/overview');
     return state.overview;
+  }
+
+  function applyOverviewRecordTransition(previous, next) {
+    const stats = state.overview?.stats;
+    if (!stats || !previous || previous.status === next.status) return;
+    const countKeys = {
+      pending: 'pending_records', processing: 'processing_records',
+      timed_out: 'timed_out_records', resolved: 'resolved_records',
+    };
+    const previousKey = countKeys[previous.status];
+    const nextKey = countKeys[next.status];
+    if (previousKey && Number.isFinite(stats[previousKey])) stats[previousKey] = Math.max(0, stats[previousKey] - 1);
+    if (nextKey && Number.isFinite(stats[nextKey])) stats[nextKey] += 1;
+    const wasUnresolved = previous.status !== 'resolved';
+    const isUnresolved = next.status !== 'resolved';
+    if (next.severity === 'critical' && wasUnresolved !== isUnresolved && Number.isFinite(stats.critical_anomalies)) {
+      stats.critical_anomalies = Math.max(0, stats.critical_anomalies + (isUnresolved ? 1 : -1));
+    }
   }
 
   async function init() {
@@ -200,8 +220,10 @@ window.Store = (function () {
     updateRecord: async (id, data) => {
       const item = mapRecord(await request(`/anomalies/${id}/status`, { method: 'PATCH', body: JSON.stringify({ status: data.status, assignee: data.assignee }) }));
       const index = state.records.findIndex(x => x.id === id);
+      const previous = index >= 0 ? state.records[index] : null;
       if (index >= 0) state.records[index] = item;
-      await refreshOverview();
+      applyOverviewRecordTransition(previous, item);
+      try { await refreshOverview(); } catch (_) {}
       return item;
     },
     bulkUpdateRecords: async (ids, status) => { await request('/anomalies/bulk-status', { method: 'POST', body: JSON.stringify({ ids, status }) }); await refresh(); },

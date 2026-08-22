@@ -1,10 +1,11 @@
 import csv
 import io
+from typing import Literal
 
 import httpx
 import jwt
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
-from sqlalchemy import select
+from sqlalchemy import String, case, cast, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -597,9 +598,20 @@ def list_anomalies(
     severity: str | None = None,
     rule_id: str | None = None,
     search: str | None = None,
+    sort_key: Literal["occurredAt", "severity"] = "occurredAt",
+    sort_order: Literal["asc", "desc"] = "desc",
     session: Session = Depends(get_session),
 ):
-    query = select(AnomalyRecord).order_by(AnomalyRecord.last_seen_at.desc())
+    severity_rank = case(
+        (AnomalyRecord.severity == "critical", 4),
+        (AnomalyRecord.severity == "high", 3),
+        (AnomalyRecord.severity == "medium", 2),
+        (AnomalyRecord.severity == "low", 1),
+        else_=0,
+    )
+    sort_column = severity_rank if sort_key == "severity" else AnomalyRecord.first_seen_at
+    ordering = sort_column.asc() if sort_order == "asc" else sort_column.desc()
+    query = select(AnomalyRecord)
     if status_filter:
         query = query.where(AnomalyRecord.status == status_filter)
     if severity:
@@ -607,7 +619,12 @@ def list_anomalies(
     if rule_id:
         query = query.where(AnomalyRecord.rule_id == rule_id)
     if search:
-        query = query.where(AnomalyRecord.rule_name.contains(search))
+        query = query.where(or_(
+            AnomalyRecord.rule_name.contains(search),
+            AnomalyRecord.dataset_name.contains(search),
+            cast(AnomalyRecord.matched_conditions, String).contains(search),
+        ))
+    query = query.order_by(ordering, AnomalyRecord.id.asc())
     all_items = list(session.scalars(query))
     start = max(page - 1, 0) * min(max(page_size, 1), 100)
     size = min(max(page_size, 1), 100)

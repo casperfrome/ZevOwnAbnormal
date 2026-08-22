@@ -324,6 +324,7 @@ test('record tabs use overview totals and request status-filtered backend pages'
   assert.equal(await page.evaluate(() => window.recordQueries.length), 1);
   assert.deepEqual(await page.evaluate(() => window.recordQueries[0]), {
     page: 1, pageSize: 10, status: null, severity: null, ruleId: null, search: '',
+    sortKey: 'occurredAt', sortOrder: 'desc',
   });
   assert.equal(await page.locator('#cnt-all').textContent(), '70');
   assert.equal(await page.locator('#cnt-pending').textContent(), '12');
@@ -339,7 +340,101 @@ test('record tabs use overview totals and request status-filtered backend pages'
   await page.waitForFunction(() => window.recordQueries.length === 3);
   assert.deepEqual(await page.evaluate(() => window.recordQueries[2]), {
     page: 2, pageSize: 10, status: 'timed_out', severity: null, ruleId: null, search: '',
+    sortKey: 'occurredAt', sortOrder: 'desc',
   });
+  assert.deepEqual(pageErrors, []);
+});
+
+test('selection is scoped to the current server result and never leaks into a later bulk request', async t => {
+  const { page, pageErrors } = await withPage(t, async page => {
+    await page.evaluate(() => {
+      const makeRecord = (id, ruleName) => ({
+        id, ruleId: 'rule-1', ruleName, datasetName: 'Orders', severity: 'high',
+        status: 'pending', occurredAt: '2026-08-22T09:00:00', field: 'amount',
+        value: 999, expected: 'gt', assignee: null,
+      });
+      window.currentPageRecords = [];
+      window.bulkCalls = [];
+      window.Store = {
+        getStats: () => ({ pendingRecords: 2, processingRecords: 0, timedOutRecords: 0, resolvedToday: 0, criticalAnomalies: 0 }),
+        getRecords: () => window.currentPageRecords,
+        getRules: () => [],
+        loadRecordsPage: async query => {
+          window.currentPageRecords = query.search
+            ? [makeRecord('record-new', 'new rule')]
+            : [makeRecord('record-old', 'old rule')];
+          return { items: window.currentPageRecords, total: 1, page: 1, pageSize: 10 };
+        },
+        bulkUpdateRecords: async (ids, status) => { window.bulkCalls.push({ ids, status }); },
+        refresh: async () => {}, exportUrl: '/export',
+      };
+    });
+    await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'records.js') });
+    await page.evaluate(() => RecordsModule.render(document.getElementById('content'), {
+      actionsEl: document.getElementById('actions'), navigate: () => {},
+    }));
+  });
+
+  await page.locator('[data-id="record-old"].rec-row-check').check();
+  await page.locator('#rec-search').fill('new');
+  await page.locator('[data-id="record-new"].rec-row-check').waitFor();
+  assert.equal(await page.locator('#rec-clear-sel').count(), 0, 'changing the result set clears old selection');
+
+  await page.locator('[data-id="record-new"].rec-row-check').check();
+  await page.click('[data-bulk="resolved"]');
+  await page.waitForFunction(() => window.bulkCalls.length === 1);
+  assert.deepEqual(await page.evaluate(() => window.bulkCalls[0]), {
+    ids: ['record-new'], status: 'resolved',
+  });
+  assert.deepEqual(pageErrors, []);
+});
+
+test('resolving the final item on the final page refetches the nearest valid page', async t => {
+  const { page, pageErrors } = await withPage(t, async page => {
+    await page.evaluate(() => {
+      const makeRecord = (id, status) => ({
+        id, ruleId: 'rule-1', ruleName: 'GMV check', datasetName: 'Orders', severity: 'high',
+        status, occurredAt: '2026-08-22T09:00:00', field: 'gmv', value: 999,
+        expected: 'gt', assignee: null,
+      });
+      window.recordQueries = [];
+      window.currentPageRecords = [];
+      window.finalResolved = false;
+      window.Store = {
+        getStats: () => ({ pendingRecords: 10, processingRecords: 0, timedOutRecords: window.finalResolved ? 0 : 1, resolvedToday: window.finalResolved ? 1 : 0, criticalAnomalies: 0 }),
+        getRecords: () => window.currentPageRecords,
+        getRecord: id => window.currentPageRecords.find(record => record.id === id),
+        getRules: () => [],
+        loadRecordsPage: async query => {
+          window.recordQueries.push({ ...query });
+          if (query.page === 2 && !window.finalResolved) {
+            window.currentPageRecords = [makeRecord('record-final', 'timed_out')];
+            return { items: window.currentPageRecords, total: 11, page: 2, pageSize: 10 };
+          }
+          if (query.page === 2) {
+            window.currentPageRecords = [];
+            return { items: [], total: 10, page: 2, pageSize: 10 };
+          }
+          window.currentPageRecords = [makeRecord('record-first-page', 'pending')];
+          return { items: window.currentPageRecords, total: window.finalResolved ? 10 : 11, page: 1, pageSize: 10 };
+        },
+        updateRecord: async () => { window.finalResolved = true; },
+        refresh: async () => {}, exportUrl: '/export',
+      };
+    });
+    await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'records.js') });
+    await page.evaluate(() => RecordsModule.render(document.getElementById('content'), {
+      actionsEl: document.getElementById('actions'), navigate: () => {},
+    }));
+  });
+
+  await page.locator('.page-btn[data-page="2"]:not([aria-label])').click();
+  await page.locator('[data-id="record-final"][data-action="status"]').click();
+  await page.locator('[role="dialog"] [data-status="resolved"]').click();
+  await page.locator('text=record-first-page').waitFor();
+
+  assert.deepEqual(await page.evaluate(() => window.recordQueries.map(query => query.page)), [1, 2, 2, 1]);
+  assert.equal(await page.locator('[data-id="record-final"].rec-row-check').count(), 0);
   assert.deepEqual(pageErrors, []);
 });
 
