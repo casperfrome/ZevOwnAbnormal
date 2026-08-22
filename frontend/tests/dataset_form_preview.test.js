@@ -5,6 +5,38 @@ const { chromium } = require('playwright');
 
 const frontendRoot = path.join(__dirname, '..');
 
+test('opening an existing dataset directly shows its query preview', async t => {
+  const browser = await chromium.launch({
+    headless: true,
+    executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+  });
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  await page.setContent('<!doctype html><html><body><div id="toast-container"></div></body></html>');
+  await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'icons.js') });
+  await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'components.js') });
+  await page.evaluate(() => {
+    const source = { id: 'source-1', name: '经营 ADS', type: 'starrocks' };
+    const dataset = {
+      id: 'dataset-1', name: '门店日经营', datasourceId: source.id, datasourceName: source.name,
+      description: '', sql: 'SELECT store_id FROM store_daily LIMIT 10', rowCount: 12,
+      fields: [{ name: 'store_id', type: 'VARCHAR' }],
+    };
+    window.Store = {
+      getDataset: id => id === dataset.id ? dataset : null,
+      getDatasource: id => id === source.id ? source : null,
+      executeDatasetSql: async () => ({ fields: dataset.fields, rows: [], elapsed_ms: 1 }),
+    };
+  });
+  await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'dataset.js') });
+
+  await page.evaluate(() => DatasetModule.openItem('dataset-1'));
+
+  assert.equal(await page.getByRole('dialog').count(), 1);
+  assert.match(await page.getByRole('dialog').innerText(), /门店日经营/);
+  assert.match(await page.locator('.sql-textarea').inputValue(), /SELECT store_id/);
+});
+
 test('running StarRocks SQL in the dataset form renders the returned preview rows', async t => {
   const browser = await chromium.launch({
     headless: true,

@@ -5,7 +5,7 @@ const { chromium } = require('playwright');
 
 const frontendRoot = path.join(__dirname, '..');
 
-test('editing an existing rule renders its condition and can add another', async t => {
+test('opening an existing rule directly renders its condition and can add another', async t => {
   const browser = await chromium.launch({
     headless: true,
     executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
@@ -72,7 +72,7 @@ test('editing an existing rule renders its condition and can add another', async
     });
   });
 
-  await page.click('[data-action="edit"]');
+  await page.evaluate(() => RulesModule.openItem('rule-1'));
   assert.equal(
     await page.locator('.condition-row').count(),
     1,

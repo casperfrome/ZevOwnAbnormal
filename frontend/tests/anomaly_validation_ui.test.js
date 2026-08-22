@@ -10,6 +10,7 @@ async function withPage(t, setup) {
   const browser = await chromium.launch({ headless: true, executablePath });
   t.after(() => browser.close());
   const page = await browser.newPage();
+  page.setDefaultTimeout(2000);
   const pageErrors = [];
   page.on('pageerror', error => pageErrors.push(error.message));
   await page.setContent('<!doctype html><html><body><div id="toast-container"></div><div id="actions"></div><div id="content"></div></body></html>');
@@ -407,8 +408,13 @@ test('record tabs use overview totals and request status-filtered backend pages'
   assert.equal(await page.locator('#cnt-timed-out').textContent(), '27');
   assert.equal(await page.locator('#cnt-resolved').textContent(), '23');
 
-  await page.click('[data-status="timed_out"]');
+  const allTab = page.getByRole('tab', { name: /^全部/ });
+  const timedOutTab = page.getByRole('tab', { name: /^已超时/ });
+  assert.equal(await allTab.getAttribute('aria-selected'), 'true');
+  await timedOutTab.click();
   await page.waitForFunction(() => window.recordQueries.length === 2);
+  assert.equal(await allTab.getAttribute('aria-selected'), 'false');
+  assert.equal(await timedOutTab.getAttribute('aria-selected'), 'true');
   assert.equal(await page.locator('#rec-count-text').textContent(), '共 27 条记录');
   assert.equal(await page.evaluate(() => window.recordQueries[1].status), 'timed_out');
   await page.click('.page-btn[data-page="2"]');
@@ -417,6 +423,176 @@ test('record tabs use overview totals and request status-filtered backend pages'
     page: 2, pageSize: 10, status: 'timed_out', severity: null, ruleId: null, search: '',
     sortKey: 'occurredAt', sortOrder: 'desc',
   });
+  assert.equal(await timedOutTab.getAttribute('aria-controls'), 'rec-table');
+  assert.equal(await page.locator('#rec-table').getAttribute('role'), 'tabpanel');
+  assert.equal(await page.locator('#rec-table').getAttribute('aria-labelledby'), await timedOutTab.getAttribute('id'));
+  await timedOutTab.press('End');
+  await page.waitForFunction(() => window.recordQueries.length === 4);
+  assert.equal(await page.getByRole('tab', { name: /^已解决/ }).getAttribute('aria-selected'), 'true');
+  await page.getByRole('tab', { name: /^已解决/ }).press('Home');
+  await page.waitForFunction(() => window.recordQueries.length === 5);
+  assert.equal(await allTab.getAttribute('aria-selected'), 'true');
+  assert.deepEqual(pageErrors, []);
+});
+
+test('record KPI cards apply their corresponding status and severity filters', async t => {
+  const { page, pageErrors } = await withPage(t, async page => {
+    await page.evaluate(() => {
+      const record = {
+        id: 'record-1', ruleId: 'rule-1', ruleName: 'GMV check', datasetName: 'Orders', severity: 'critical',
+        status: 'pending', occurredAt: '2026-08-22T09:00:00', field: 'gmv', value: 999,
+        expected: 'gt', assignee: null,
+      };
+      window.recordQueries = [];
+      window.criticalCountQueries = [];
+      window.Store = {
+        getStats: () => ({
+          pendingRecords: 12, processingRecords: 8, timedOutRecords: 2,
+          resolvedToday: 23, criticalAnomalies: 4,
+        }),
+        getRecords: () => [record],
+        getRules: () => [{ id: 'rule-1', name: 'GMV check' }],
+        loadRecordsPage: async query => {
+          window.recordQueries.push({ ...query });
+          return { items: [record], total: 1, page: 1, pageSize: 10 };
+        },
+        peekRecordsPage: async query => {
+          window.criticalCountQueries.push({ ...query });
+          return { items: [], total: 7, page: 1, pageSize: query.pageSize };
+        },
+        refresh: async () => {}, exportUrl: '/export',
+      };
+    });
+    await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'records.js') });
+    await page.evaluate(() => RecordsModule.render(document.getElementById('content'), {
+      actionsEl: document.getElementById('actions'), navigate: () => {},
+    }));
+  });
+
+  await page.getByRole('button', { name: /筛选未处理异常.*12/ }).click();
+  await page.waitForTimeout(20);
+  assert.equal(await page.getByRole('tab', { name: /^未处理/ }).getAttribute('aria-selected'), 'true');
+  assert.equal(await page.evaluate(() => window.recordQueries.at(-1).status), 'pending');
+
+  await page.getByRole('button', { name: /筛选严重异常.*7/ }).click();
+  await page.waitForTimeout(20);
+  assert.equal(await page.getByRole('tab', { name: /^全部/ }).getAttribute('aria-selected'), 'true');
+  assert.equal(await page.locator('#rec-severity-filter').inputValue(), 'critical');
+  assert.equal(await page.evaluate(() => window.recordQueries.at(-1).severity), 'critical');
+  assert.equal(await page.evaluate(() => window.recordQueries.at(-1).status), null);
+  assert.deepEqual(await page.evaluate(() => window.criticalCountQueries[0]), {
+    severity: 'critical', page: 1, pageSize: 1,
+  });
+  assert.deepEqual(pageErrors, []);
+});
+
+test('late critical KPI counts preserve focus and do not update after records unmounts', async t => {
+  const { page, pageErrors } = await withPage(t, async page => {
+    await page.evaluate(() => {
+      let resolveCount;
+      window.resolveCriticalCount = total => resolveCount({ items: [], total, page: 1, pageSize: 1 });
+      window.Store = {
+        getStats: () => ({ pendingRecords: 1, processingRecords: 0, timedOutRecords: 0, resolvedToday: 0, criticalAnomalies: 0 }),
+        getRecords: () => [], getRules: () => [],
+        loadRecordsPage: async () => ({ items: [], total: 0, page: 1, pageSize: 10 }),
+        peekRecordsPage: () => new Promise(resolve => { resolveCount = resolve; }),
+        refresh: async () => {}, exportUrl: '/export',
+      };
+    });
+    await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'records.js') });
+    await page.evaluate(() => RecordsModule.render(document.getElementById('content'), {
+      actionsEl: document.getElementById('actions'), navigate: () => {},
+    }));
+  });
+
+  const criticalCard = page.getByRole('button', { name: /筛选严重异常，正在统计数量/ });
+  await criticalCard.focus();
+  await page.evaluate(() => window.resolveCriticalCount(9));
+  await page.getByRole('button', { name: /筛选严重异常，共 9 条/ }).waitFor();
+  assert.equal(await page.evaluate(() => document.activeElement?.dataset.filterSeverity), 'critical');
+
+  await page.evaluate(() => {
+    RecordsModule.render(document.getElementById('content'), {
+      actionsEl: document.getElementById('actions'), navigate: () => {},
+    });
+    document.getElementById('content').innerHTML = '<main id="replacement">其他模块</main>';
+    window.resolveCriticalCount(11);
+  });
+  await page.waitForTimeout(20);
+  assert.equal(await page.locator('#replacement').textContent(), '其他模块');
+  assert.deepEqual(pageErrors, []);
+});
+
+test('mobile records render as readable summary cards that open the existing detail drawer', async t => {
+  const { page, pageErrors } = await withPage(t, async page => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    for (const file of ['base.css', 'layout.css', 'components.css', 'pages.css']) {
+      await page.addStyleTag({ path: path.join(frontendRoot, 'styles', file) });
+    }
+    await page.evaluate(() => {
+      const record = {
+        id: 'record-mobile', ruleId: 'rule-1', ruleName: '门店 GMV 异常', datasetName: '门店日经营',
+        severity: 'critical', status: 'pending', occurredAt: '2026-08-22 09:00', field: 'gmv', value: 999,
+        expected: 'gt 500', assignee: '沈一鸣', description: '检查门店营业额', validationDeadline: null,
+        timedOutAt: null, resolutionSource: null, resolvedByUserId: null, businessKey: {}, details: { gmv: 999 },
+        hitCount: 1, lastSeenAt: '2026-08-22 09:00', deliveries: [], validationRequests: [],
+        validationSubmission: null, timeline: [],
+      };
+      window.Store = {
+        getStats: () => ({ pendingRecords: 1, processingRecords: 0, timedOutRecords: 0, resolvedToday: 0, criticalAnomalies: 1 }),
+        getRecords: () => [record], getRules: () => [{ id: 'rule-1', name: '门店 GMV 异常' }],
+        getRecord: id => id === record.id ? record : null, getRule: () => null,
+        loadRecord: async id => id === record.id ? record : Promise.reject(new Error('not found')),
+        loadRecordsPage: async () => ({ items: [record], total: 1, page: 1, pageSize: 10 }),
+        refresh: async () => {}, exportUrl: '/export',
+      };
+    });
+    await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'records.js') });
+    await page.evaluate(() => RecordsModule.render(document.getElementById('content'), {
+      actionsEl: document.getElementById('actions'), navigate: () => {},
+    }));
+  });
+
+  const card = page.getByRole('button', { name: /门店 GMV 异常.*gmv.*999.*沈一鸣/ });
+  await card.waitFor();
+  assert.equal(await page.locator('.record-mobile-list').isVisible(), true);
+  assert.equal(await page.locator('.table-wrap').isVisible(), false);
+  await card.click();
+  await page.locator('.drawer').waitFor();
+  assert.match(await page.locator('.drawer').innerText(), /record-mobile/);
+  assert.deepEqual(pageErrors, []);
+});
+
+test('mobile records retain pagination after a desktop row selection', async t => {
+  const { page, pageErrors } = await withPage(t, async page => {
+    await page.setViewportSize({ width: 900, height: 800 });
+    for (const file of ['base.css', 'layout.css', 'components.css', 'pages.css']) {
+      await page.addStyleTag({ path: path.join(frontendRoot, 'styles', file) });
+    }
+    await page.evaluate(() => {
+      const record = {
+        id: 'record-selected', ruleId: 'rule-1', ruleName: 'GMV check', datasetName: 'Orders',
+        severity: 'high', status: 'pending', occurredAt: '2026-08-22 09:00', field: 'gmv', value: 999,
+        expected: 'gt 500', assignee: null,
+      };
+      window.Store = {
+        getStats: () => ({ pendingRecords: 20, processingRecords: 0, timedOutRecords: 0, resolvedToday: 0, criticalAnomalies: 0 }),
+        getRecords: () => [record], getRules: () => [],
+        loadRecordsPage: async query => ({ items: [record], total: 20, page: query.page, pageSize: query.pageSize }),
+        refresh: async () => {}, exportUrl: '/export',
+      };
+    });
+    await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'records.js') });
+    await page.evaluate(() => RecordsModule.render(document.getElementById('content'), {
+      actionsEl: document.getElementById('actions'), navigate: () => {},
+    }));
+  });
+
+  await page.locator('.rec-row-check').evaluate(input => input.click());
+  assert.equal(await page.locator('.record-mobile-pagination').count(), 1);
+  await page.setViewportSize({ width: 390, height: 844 });
+  assert.equal(await page.locator('.record-mobile-pagination').isVisible(), true);
+  assert.equal(await page.locator('.record-mobile-pagination').getByRole('button', { name: '2', exact: true }).count(), 1);
   assert.deepEqual(pageErrors, []);
 });
 
@@ -449,6 +625,10 @@ test('record search debounces rapid typing into one server request', async t => 
 
   assert.equal(await page.evaluate(() => window.recordQueries.length), 2);
   assert.equal(await page.evaluate(() => window.recordQueries.at(-1).search), 'abc');
+  await page.getByRole('button', { name: '清空搜索' }).click();
+  await page.waitForTimeout(350);
+  assert.equal(await page.locator('#rec-search').inputValue(), '');
+  assert.equal(await page.evaluate(() => window.recordQueries.at(-1).search), '');
   assert.deepEqual(pageErrors, []);
 });
 
@@ -612,13 +792,13 @@ test('production Store export on page two preserves the rendered record and its 
     }));
   });
 
-  await page.locator('text=record-page-one').waitFor();
+  await page.locator('.record-desktop-table').getByText('record-page-one', { exact: true }).waitFor();
   await page.locator('.page-btn[data-page="2"]:not([aria-label])').click();
-  await page.locator('text=record-page-two').waitFor();
+  await page.locator('.record-desktop-table').getByText('record-page-two', { exact: true }).waitFor();
   await page.click('#rec-export');
   await page.waitForFunction(() => window.exportFilters !== null);
 
-  assert.equal(await page.locator('text=record-page-two').count(), 1);
+  assert.equal(await page.locator('.record-desktop-table').getByText('record-page-two', { exact: true }).count(), 1);
   assert.deepEqual(await page.evaluate(() => Store.getRecords().map(record => record.id)), ['record-page-two']);
 
   await page.locator('[data-id="record-page-two"][data-action="status"]').click();
@@ -716,7 +896,7 @@ test('resolving the final item on the final page refetches the nearest valid pag
   await page.locator('.page-btn[data-page="2"]:not([aria-label])').click();
   await page.locator('[data-id="record-final"][data-action="status"]').click();
   await page.locator('[role="dialog"] [data-status="resolved"]').click();
-  await page.locator('text=record-first-page').waitFor();
+  await page.locator('.record-desktop-table').getByText('record-first-page', { exact: true }).waitFor();
 
   assert.deepEqual(await page.evaluate(() => window.recordQueries.map(query => query.page)), [1, 2, 2, 1]);
   assert.equal(await page.locator('[data-id="record-final"].rec-row-check').count(), 0);

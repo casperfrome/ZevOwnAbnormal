@@ -8,6 +8,7 @@ window.RecordsModule = (function () {
     search: '', statusFilter: 'all', severityFilter: 'all', ruleFilter: 'all',
     sortKey: 'occurredAt', sortDir: 'desc', page: 1, pageSize: 10,
     selected: new Set(), requestSequence: 0, searchTimer: null, total: 0,
+    criticalTotal: null, criticalCountSequence: 0, criticalCountFailed: false,
   };
 
   function renderActions(actionsEl) {
@@ -24,15 +25,15 @@ window.RecordsModule = (function () {
     contentEl.innerHTML = `
       <div class="stat-strip" id="rec-stats"></div>
       <div class="section">
-        <div class="tabs" id="rec-tabs">
-          <div class="tab active" data-status="all">全部 <span class="tab-count" id="cnt-all">0</span></div>
-          <div class="tab" data-status="pending">未处理 <span class="tab-count" id="cnt-pending">0</span></div>
-          <div class="tab" data-status="processing">处理中 <span class="tab-count" id="cnt-processing">0</span></div>
-          <div class="tab" data-status="timed_out">已超时 <span class="tab-count" id="cnt-timed-out">0</span></div>
-          <div class="tab" data-status="resolved">已解决 <span class="tab-count" id="cnt-resolved">0</span></div>
+        <div class="tabs" id="rec-tabs" role="tablist" aria-label="异常状态">
+          <button type="button" id="rec-tab-all" role="tab" class="tab" data-status="all" aria-controls="rec-table" aria-selected="false">全部 <span class="tab-count" id="cnt-all">0</span></button>
+          <button type="button" id="rec-tab-pending" role="tab" class="tab" data-status="pending" aria-controls="rec-table" aria-selected="false">未处理 <span class="tab-count" id="cnt-pending">0</span></button>
+          <button type="button" id="rec-tab-processing" role="tab" class="tab" data-status="processing" aria-controls="rec-table" aria-selected="false">处理中 <span class="tab-count" id="cnt-processing">0</span></button>
+          <button type="button" id="rec-tab-timed-out" role="tab" class="tab" data-status="timed_out" aria-controls="rec-table" aria-selected="false">已超时 <span class="tab-count" id="cnt-timed-out">0</span></button>
+          <button type="button" id="rec-tab-resolved" role="tab" class="tab" data-status="resolved" aria-controls="rec-table" aria-selected="false">已解决 <span class="tab-count" id="cnt-resolved">0</span></button>
         </div>
         <div class="toolbar" id="rec-toolbar"></div>
-        <div id="rec-table"></div>
+        <div id="rec-table" role="tabpanel" tabindex="0" aria-labelledby="rec-tab-all"></div>
       </div>
     `;
     renderStats();
@@ -50,45 +51,129 @@ window.RecordsModule = (function () {
       resolvedToday: records.filter(r => r.status === 'resolved').length,
       criticalAnomalies: records.filter(r => r.severity === 'critical' && r.status !== 'resolved').length,
     };
-    return typeof Store.getStats === 'function' ? { ...derived, ...Store.getStats() } : derived;
+    const overview = typeof Store.getStats === 'function' ? Store.getStats() : {};
+    return {
+      ...derived,
+      ...overview,
+      // The overview metric is unresolved-only. Without a server count, keep the
+      // severity card aligned with its all-status list by deriving from local data.
+      criticalAnomalies: typeof Store.peekRecordsPage === 'function'
+        ? overview.criticalAnomalies
+        : derived.criticalAnomalies,
+    };
   }
 
-  function renderStats() {
+  function renderStats({ refreshCritical = true } = {}) {
+    const statsEl = document.getElementById('rec-stats');
+    if (!statsEl) return;
     const counts = recordCounts();
     const pending = counts.pendingRecords;
     const processing = counts.processingRecords;
     const timedOut = counts.timedOutRecords;
     const resolved = counts.resolvedToday;
-    const critical = counts.criticalAnomalies;
+    const hasCriticalCountApi = typeof Store.peekRecordsPage === 'function';
+    const critical = hasCriticalCountApi ? state.criticalTotal : counts.criticalAnomalies;
+    const criticalKnown = Number.isFinite(critical);
+    const criticalLabel = criticalKnown ? critical : '—';
+    const criticalAria = criticalKnown
+      ? `筛选严重异常，共 ${critical} 条`
+      : (state.criticalCountFailed ? '筛选严重异常，数量暂不可用' : '筛选严重异常，正在统计数量');
 
-    document.getElementById('rec-stats').classList.add('five-up');
-    document.getElementById('rec-stats').innerHTML = `
-      <div class="stat-card animate-rise" style="animation-delay:60ms;${pending > 0 ? 'border-left:3px solid var(--color-accent);' : ''}">
+    statsEl.classList.add('five-up');
+    statsEl.innerHTML = `
+      <button type="button" class="stat-card stat-filter animate-rise" data-filter-status="pending" aria-label="筛选未处理异常，共 ${pending} 条" aria-pressed="false" style="animation-delay:60ms;${pending > 0 ? 'border-left:3px solid var(--color-accent);' : ''}">
         <div class="stat-card-header"><span class="stat-card-label">未处理</span><div class="stat-card-icon" style="background:var(--color-accent-soft);color:var(--color-accent);">${Icon.alert({ size: 16 })}</div></div>
         <div class="stat-card-value">${pending}</div>
         <div class="stat-card-delta ${pending > 0 ? 'down' : 'neutral'}">${pending > 0 ? '待立即处理' : '无待办'}</div>
-      </div>
-      <div class="stat-card animate-rise" style="animation-delay:120ms;">
+      </button>
+      <button type="button" class="stat-card stat-filter animate-rise" data-filter-status="processing" aria-label="筛选处理中异常，共 ${processing} 条" aria-pressed="false" style="animation-delay:120ms;">
         <div class="stat-card-header"><span class="stat-card-label">处理中</span><div class="stat-card-icon" style="background:var(--color-warning-soft);color:var(--color-warning);">${Icon.clock({ size: 16 })}</div></div>
         <div class="stat-card-value">${processing}</div>
         <div class="stat-card-delta neutral">跟进中</div>
-      </div>
-      <div class="stat-card animate-rise" style="animation-delay:180ms;">
+      </button>
+      <button type="button" class="stat-card stat-filter animate-rise" data-filter-status="timed_out" aria-label="筛选已超时异常，共 ${timedOut} 条" aria-pressed="false" style="animation-delay:180ms;">
         <div class="stat-card-header"><span class="stat-card-label">已超时</span><div class="stat-card-icon timeout-icon">${Icon.clock({ size: 16 })}</div></div>
         <div class="stat-card-value">${timedOut}</div>
         <div class="stat-card-delta ${timedOut > 0 ? 'down' : 'neutral'}">等待人工闭环</div>
-      </div>
-      <div class="stat-card animate-rise" style="animation-delay:210ms;">
+      </button>
+      <button type="button" class="stat-card stat-filter animate-rise" data-filter-status="resolved" aria-label="筛选已解决异常，共 ${resolved} 条" aria-pressed="false" style="animation-delay:210ms;">
         <div class="stat-card-header"><span class="stat-card-label">已解决</span><div class="stat-card-icon" style="background:var(--color-success-soft);color:var(--color-success);">${Icon.check({ size: 16 })}</div></div>
         <div class="stat-card-value">${resolved}</div>
         <div class="stat-card-delta up">已闭环</div>
-      </div>
-      <div class="stat-card animate-rise" style="animation-delay:270ms;${critical > 0 ? 'border-left:3px solid var(--color-danger);' : ''}">
+      </button>
+      <button type="button" class="stat-card stat-filter animate-rise" data-filter-severity="critical" aria-label="${criticalAria}" aria-pressed="false" style="animation-delay:270ms;${criticalKnown && critical > 0 ? 'border-left:3px solid var(--color-danger);' : ''}">
         <div class="stat-card-header"><span class="stat-card-label">严重异常</span><div class="stat-card-icon" style="background:var(--color-danger-soft);color:var(--color-danger);">${Icon.bug({ size: 16 })}</div></div>
-        <div class="stat-card-value">${critical}</div>
-        <div class="stat-card-delta ${critical > 0 ? 'down' : 'neutral'}">${critical > 0 ? '需紧急响应' : '无严重'}</div>
-      </div>
+        <div class="stat-card-value">${criticalLabel}</div>
+        <div class="stat-card-delta ${criticalKnown && critical > 0 ? 'down' : 'neutral'}">${criticalKnown ? (critical > 0 ? '需紧急响应' : '无严重') : (state.criticalCountFailed ? '统计暂不可用' : '正在统计')}</div>
+      </button>
     `;
+
+    document.querySelectorAll('#rec-stats .stat-filter').forEach(card => {
+      card.addEventListener('click', () => {
+        state.statusFilter = card.dataset.filterStatus || 'all';
+        state.severityFilter = card.dataset.filterSeverity || 'all';
+        state.page = 1;
+        state.selected.clear();
+        syncFilterUi();
+        renderList();
+      });
+    });
+    syncFilterUi();
+
+    if (refreshCritical && hasCriticalCountApi) {
+      const countSequence = ++state.criticalCountSequence;
+      state.criticalCountFailed = false;
+      Store.peekRecordsPage({ severity: 'critical', page: 1, pageSize: 1 })
+        .then(result => {
+          if (countSequence !== state.criticalCountSequence) return;
+          state.criticalTotal = result.total;
+          updateCriticalStatCard();
+        })
+        .catch(() => {
+          if (countSequence !== state.criticalCountSequence) return;
+          state.criticalTotal = null;
+          state.criticalCountFailed = true;
+          updateCriticalStatCard();
+        });
+    }
+  }
+
+  function updateCriticalStatCard() {
+    const card = document.querySelector('#rec-stats [data-filter-severity="critical"]');
+    if (!card) return;
+    const critical = state.criticalTotal;
+    const criticalKnown = Number.isFinite(critical);
+    card.setAttribute('aria-label', criticalKnown
+      ? `筛选严重异常，共 ${critical} 条`
+      : (state.criticalCountFailed ? '筛选严重异常，数量暂不可用' : '筛选严重异常，正在统计数量'));
+    card.style.borderLeft = criticalKnown && critical > 0 ? '3px solid var(--color-danger)' : '';
+    card.querySelector('.stat-card-value').textContent = criticalKnown ? critical : '—';
+    const delta = card.querySelector('.stat-card-delta');
+    delta.classList.toggle('down', criticalKnown && critical > 0);
+    delta.classList.toggle('neutral', !criticalKnown || critical <= 0);
+    delta.textContent = criticalKnown
+      ? (critical > 0 ? '需紧急响应' : '无严重')
+      : (state.criticalCountFailed ? '统计暂不可用' : '正在统计');
+  }
+
+  function syncFilterUi() {
+    document.querySelectorAll('#rec-tabs .tab').forEach(tab => {
+      const active = tab.dataset.status === state.statusFilter;
+      tab.classList.toggle('active', active);
+      tab.setAttribute('aria-selected', String(active));
+      tab.tabIndex = active ? 0 : -1;
+      if (active) document.getElementById('rec-table')?.setAttribute('aria-labelledby', tab.id);
+    });
+    document.querySelectorAll('#rec-stats .stat-filter').forEach(card => {
+      const isSeverity = !!card.dataset.filterSeverity;
+      const active = isSeverity
+        ? state.statusFilter === 'all' && state.severityFilter === card.dataset.filterSeverity
+        : state.severityFilter === 'all' && state.statusFilter === card.dataset.filterStatus;
+      card.classList.toggle('active', active);
+      card.setAttribute('aria-pressed', String(active));
+    });
+    const severity = document.getElementById('rec-severity-filter');
+    if (severity) severity.value = state.severityFilter;
   }
 
   function renderTabs() {
@@ -105,16 +190,28 @@ window.RecordsModule = (function () {
       navCount.classList.toggle('muted', unresolved === 0);
     }
 
-    document.querySelectorAll('#rec-tabs .tab').forEach(tab => {
-      tab.addEventListener('click', () => {
-        document.querySelectorAll('#rec-tabs .tab').forEach(t => t.classList.remove('active'));
-        tab.classList.add('active');
+    const tabs = [...document.querySelectorAll('#rec-tabs .tab')];
+    tabs.forEach((tab, index) => {
+      tab.onclick = () => {
         state.statusFilter = tab.dataset.status;
         state.page = 1;
         state.selected.clear();
+        syncFilterUi();
         renderList();
-      });
+      };
+      tab.onkeydown = event => {
+        let targetIndex = null;
+        if (event.key === 'ArrowRight') targetIndex = (index + 1) % tabs.length;
+        if (event.key === 'ArrowLeft') targetIndex = (index - 1 + tabs.length) % tabs.length;
+        if (event.key === 'Home') targetIndex = 0;
+        if (event.key === 'End') targetIndex = tabs.length - 1;
+        if (targetIndex === null) return;
+        event.preventDefault();
+        tabs[targetIndex].focus();
+        tabs[targetIndex].click();
+      };
     });
+    syncFilterUi();
   }
 
   function renderToolbar() {
@@ -122,7 +219,8 @@ window.RecordsModule = (function () {
     document.getElementById('rec-toolbar').innerHTML = `
       <div class="toolbar-search">
         <span class="search-icon">${Icon.search({ size: 16 })}</span>
-        <input type="text" placeholder="搜索规则、数据集、字段…" id="rec-search" value="${escapeHtml(state.search)}" />
+        <input type="search" placeholder="搜索规则、数据集、字段…" aria-label="搜索异常记录" id="rec-search" value="${escapeHtml(state.search)}" />
+        <button type="button" class="toolbar-search-clear" aria-label="清空搜索" ${state.search ? '' : 'hidden'}>${Icon.x({ size: 14 })}</button>
       </div>
       <select class="filter-select" id="rec-severity-filter">
         <option value="all">全部严重程度</option>
@@ -140,6 +238,7 @@ window.RecordsModule = (function () {
     `;
     document.getElementById('rec-search').addEventListener('input', (e) => {
       state.search = e.target.value;
+      document.querySelector('#rec-toolbar .toolbar-search-clear').hidden = !state.search;
       state.page = 1;
       state.selected.clear();
       if (state.searchTimer) window.clearTimeout(state.searchTimer);
@@ -148,7 +247,13 @@ window.RecordsModule = (function () {
         renderList();
       }, 250);
     });
-    document.getElementById('rec-severity-filter').addEventListener('change', (e) => { state.severityFilter = e.target.value; state.page = 1; state.selected.clear(); renderList(); });
+    document.querySelector('#rec-toolbar .toolbar-search-clear').addEventListener('click', () => {
+      const input = document.getElementById('rec-search');
+      input.value = '';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.focus();
+    });
+    document.getElementById('rec-severity-filter').addEventListener('change', (e) => { state.severityFilter = e.target.value; state.page = 1; state.selected.clear(); syncFilterUi(); renderList(); });
     document.getElementById('rec-rule-filter').addEventListener('change', (e) => { state.ruleFilter = e.target.value; state.page = 1; state.selected.clear(); renderList(); });
   }
 
@@ -238,7 +343,7 @@ window.RecordsModule = (function () {
     };
 
     tableEl.innerHTML = `
-      <div class="table-wrap">
+      <div class="table-wrap record-desktop-table">
         <table class="data-table">
           <thead>
             <tr>
@@ -288,8 +393,30 @@ window.RecordsModule = (function () {
           </tbody>
         </table>
       </div>
+      <div class="record-mobile-list" aria-label="异常记录摘要">
+        ${pageItems.map((r, i) => `
+          <button type="button" class="record-mobile-card animate-fade" data-action="view" data-id="${escapeHtml(r.id)}" style="animation-delay:${i * 25}ms;">
+            <span class="record-mobile-head">
+              <span class="record-mobile-severity">${UI.severityMeter(r.severity)}${UI.severityBadge(r.severity)}</span>
+              ${UI.recordStatusBadge(r.status)}
+            </span>
+            <span class="record-mobile-title">${escapeHtml(r.ruleName)}</span>
+            <span class="record-mobile-dataset">${escapeHtml(r.datasetName)} · ${escapeHtml(r.id)}</span>
+            <span class="record-mobile-value">
+              <span>${escapeHtml(r.field)}</span>
+              <strong>${escapeHtml(formatValue(r.value))}</strong>
+              <small>预期 ${escapeHtml(r.expected || '—')}</small>
+            </span>
+            <span class="record-mobile-foot">
+              <span>${Icon.clock({ size: 13 })}${escapeHtml(r.occurredAt)}</span>
+              <span>${Icon.user({ size: 13 })}${escapeHtml(r.assignee || '未分配')}</span>
+              ${Icon.chevronRight({ size: 15 })}
+            </span>
+          </button>
+        `).join('')}
+      </div>
       ${selectedIds.length > 0 ? `
-        <div class="table-footer" style="background: var(--color-primary-soft); border-color: var(--color-primary-line);">
+        <div class="table-footer desktop-only" style="background: var(--color-primary-soft); border-color: var(--color-primary-line);">
           <div class="flex items-center gap-3">
             <span class="text-sm" style="color: var(--color-primary-hover);">已选择 <strong>${selectedIds.length}</strong> 项</span>
             <button class="btn btn-ghost btn-sm" id="rec-clear-sel">取消</button>
@@ -300,7 +427,10 @@ window.RecordsModule = (function () {
             <button class="btn btn-secondary btn-sm" data-bulk="export">${Icon.download({ size: 14 })}导出选中</button>
           </div>
         </div>
-      ` : UI.renderPagination(state.page, totalPages, total, state.pageSize)}
+      ` : ''}
+      <div class="record-mobile-pagination ${selectedIds.length > 0 ? 'mobile-only' : ''}">
+        ${UI.renderPagination(state.page, totalPages, total, state.pageSize)}
+      </div>
     `;
 
     // Sort

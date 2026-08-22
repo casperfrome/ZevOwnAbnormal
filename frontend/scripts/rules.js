@@ -62,7 +62,8 @@ window.RulesModule = (function () {
     document.getElementById('r-toolbar').innerHTML = `
       <div class="toolbar-search">
         <span class="search-icon">${Icon.search({ size: 16 })}</span>
-        <input type="text" placeholder="搜索规则名称…" id="r-search" value="${escapeHtml(state.search)}" />
+        <input type="search" placeholder="搜索规则名称…" aria-label="搜索异常规则" id="r-search" value="${escapeHtml(state.search)}" />
+        <button type="button" class="toolbar-search-clear" aria-label="清空搜索" ${state.search ? '' : 'hidden'}>${Icon.x({ size: 14 })}</button>
       </div>
       <select class="filter-select" id="r-status-filter">
         <option value="all">全部状态</option>
@@ -73,7 +74,10 @@ window.RulesModule = (function () {
       <div class="toolbar-divider"></div>
       <span class="text-xs text-muted" id="r-count-text"></span>
     `;
-    document.getElementById('r-search').addEventListener('input', (e) => { state.search = e.target.value; state.page = 1; renderList(); });
+    document.getElementById('r-search').addEventListener('input', (e) => { state.search = e.target.value; state.page = 1; document.querySelector('#r-toolbar .toolbar-search-clear').hidden = !state.search; renderList(); });
+    document.querySelector('#r-toolbar .toolbar-search-clear').addEventListener('click', () => {
+      const input = document.getElementById('r-search'); input.value = ''; input.dispatchEvent(new Event('input', { bubbles: true })); input.focus();
+    });
     document.getElementById('r-status-filter').addEventListener('change', (e) => { state.statusFilter = e.target.value; state.page = 1; renderList(); });
   }
 
@@ -718,5 +722,5 @@ window.RulesModule = (function () {
     else renderConditions();
   }
 
-  return { render };
+  return { render, openItem: openForm };
 })();

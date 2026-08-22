@@ -80,7 +80,8 @@ window.DatasourceModule = (function () {
     document.getElementById('ds-toolbar').innerHTML = `
       <div class="toolbar-search">
         <span class="search-icon">${Icon.search({ size: 16 })}</span>
-        <input type="text" placeholder="搜索数据源名称、主机…" id="ds-search" value="${escapeHtml(state.search)}" />
+        <input type="search" placeholder="搜索数据源名称、主机…" aria-label="搜索数据源" id="ds-search" value="${escapeHtml(state.search)}" />
+        <button type="button" class="toolbar-search-clear" aria-label="清空搜索" ${state.search ? '' : 'hidden'}>${Icon.x({ size: 14 })}</button>
       </div>
       <select class="filter-select" id="ds-type-filter">
         <option value="all">全部类型</option>
@@ -96,7 +97,10 @@ window.DatasourceModule = (function () {
       <div class="toolbar-divider"></div>
       <span class="text-xs text-muted" id="ds-count-text"></span>
     `;
-    document.getElementById('ds-search').addEventListener('input', (e) => { state.search = e.target.value; state.page = 1; renderList(); });
+    document.getElementById('ds-search').addEventListener('input', (e) => { state.search = e.target.value; state.page = 1; document.querySelector('#ds-toolbar .toolbar-search-clear').hidden = !state.search; renderList(); });
+    document.querySelector('#ds-toolbar .toolbar-search-clear').addEventListener('click', () => {
+      const input = document.getElementById('ds-search'); input.value = ''; input.dispatchEvent(new Event('input', { bubbles: true })); input.focus();
+    });
     document.getElementById('ds-type-filter').addEventListener('change', (e) => { state.typeFilter = e.target.value; state.page = 1; renderList(); });
     document.getElementById('ds-status-filter').addEventListener('change', (e) => { state.statusFilter = e.target.value; state.page = 1; renderList(); });
   }
@@ -414,5 +418,5 @@ window.DatasourceModule = (function () {
     });
   }
 
-  return { render };
+  return { render, openItem: openForm };
 })();

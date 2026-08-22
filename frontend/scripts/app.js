@@ -92,6 +92,251 @@
     window.scrollTo({ top: 0, behavior: 'instant' });
   }
 
+  // ---------- Global command search ----------
+  function setupGlobalSearch() {
+    const triggers = [
+      document.getElementById('global-search-trigger'),
+      document.getElementById('global-search-mobile-trigger'),
+    ].filter(Boolean);
+    if (triggers.length === 0) return;
+
+    const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+    document.querySelectorAll('.shortcut-label').forEach(el => { el.textContent = isMac ? '⌘ K' : 'Ctrl K'; });
+
+    let panel = null;
+    let input = null;
+    let resultItems = [];
+    let selectedIndex = -1;
+    let searchTimer = null;
+    let requestSequence = 0;
+    let restoreFocus = null;
+
+    const entityConfig = {
+      record: { route: 'records', module: 'RecordsModule' },
+      rule: { route: 'rules', module: 'RulesModule' },
+      dataset: { route: 'datasets', module: 'DatasetModule' },
+      datasource: { route: 'datasources', module: 'DatasourceModule' },
+    };
+
+    const matches = (value, query) => String(value || '').toLocaleLowerCase('zh-CN').includes(query);
+    const rankAndLimit = (items, query, fields, limit = 4) => items
+      .map(item => {
+        const values = fields.map(field => String(item[field] || '').toLocaleLowerCase('zh-CN'));
+        const score = values.some(value => value.startsWith(query)) ? 0 : 1;
+        return { item, score };
+      })
+      .filter(entry => fields.some(field => matches(entry.item[field], query)))
+      .sort((a, b) => a.score - b.score || String(a.item.name || '').localeCompare(String(b.item.name || ''), 'zh-CN'))
+      .slice(0, limit)
+      .map(entry => entry.item);
+
+    function closeSearch() {
+      if (!panel) return;
+      window.clearTimeout(searchTimer);
+      requestSequence += 1;
+      panel.remove();
+      panel = null;
+      input = null;
+      resultItems = [];
+      selectedIndex = -1;
+      const focusTarget = restoreFocus;
+      restoreFocus = null;
+      focusTarget?.focus();
+    }
+
+    function setSelected(index) {
+      if (resultItems.length === 0) return;
+      selectedIndex = (index + resultItems.length) % resultItems.length;
+      resultItems.forEach((item, itemIndex) => {
+        const active = itemIndex === selectedIndex;
+        item.classList.toggle('active', active);
+        item.setAttribute('aria-selected', String(active));
+        if (active) {
+          input?.setAttribute('aria-activedescendant', item.id);
+          item.scrollIntoView({ block: 'nearest' });
+        }
+      });
+    }
+
+    function openResult(type, id) {
+      const config = entityConfig[type];
+      if (!config) return;
+      closeSearch();
+      if (type === 'record') {
+        navigate(`records/${id}`);
+        return;
+      }
+      navigate(config.route);
+      const module = window[config.module];
+      if (module && typeof module.openItem === 'function') module.openItem(id);
+    }
+
+    function resultMarkup(type, item, title, meta, icon) {
+      return `
+        <button class="command-result" type="button" role="option" aria-selected="false" data-type="${type}" data-id="${UI.escapeHtml(item.id)}">
+          <span class="command-result-icon">${icon}</span>
+          <span class="command-result-copy">
+            <strong>${UI.escapeHtml(title)}</strong>
+            <span>${UI.escapeHtml(meta)}</span>
+          </span>
+          ${Icon.arrowRight({ size: 14 })}
+        </button>
+      `;
+    }
+
+    function announceSearchStatus(message) {
+      const status = panel?.querySelector('#global-search-status');
+      if (status) status.textContent = message;
+    }
+
+    function renderGroups(groups) {
+      if (!panel) return;
+      const results = panel.querySelector('#global-search-results');
+      const visibleGroups = groups.filter(group => group.items.length > 0);
+      if (visibleGroups.length === 0) {
+        results.removeAttribute('role');
+        results.innerHTML = `<div class="command-state">${Icon.search({ size: 22 })}<strong>没有匹配结果</strong><span>尝试名称、描述、主机或异常字段</span></div>`;
+        announceSearchStatus('没有匹配结果');
+      } else {
+        results.setAttribute('role', 'listbox');
+        results.innerHTML = visibleGroups.map((group, groupIndex) => `
+          <section class="command-group" role="group" aria-labelledby="global-search-group-${groupIndex}">
+            <div class="command-group-label" id="global-search-group-${groupIndex}">${group.label}<span>${group.items.length}</span></div>
+            ${group.items.map(group.render).join('')}
+          </section>
+        `).join('');
+        const resultCount = visibleGroups.reduce((total, group) => total + group.items.length, 0);
+        announceSearchStatus(`找到 ${resultCount} 个结果，分为 ${visibleGroups.length} 组`);
+      }
+      resultItems = [...results.querySelectorAll('.command-result')];
+      selectedIndex = -1;
+      input?.removeAttribute('aria-activedescendant');
+      resultItems.forEach((item, index) => {
+        item.id = `global-search-option-${index}`;
+        item.addEventListener('mouseenter', () => setSelected(index));
+        item.addEventListener('click', () => openResult(item.dataset.type, item.dataset.id));
+      });
+    }
+
+    async function performSearch(rawQuery) {
+      const queryText = rawQuery.trim();
+      const query = queryText.toLocaleLowerCase('zh-CN');
+      const sequence = ++requestSequence;
+      if (!panel) return;
+      const results = panel.querySelector('#global-search-results');
+      if (!query) {
+        results.removeAttribute('role');
+        results.innerHTML = `<div class="command-state command-state-idle">${Icon.search({ size: 22 })}<strong>搜索整个 Sentinel</strong><span>输入关键词查找异常记录、规则、数据集和数据源</span></div>`;
+        announceSearchStatus('请输入关键词开始搜索');
+        resultItems = [];
+        input?.removeAttribute('aria-activedescendant');
+        return;
+      }
+
+      results.removeAttribute('role');
+      results.innerHTML = `<div class="command-state"><span class="spinner"></span><strong>正在搜索</strong><span>正在汇总各业务模块</span></div>`;
+      announceSearchStatus('正在搜索');
+      input?.removeAttribute('aria-activedescendant');
+      const rules = rankAndLimit(Store.getRules?.() || [], query, ['name', 'description', 'datasetName']);
+      const datasets = rankAndLimit(Store.getDatasets?.() || [], query, ['name', 'description', 'datasourceName']);
+      const datasources = rankAndLimit(Store.getDatasources?.() || [], query, ['name', 'type', 'host', 'database']);
+
+      try {
+        const recordPage = typeof Store.peekRecordsPage === 'function'
+          ? await Store.peekRecordsPage({ search: queryText, page: 1, pageSize: 5 })
+          : { items: rankAndLimit(Store.getRecords?.() || [], query, ['ruleName', 'datasetName', 'field'], 5) };
+        if (sequence !== requestSequence || !panel) return;
+        const records = recordPage.items || [];
+        renderGroups([
+          {
+            label: '异常记录', items: records,
+            render: item => resultMarkup('record', item, item.ruleName || item.id, `${item.datasetName || '未知数据集'} · ${item.field || '异常记录'}`, Icon.alert({ size: 16 })),
+          },
+          {
+            label: '异常规则', items: rules,
+            render: item => resultMarkup('rule', item, item.name, item.datasetName || item.description || '异常检测规则', Icon.shield({ size: 16 })),
+          },
+          {
+            label: '数据集', items: datasets,
+            render: item => resultMarkup('dataset', item, item.name, item.datasourceName || item.description || '监控数据视图', Icon.layers({ size: 16 })),
+          },
+          {
+            label: '数据源', items: datasources,
+            render: item => resultMarkup('datasource', item, item.name, `${item.type || '数据源'} · ${item.host || item.database || '连接配置'}`, Icon.database({ size: 16 })),
+          },
+        ]);
+      } catch (error) {
+        if (sequence !== requestSequence || !panel) return;
+        results.removeAttribute('role');
+        results.innerHTML = `<div class="command-state command-state-error">${Icon.alert({ size: 22 })}<strong>搜索暂时不可用</strong><span>${UI.escapeHtml(error.message)}</span></div>`;
+        announceSearchStatus('搜索暂时不可用');
+        resultItems = [];
+        input?.removeAttribute('aria-activedescendant');
+      }
+    }
+
+    function openSearch() {
+      if (panel) {
+        input?.focus();
+        return;
+      }
+      restoreFocus = document.activeElement;
+      panel = document.createElement('div');
+      panel.className = 'command-backdrop';
+      panel.innerHTML = `
+        <section class="command-palette" role="dialog" aria-modal="true" aria-label="全局搜索">
+          <div class="command-input-row">
+            ${Icon.search({ size: 19 })}
+            <input id="global-search-input" type="search" role="combobox" aria-label="全局搜索" aria-controls="global-search-results" aria-expanded="true" autocomplete="off" placeholder="搜索异常、规则、数据集或数据源…" />
+            <button class="command-close" type="button" aria-label="关闭全局搜索"><kbd>Esc</kbd></button>
+          </div>
+          <div class="command-results" id="global-search-results"></div>
+          <div class="sr-only" id="global-search-status" role="status" aria-live="polite" aria-atomic="true"></div>
+          <div class="command-footer"><span><kbd>↑↓</kbd> 选择</span><span><kbd>Enter</kbd> 打开</span><span><kbd>Esc</kbd> 关闭</span></div>
+        </section>
+      `;
+      document.body.appendChild(panel);
+      input = panel.querySelector('#global-search-input');
+      panel.querySelector('.command-close').addEventListener('click', closeSearch);
+      panel.addEventListener('click', event => { if (event.target === panel) closeSearch(); });
+      input.addEventListener('input', () => {
+        window.clearTimeout(searchTimer);
+        searchTimer = window.setTimeout(() => performSearch(input.value), 140);
+      });
+      panel.addEventListener('keydown', event => {
+        if (event.key === 'Tab') {
+          const focusable = [...panel.querySelectorAll('input, button:not([disabled])')].filter(el => el.offsetParent !== null);
+          const first = focusable[0];
+          const last = focusable[focusable.length - 1];
+          if (event.shiftKey && document.activeElement === first) {
+            event.preventDefault();
+            last?.focus();
+          } else if (!event.shiftKey && document.activeElement === last) {
+            event.preventDefault();
+            first?.focus();
+          }
+        } else if (event.key === 'Escape') { event.preventDefault(); closeSearch(); }
+        else if (event.key === 'ArrowDown') { event.preventDefault(); setSelected(selectedIndex + 1); }
+        else if (event.key === 'ArrowUp') { event.preventDefault(); setSelected(selectedIndex - 1); }
+        else if (event.key === 'Enter' && selectedIndex >= 0) {
+          event.preventDefault();
+          const item = resultItems[selectedIndex];
+          openResult(item.dataset.type, item.dataset.id);
+        }
+      });
+      performSearch('');
+      input.focus();
+    }
+
+    triggers.forEach(trigger => trigger.addEventListener('click', openSearch));
+    document.addEventListener('keydown', event => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        openSearch();
+      }
+    });
+  }
+
   // ---------- Sidebar nav wiring ----------
   document.querySelectorAll('.nav-item').forEach(el => {
     el.addEventListener('click', () => navigate(el.dataset.route));
@@ -111,6 +356,8 @@
     document.getElementById('sidebar').classList.remove('open');
     document.getElementById('sidebar-backdrop').classList.remove('show');
   });
+
+  setupGlobalSearch();
 
   // Expose before loading so modules can navigate after async requests.
   window.App = { navigate, parseRoute };
