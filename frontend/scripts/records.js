@@ -603,7 +603,7 @@ window.RecordsModule = (function () {
   }
 
   async function exportRecords() {
-    const serverBacked = typeof Store.loadRecordsPage === 'function';
+    const serverBacked = typeof Store.peekRecordsPage === 'function';
     const filters = Object.freeze({
       status: state.statusFilter === 'all' ? null : state.statusFilter,
       severity: state.severityFilter === 'all' ? null : state.severityFilter,
@@ -617,7 +617,7 @@ window.RecordsModule = (function () {
       if (state.searchTimer) window.clearTimeout(state.searchTimer);
       state.searchTimer = null;
       try {
-        const result = await Store.loadRecordsPage({
+        const result = await Store.peekRecordsPage({
           ...filters, page: 1, pageSize: state.pageSize,
         });
         count = result.total;

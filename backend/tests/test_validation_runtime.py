@@ -268,7 +268,49 @@ def test_settings_reject_conflicting_process_tokens_without_disclosing_values(
     assert "legacy-process-secret" not in str(conflict.value)
 
 
+def test_settings_trim_equal_process_token_aliases_before_comparison(monkeypatch):
+    monkeypatch.setenv("SENTINEL_INTERNAL_TOKEN", "  shared-process-token\t")
+    monkeypatch.setenv("INTERNAL_EXECUTION_TOKEN", "\tshared-process-token  ")
+
+    assert Settings(_env_file=None).internal_execution_token == "shared-process-token"
+
+
+def test_settings_treat_whitespace_process_alias_as_empty_and_trim_dotenv_token(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setenv("SENTINEL_INTERNAL_TOKEN", " \t ")
+    monkeypatch.delenv("INTERNAL_EXECUTION_TOKEN", raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        'SENTINEL_INTERNAL_TOKEN="  trimmed-file-token  "\n',
+        encoding="utf-8",
+    )
+
+    assert Settings(_env_file=env_file).internal_execution_token == "trimmed-file-token"
+
+
+def test_settings_trim_equal_quoted_dotenv_aliases_before_comparison(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.delenv("SENTINEL_INTERNAL_TOKEN", raising=False)
+    monkeypatch.delenv("INTERNAL_EXECUTION_TOKEN", raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        'SENTINEL_INTERNAL_TOKEN="  shared-file-token"\n'
+        'INTERNAL_EXECUTION_TOKEN="shared-file-token  "\n',
+        encoding="utf-8",
+    )
+
+    assert Settings(_env_file=env_file).internal_execution_token == "shared-file-token"
+
+
 def test_settings_preserve_explicit_internal_token_constructor_values():
     settings = Settings(_env_file=None, internal_execution_token="explicit-token")
+
+    assert settings.internal_execution_token == "explicit-token"
+
+
+def test_settings_trim_explicit_internal_token_constructor_values():
+    settings = Settings(_env_file=None, internal_execution_token="  explicit-token\t ")
 
     assert settings.internal_execution_token == "explicit-token"

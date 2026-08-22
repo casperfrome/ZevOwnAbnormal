@@ -337,3 +337,46 @@ test('the newest record-page request owns the Store cache when responses arrive 
   assert.equal(store.getRecords()[0].id, 'newest');
   assert.equal(store.getRecords()[0].status, 'timed_out');
 });
+
+test('peeking an export page neither replaces cached records nor supersedes an in-flight page owner', async () => {
+  const pendingResponses = [];
+  const apiRecord = (id, status) => ({
+    id, rule_id: 'rule-1', rule_name: 'GMV check', dataset_name: 'Orders', severity: 'high', status,
+    business_key: {}, row_details: {}, matched_conditions: [], hit_count: 1,
+    first_seen_at: '2026-08-22T09:00:00', last_seen_at: '2026-08-22T09:00:00',
+    resolved_at: null, assignee: null, description: '', validation_deadline: null,
+    timed_out_at: null, resolution_source: null, resolved_by_user_id: null, delivery_status: 'none',
+  });
+  const context = {
+    window: {},
+    fetch: url => new Promise(resolve => pendingResponses.push({ url, resolve })),
+  };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'scripts', 'data.js'), 'utf8'), context);
+  const store = context.window.Store;
+
+  const initial = store.loadRecordsPage({ page: 2, pageSize: 10 });
+  pendingResponses[0].resolve({
+    ok: true, status: 200,
+    json: async () => ({ items: [apiRecord('page-two-current', 'timed_out')], total: 11, page: 2, page_size: 10 }),
+  });
+  await initial;
+
+  const pageRefresh = store.loadRecordsPage({ page: 2, pageSize: 10 });
+  const exportPeek = store.peekRecordsPage({ page: 1, pageSize: 10 });
+  pendingResponses[2].resolve({
+    ok: true, status: 200,
+    json: async () => ({ items: [apiRecord('page-one-export', 'pending')], total: 11, page: 1, page_size: 10 }),
+  });
+  const peeked = await exportPeek;
+
+  assert.equal(peeked.items[0].id, 'page-one-export');
+  assert.equal(store.getRecords()[0].id, 'page-two-current');
+
+  pendingResponses[1].resolve({
+    ok: true, status: 200,
+    json: async () => ({ items: [apiRecord('page-two-newest', 'timed_out')], total: 11, page: 2, page_size: 10 }),
+  });
+  await pageRefresh;
+
+  assert.equal(store.getRecords()[0].id, 'page-two-newest');
+});

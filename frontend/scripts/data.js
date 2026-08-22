@@ -106,18 +106,27 @@ window.Store = (function () {
     return entries.map(([key, value]) => `${key}=${encodeURIComponent(value)}`).join('&');
   }
 
-  async function loadRecordsPage(filters = {}) {
-    const requestSequence = ++recordsPageSequence;
+  async function fetchRecordsPage(filters = {}) {
     const query = anomalyQuery(filters, true);
     const result = await request(`/anomalies?${query}`);
     const items = (result.items || []).map(mapRecord);
-    if (requestSequence === recordsPageSequence) state.records = items;
     return {
       items,
       total: result.total || 0,
       page: result.page || filters.page || 1,
       pageSize: result.page_size || filters.pageSize || 10,
     };
+  }
+
+  async function loadRecordsPage(filters = {}) {
+    const requestSequence = ++recordsPageSequence;
+    const result = await fetchRecordsPage(filters);
+    if (requestSequence === recordsPageSequence) state.records = result.items;
+    return result;
+  }
+
+  function peekRecordsPage(filters = {}) {
+    return fetchRecordsPage(filters);
   }
 
   async function refresh() {
@@ -190,7 +199,7 @@ window.Store = (function () {
   }
 
   return {
-    init, refresh, request, loadRecordsPage,
+    init, refresh, request, loadRecordsPage, peekRecordsPage,
     getDatasources: () => [...state.datasources],
     getDatasource: id => state.datasources.find(item => item.id === id),
     addDatasource: async data => { const item = mapDatasource(await request('/datasources', { method: 'POST', body: JSON.stringify(dsPayload(data)) })); state.datasources.unshift(item); return item; },

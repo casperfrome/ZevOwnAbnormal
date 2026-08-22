@@ -23,8 +23,8 @@ class CallbackPayloadError(ValueError):
 
 
 def resolve_internal_token(canonical: object, legacy: object) -> str:
-    canonical_value = canonical if isinstance(canonical, str) and canonical.strip() else ""
-    legacy_value = legacy if isinstance(legacy, str) and legacy.strip() else ""
+    canonical_value = canonical.strip() if isinstance(canonical, str) else ""
+    legacy_value = legacy.strip() if isinstance(legacy, str) else ""
     if canonical_value and legacy_value and canonical_value != legacy_value:
         raise RuntimeError(
             "SENTINEL_INTERNAL_TOKEN 与 INTERNAL_EXECUTION_TOKEN 配置冲突"

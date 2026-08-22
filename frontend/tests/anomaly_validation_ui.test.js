@@ -477,6 +477,12 @@ test('record export sends current server filters and reports the server total', 
           page: 1,
           pageSize: query.pageSize,
         }),
+        peekRecordsPage: async query => ({
+          items: window.currentPageRecords,
+          total: query.search ? 3 : 42,
+          page: 1,
+          pageSize: query.pageSize,
+        }),
         refresh: async () => {}, exportUrl,
       };
     });
@@ -514,6 +520,9 @@ test('record export keeps one immutable search snapshot while its count request 
         getRecords: () => [],
         getRules: () => [],
         loadRecordsPage: async query => {
+          return { items: [], total: query.search === 'new-filter' ? 2 : 0, page: 1, pageSize: query.pageSize };
+        },
+        peekRecordsPage: async query => {
           if (query.search === 'old-filter') {
             return new Promise(resolve => { window.resolveExportCount = resolve; });
           }
@@ -539,6 +548,85 @@ test('record export keeps one immutable search snapshot while its count request 
 
   assert.equal(await page.evaluate(() => window.exportFilters.search), 'old-filter');
   assert.match(await page.locator('#toast-container').textContent(), /7 条记录/);
+  assert.deepEqual(pageErrors, []);
+});
+
+test('production Store export on page two preserves the rendered record and its quick action target', async t => {
+  const { page, pageErrors } = await withPage(t, async page => {
+    await page.evaluate(() => {
+      const apiRecord = (id, status) => ({
+        id, rule_id: 'rule-1', rule_name: 'GMV check', dataset_name: 'Orders', severity: 'high', status,
+        business_key: {}, row_details: {}, matched_conditions: [{ field: 'gmv', operator: 'gt', actual: 999 }],
+        hit_count: 1, first_seen_at: '2026-08-22T09:00:00', last_seen_at: '2026-08-22T09:00:00',
+        resolved_at: status === 'resolved' ? '2026-08-22T10:00:00' : null,
+        assignee: null, description: '', validation_deadline: null,
+        timed_out_at: status === 'timed_out' ? '2026-08-22T09:30:00' : null,
+        resolution_source: status === 'resolved' ? 'manual' : null,
+        resolved_by_user_id: status === 'resolved' ? 'admin' : null,
+        delivery_status: 'none', timeline: [], deliveries: [], validation_requests: [],
+        validation_submission: null,
+      });
+      window.pageTwoStatus = 'timed_out';
+      window.quickPatchIds = [];
+      window.exportFilters = null;
+      window.fetch = async (input, options = {}) => {
+        const url = new URL(String(input), 'http://sentinel.test');
+        const method = options.method || 'GET';
+        const jsonResponse = body => ({
+          ok: true, status: 200, statusText: 'OK', json: async () => body,
+        });
+        if (method === 'PATCH' && url.pathname.endsWith('/status')) {
+          const id = url.pathname.split('/').at(-2);
+          window.quickPatchIds.push(id);
+          window.pageTwoStatus = JSON.parse(options.body).status;
+          return jsonResponse(apiRecord(id, window.pageTwoStatus));
+        }
+        if (url.pathname.endsWith('/overview')) {
+          return jsonResponse({ stats: {
+            pending_records: 10, processing_records: 0,
+            timed_out_records: window.pageTwoStatus === 'timed_out' ? 1 : 0,
+            resolved_records: window.pageTwoStatus === 'resolved' ? 1 : 0,
+            critical_anomalies: 0,
+          } });
+        }
+        if (url.pathname.endsWith('/anomalies')) {
+          const requestedPage = Number(url.searchParams.get('page') || 1);
+          const item = requestedPage === 2
+            ? apiRecord('record-page-two', window.pageTwoStatus)
+            : apiRecord('record-page-one', 'pending');
+          return jsonResponse({ items: [item], total: 11, page: requestedPage, page_size: 10 });
+        }
+        throw new Error(`unexpected request: ${method} ${url.pathname}`);
+      };
+    });
+    await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'data.js') });
+    await page.evaluate(() => {
+      Store.exportUrl = filters => {
+        window.exportFilters = { ...filters };
+        return '#production-export';
+      };
+    });
+    await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'records.js') });
+    await page.evaluate(() => RecordsModule.render(document.getElementById('content'), {
+      actionsEl: document.getElementById('actions'), navigate: () => {},
+    }));
+  });
+
+  await page.locator('text=record-page-one').waitFor();
+  await page.locator('.page-btn[data-page="2"]:not([aria-label])').click();
+  await page.locator('text=record-page-two').waitFor();
+  await page.click('#rec-export');
+  await page.waitForFunction(() => window.exportFilters !== null);
+
+  assert.equal(await page.locator('text=record-page-two').count(), 1);
+  assert.deepEqual(await page.evaluate(() => Store.getRecords().map(record => record.id)), ['record-page-two']);
+
+  await page.locator('[data-id="record-page-two"][data-action="status"]').click();
+  await page.locator('[role="dialog"] [data-status="resolved"]').click();
+  await page.waitForFunction(() => window.quickPatchIds.length === 1);
+
+  assert.deepEqual(await page.evaluate(() => window.quickPatchIds), ['record-page-two']);
+  assert.equal(await page.evaluate(() => Store.getRecord('record-page-two').status), 'resolved');
   assert.deepEqual(pageErrors, []);
 });
 

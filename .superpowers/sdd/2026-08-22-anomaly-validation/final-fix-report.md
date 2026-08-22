@@ -83,3 +83,29 @@ Final commands were run on the exact pre-commit Round 2 tree:
 - `git diff --check` — exit 0 (only Git's existing LF/CRLF conversion notices).
 
 Round 2 did not contact Feishu, inspect credentials, mutate any external service, or start a live/container MySQL server. HTTP behavior used local fakes; MySQL 8.4 evidence remains dialect/DDL compilation plus the documented disposable-container gate.
+
+## Final Fix Round 3
+
+Baseline: `35b5c1d`
+
+Scope: the two remaining Minor findings.
+
+- **Frontend export count cache isolation:** `Store.peekRecordsPage()` now fetches and maps an authoritative page without touching `Store.records` or the page request sequence. Export count uses this side-effect-free path, so an export started while page two is rendered cannot replace page-two records or make quick status actions target the wrong record. Store-level out-of-order coverage and a production `data.js` + `records.js` browser regression verify page-two DOM/cache continuity and the quick status target.
+- **Canonical/legacy token normalization:** backend Settings, callback gateway resolution, and launcher environment loading now trim before emptiness checks, alias comparison, and return. Whitespace-only values are treated as absent; trimmed conflicts fail fast with variable names only; launcher `.env` loading preserves explicit nonblank process precedence while normalizing the selected canonical value. Explicit Settings constructor tokens are trimmed as well.
+
+### Round 3 TDD and verification evidence
+
+The inherited Round 3 regressions were reviewed and exercised. A new failing test first reproduced untrimmed explicit `Settings` constructor output (`'  explicit-token\\t '`), then the minimal constructor normalization made it pass.
+
+Fresh verification on the exact working tree:
+
+- `python -m pytest backend/tests/test_validation_runtime.py tests/test_feishu_long_connection.py -q` — **52 passed**.
+- `NODE_PATH=<Codex bundled dependency path> node --test frontend/tests/*.test.js` — **25 passed**, 0 failed.
+- `python -m pytest backend/tests tests -q` — **215 passed**, 7 upstream `lark_oapi/pkg_resources` deprecation warnings, 0 failed.
+- `python -m pytest backend/tests/test_anomaly_validation_migration.py -q` — **8 passed**.
+- `python -m compileall -q backend tests 飞书长连接启动` — exit 0.
+- Recursive bundled `node --check` for `frontend/scripts/*.js` — exit 0.
+- `docker compose config --quiet` — exit 0.
+- `git diff --check` — exit 0 (only existing LF/CRLF conversion notices).
+
+No credentials were read and no external service or Feishu endpoint was contacted.

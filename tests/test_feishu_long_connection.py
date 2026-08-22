@@ -165,6 +165,31 @@ def test_gateway_settings_reject_conflicting_tokens_without_disclosing_values():
     assert "legacy-gateway-secret" not in str(conflict.value)
 
 
+@pytest.mark.parametrize(
+    ("canonical", "legacy", "expected"),
+    [
+        ("  shared-token\t", "\tshared-token  ", "shared-token"),
+        (" \t ", "  legacy-token  ", "legacy-token"),
+        ("  canonical-token  ", "\r\n", "canonical-token"),
+    ],
+)
+def test_gateway_trims_token_aliases_before_comparison_and_return(
+    canonical, legacy, expected,
+):
+    gateway = importlib.import_module("feishu_callback_gateway")
+
+    assert gateway.resolve_internal_token(canonical, legacy) == expected
+
+
+def test_gateway_treats_whitespace_only_aliases_as_missing():
+    gateway = importlib.import_module("feishu_callback_gateway")
+
+    with pytest.raises(RuntimeError) as missing:
+        gateway.resolve_internal_token(" \t ", "\r\n")
+
+    assert "SENTINEL_INTERNAL_TOKEN" in str(missing.value)
+
+
 def response_client_factory(status_code, body, requests, clients):
     def factory(**kwargs):
         def respond(request):
@@ -511,6 +536,47 @@ def test_repository_env_loader_rejects_conflicting_file_tokens_without_values(
 
     assert "canonical-file-secret" not in str(conflict.value)
     assert "legacy-file-secret" not in str(conflict.value)
+
+
+def test_repository_env_loader_trims_equal_explicit_aliases_to_canonical(
+    tmp_path, monkeypatch,
+):
+    launcher = importlib.import_module("飞书长连接启动")
+    env_file = tmp_path / ".env"
+    env_file.write_text("", encoding="utf-8")
+    monkeypatch.setattr(launcher, "ENV_FILE", env_file, raising=False)
+    monkeypatch.setenv("SENTINEL_INTERNAL_TOKEN", "  process-token\t")
+    monkeypatch.setenv("INTERNAL_EXECUTION_TOKEN", "\tprocess-token  ")
+
+    launcher.load_repository_env()
+
+    assert launcher.get_required_env("SENTINEL_INTERNAL_TOKEN") == "process-token"
+    assert "INTERNAL_EXECUTION_TOKEN" not in launcher.os.environ
+
+
+def test_repository_env_loader_lets_dotenv_replace_whitespace_only_process_alias(
+    tmp_path, monkeypatch,
+):
+    launcher = importlib.import_module("飞书长连接启动")
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        'SENTINEL_INTERNAL_TOKEN="  file-token  "\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(launcher, "ENV_FILE", env_file, raising=False)
+    monkeypatch.setenv("SENTINEL_INTERNAL_TOKEN", " \t ")
+    monkeypatch.delenv("INTERNAL_EXECUTION_TOKEN", raising=False)
+
+    launcher.load_repository_env()
+
+    assert launcher.get_required_env("SENTINEL_INTERNAL_TOKEN") == "file-token"
+
+
+def test_required_environment_values_are_trimmed(monkeypatch):
+    launcher = importlib.import_module("飞书长连接启动")
+    monkeypatch.setenv("FEISHU_APP_ID", "  app-id\t")
+
+    assert launcher.get_required_env("FEISHU_APP_ID") == "app-id"
 
 
 def test_launcher_registers_callback_handler_before_starting_websocket(monkeypatch):

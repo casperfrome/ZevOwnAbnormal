@@ -16,8 +16,8 @@ SESSION_COOKIE = "sentinel_session"
 def _resolve_internal_token(values: Mapping[str, object]) -> str | None:
     canonical = values.get("SENTINEL_INTERNAL_TOKEN")
     legacy = values.get("INTERNAL_EXECUTION_TOKEN")
-    canonical_value = canonical if isinstance(canonical, str) and canonical.strip() else ""
-    legacy_value = legacy if isinstance(legacy, str) and legacy.strip() else ""
+    canonical_value = canonical.strip() if isinstance(canonical, str) else ""
+    legacy_value = legacy.strip() if isinstance(legacy, str) else ""
     if canonical_value and legacy_value and canonical_value != legacy_value:
         raise ValueError(
             "SENTINEL_INTERNAL_TOKEN 与 INTERNAL_EXECUTION_TOKEN 配置冲突"
@@ -69,6 +69,9 @@ class Settings(BaseSettings):
     reconcile_on_startup: bool = True
 
     def __init__(self, **values):
+        explicit_token = values.get("internal_execution_token")
+        if isinstance(explicit_token, str):
+            values["internal_execution_token"] = explicit_token.strip()
         if not values.get("internal_execution_token"):
             process_token = _resolve_internal_token(os.environ)
             token = process_token

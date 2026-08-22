@@ -23,6 +23,12 @@ def load_repository_env() -> None:
     explicit_token = None
     if explicit_canonical.strip() or explicit_legacy.strip():
         explicit_token = resolve_internal_token(explicit_canonical, explicit_legacy)
+    for name, value in (
+        ("SENTINEL_INTERNAL_TOKEN", explicit_canonical),
+        ("INTERNAL_EXECUTION_TOKEN", explicit_legacy),
+    ):
+        if value and not value.strip():
+            os.environ.pop(name, None)
     load_dotenv(ENV_FILE, override=False)
     loaded_canonical = os.getenv("SENTINEL_INTERNAL_TOKEN", "")
     loaded_legacy = os.getenv("INTERNAL_EXECUTION_TOKEN", "")
