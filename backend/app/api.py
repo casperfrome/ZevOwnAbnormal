@@ -5,7 +5,7 @@ from typing import Literal
 import httpx
 import jwt
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
-from sqlalchemy import String, case, cast, or_, select
+from sqlalchemy import case, exists, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -590,6 +590,25 @@ def get_rule_run(run_id: str, session: Session = Depends(get_session)):
     return run_dict(item)
 
 
+def _anomaly_field_search_predicate(search: str, dialect_name: str):
+    if dialect_name == "mysql":
+        field_values = func.json_extract(AnomalyRecord.matched_conditions, "$[*].field")
+        return func.json_contains(field_values, func.json_quote(search)) == 1
+
+    conditions = func.json_each(AnomalyRecord.matched_conditions).table_valued("key", "value").alias("condition")
+    return exists(
+        select(1).select_from(conditions).where(func.json_extract(conditions.c.value, "$.field") == search)
+    )
+
+
+def _anomaly_search_predicate(search: str, dialect_name: str):
+    return or_(
+        AnomalyRecord.rule_name.contains(search, autoescape=True),
+        AnomalyRecord.dataset_name.contains(search, autoescape=True),
+        _anomaly_field_search_predicate(search, dialect_name),
+    )
+
+
 @router.get("/anomalies")
 def list_anomalies(
     page: int = 1,
@@ -619,11 +638,7 @@ def list_anomalies(
     if rule_id:
         query = query.where(AnomalyRecord.rule_id == rule_id)
     if search:
-        query = query.where(or_(
-            AnomalyRecord.rule_name.contains(search),
-            AnomalyRecord.dataset_name.contains(search),
-            cast(AnomalyRecord.matched_conditions, String).contains(search),
-        ))
+        query = query.where(_anomaly_search_predicate(search, session.get_bind().dialect.name))
     query = query.order_by(ordering, AnomalyRecord.id.asc())
     all_items = list(session.scalars(query))
     start = max(page - 1, 0) * min(max(page_size, 1), 100)
