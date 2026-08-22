@@ -1,6 +1,7 @@
 /* API-backed state store. Keeps the existing synchronous read API for views. */
 window.Store = (function () {
   const state = { datasources: [], datasets: [], rules: [], records: [], overview: null };
+  let recordsPageSequence = 0;
 
   async function request(path, options = {}) {
     const response = await fetch('/api/v1' + path, {
@@ -89,15 +90,41 @@ window.Store = (function () {
     };
   };
 
+  async function loadRecordsPage(filters = {}) {
+    const requestSequence = ++recordsPageSequence;
+    const entries = [
+      ['page', filters.page || 1],
+      ['page_size', filters.pageSize || 10],
+      ['status_filter', filters.status],
+      ['severity', filters.severity],
+      ['rule_id', filters.ruleId],
+      ['search', filters.search],
+    ].filter(([, value]) => value !== null && value !== undefined && value !== '');
+    const query = entries.map(([key, value]) => `${key}=${encodeURIComponent(value)}`).join('&');
+    const result = await request(`/anomalies?${query}`);
+    const items = (result.items || []).map(mapRecord);
+    if (requestSequence === recordsPageSequence) state.records = items;
+    return {
+      items,
+      total: result.total || 0,
+      page: result.page || filters.page || 1,
+      pageSize: result.page_size || filters.pageSize || 10,
+    };
+  }
+
   async function refresh() {
-    const [datasources, datasets, rules, anomalies, overview] = await Promise.all([
-      request('/datasources'), request('/datasets'), request('/rules'), request('/anomalies?page_size=100'), request('/overview'),
+    const [datasources, datasets, rules, , overview] = await Promise.all([
+      request('/datasources'), request('/datasets'), request('/rules'), loadRecordsPage({ page: 1, pageSize: 10 }), request('/overview'),
     ]);
     state.datasources = datasources.map(mapDatasource);
     state.datasets = datasets.map(mapDataset);
     state.rules = rules.map(mapRule);
-    state.records = anomalies.items.map(mapRecord);
     state.overview = overview;
+  }
+
+  async function refreshOverview() {
+    state.overview = await request('/overview');
+    return state.overview;
   }
 
   async function init() {
@@ -137,7 +164,7 @@ window.Store = (function () {
   }
 
   return {
-    init, refresh, request,
+    init, refresh, request, loadRecordsPage,
     getDatasources: () => [...state.datasources],
     getDatasource: id => state.datasources.find(item => item.id === id),
     addDatasource: async data => { const item = mapDatasource(await request('/datasources', { method: 'POST', body: JSON.stringify(dsPayload(data)) })); state.datasources.unshift(item); return item; },
@@ -170,7 +197,13 @@ window.Store = (function () {
     getRecords: () => [...state.records],
     getRecord: id => state.records.find(item => item.id === id),
     loadRecord: async id => mapRecord(await request(`/anomalies/${id}`)),
-    updateRecord: async (id, data) => { const item = mapRecord(await request(`/anomalies/${id}/status`, { method: 'PATCH', body: JSON.stringify({ status: data.status, assignee: data.assignee }) })); state.records[state.records.findIndex(x => x.id === id)] = item; return item; },
+    updateRecord: async (id, data) => {
+      const item = mapRecord(await request(`/anomalies/${id}/status`, { method: 'PATCH', body: JSON.stringify({ status: data.status, assignee: data.assignee }) }));
+      const index = state.records.findIndex(x => x.id === id);
+      if (index >= 0) state.records[index] = item;
+      await refreshOverview();
+      return item;
+    },
     bulkUpdateRecords: async (ids, status) => { await request('/anomalies/bulk-status', { method: 'POST', body: JSON.stringify({ ids, status }) }); await refresh(); },
     exportUrl: '/api/v1/anomalies/export',
     getOverview: () => state.overview,

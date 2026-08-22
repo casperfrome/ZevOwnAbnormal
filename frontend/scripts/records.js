@@ -7,7 +7,7 @@ window.RecordsModule = (function () {
   let state = {
     search: '', statusFilter: 'all', severityFilter: 'all', ruleFilter: 'all',
     sortKey: 'occurredAt', sortDir: 'desc', page: 1, pageSize: 10,
-    selected: new Set(),
+    selected: new Set(), requestSequence: 0,
   };
 
   function renderActions(actionsEl) {
@@ -41,13 +41,25 @@ window.RecordsModule = (function () {
     renderList();
   }
 
+  function recordCounts() {
+    const records = Store.getRecords();
+    const derived = {
+      pendingRecords: records.filter(r => r.status === 'pending').length,
+      processingRecords: records.filter(r => r.status === 'processing').length,
+      timedOutRecords: records.filter(r => r.status === 'timed_out').length,
+      resolvedToday: records.filter(r => r.status === 'resolved').length,
+      criticalAnomalies: records.filter(r => r.severity === 'critical' && r.status !== 'resolved').length,
+    };
+    return typeof Store.getStats === 'function' ? { ...derived, ...Store.getStats() } : derived;
+  }
+
   function renderStats() {
-    const all = Store.getRecords();
-    const pending = all.filter(r => r.status === 'pending').length;
-    const processing = all.filter(r => r.status === 'processing').length;
-    const timedOut = all.filter(r => r.status === 'timed_out').length;
-    const resolved = all.filter(r => r.status === 'resolved').length;
-    const critical = all.filter(r => r.severity === 'critical' && r.status !== 'resolved').length;
+    const counts = recordCounts();
+    const pending = counts.pendingRecords;
+    const processing = counts.processingRecords;
+    const timedOut = counts.timedOutRecords;
+    const resolved = counts.resolvedToday;
+    const critical = counts.criticalAnomalies;
 
     document.getElementById('rec-stats').classList.add('five-up');
     document.getElementById('rec-stats').innerHTML = `
@@ -80,12 +92,18 @@ window.RecordsModule = (function () {
   }
 
   function renderTabs() {
-    const all = Store.getRecords();
-    document.getElementById('cnt-all').textContent = all.length;
-    document.getElementById('cnt-pending').textContent = all.filter(r => r.status === 'pending').length;
-    document.getElementById('cnt-processing').textContent = all.filter(r => r.status === 'processing').length;
-    document.getElementById('cnt-timed-out').textContent = all.filter(r => r.status === 'timed_out').length;
-    document.getElementById('cnt-resolved').textContent = all.filter(r => r.status === 'resolved').length;
+    const counts = recordCounts();
+    document.getElementById('cnt-all').textContent = counts.pendingRecords + counts.processingRecords + counts.timedOutRecords + counts.resolvedToday;
+    document.getElementById('cnt-pending').textContent = counts.pendingRecords;
+    document.getElementById('cnt-processing').textContent = counts.processingRecords;
+    document.getElementById('cnt-timed-out').textContent = counts.timedOutRecords;
+    document.getElementById('cnt-resolved').textContent = counts.resolvedToday;
+    const navCount = document.getElementById('nav-anomaly-count');
+    if (navCount) {
+      const unresolved = counts.unresolvedRecords ?? (counts.pendingRecords + counts.processingRecords + counts.timedOutRecords);
+      navCount.textContent = unresolved;
+      navCount.classList.toggle('muted', unresolved === 0);
+    }
 
     document.querySelectorAll('#rec-tabs .tab').forEach(tab => {
       tab.addEventListener('click', () => {
@@ -145,18 +163,46 @@ window.RecordsModule = (function () {
     return list;
   }
 
-  function renderList() {
-    const all = getFiltered();
-    const total = all.length;
+  async function renderList() {
+    const tableEl = document.getElementById('rec-table');
+    let all;
+    let total;
+    let pageItems;
+    if (typeof Store.loadRecordsPage === 'function') {
+      const requestSequence = ++state.requestSequence;
+      try {
+        const result = await Store.loadRecordsPage({
+          page: state.page,
+          pageSize: state.pageSize,
+          status: state.statusFilter === 'all' ? null : state.statusFilter,
+          severity: state.severityFilter === 'all' ? null : state.severityFilter,
+          ruleId: state.ruleFilter === 'all' ? null : state.ruleFilter,
+          search: state.search,
+        });
+        if (requestSequence !== state.requestSequence) return;
+        all = getFiltered();
+        total = result.total;
+        pageItems = all;
+      } catch (error) {
+        if (requestSequence !== state.requestSequence) return;
+        tableEl.innerHTML = UI.emptyState({
+          icon: Icon.alert({ size: 24 }), iconCls: 'danger', title: '异常记录加载失败', desc: error.message,
+        });
+        UI.toast({ type: 'error', title: '记录加载失败', desc: error.message });
+        return;
+      }
+    } else {
+      all = getFiltered();
+      total = all.length;
+      pageItems = all.slice((state.page - 1) * state.pageSize, state.page * state.pageSize);
+    }
     const totalPages = Math.max(1, Math.ceil(total / state.pageSize));
     if (state.page > totalPages) state.page = totalPages;
-    const pageItems = all.slice((state.page - 1) * state.pageSize, state.page * state.pageSize);
     const selectedRecords = Store.getRecords().filter(record => state.selected.has(record.id));
 
     const countText = document.getElementById('rec-count-text');
     if (countText) countText.textContent = `共 ${total} 条记录`;
 
-    const tableEl = document.getElementById('rec-table');
     if (total === 0) {
       tableEl.innerHTML = UI.emptyState({
         icon: Icon.inbox({ size: 24 }),
@@ -501,7 +547,7 @@ window.RecordsModule = (function () {
       footer: `
         <button class="btn btn-ghost" id="d-close">关闭</button>
         <div style="flex:1;"></div>
-        ${r.status !== 'resolved' ? `<button class="btn btn-secondary" id="d-mark-processing" ${r.status === 'processing' ? 'disabled' : ''}>标记处理中</button>` : ''}
+        ${r.status === 'pending' ? '<button class="btn btn-secondary" id="d-mark-processing">标记处理中</button>' : ''}
         ${r.status !== 'resolved' ? `<button class="btn btn-accent" id="d-resolve">${Icon.check({ size: 16 })}标记已解决</button>` : '<span class="badge success lg">✓ 已解决</span>'}
       `,
     });
@@ -513,17 +559,18 @@ window.RecordsModule = (function () {
       setTimeout(() => UI.toast({ type: 'info', title: '已跳转至规则', desc: r.ruleName }), 300);
     });
     d.drawer.querySelector('#d-mark-processing')?.addEventListener('click', async () => {
-      await Store.updateRecord(id, { status: 'processing' });
-      UI.toast({ type: 'info', title: '已标记为处理中' });
-      d.close();
-      renderList();
-      renderStats();
-      renderTabs();
+      try {
+        await Store.updateRecord(id, { status: 'processing' });
+        UI.toast({ type: 'info', title: '已标记为处理中' });
+        d.close();
+        renderList();
+        renderStats();
+        renderTabs();
+      } catch (error) { UI.toast({ type: 'error', title: '更新失败', desc: error.message }); }
     });
     d.drawer.querySelector('#d-resolve')?.addEventListener('click', async () => {
       try {
         await Store.updateRecord(id, { status: 'resolved' });
-        await Store.refresh();
         UI.toast({ type: 'success', title: '已标记为已解决', desc: r.id });
         d.close();
         renderList();

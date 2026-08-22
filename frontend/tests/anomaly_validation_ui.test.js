@@ -155,15 +155,21 @@ test('records expose timed-out filtering and render escaped validation audit det
         validatorType: 'pseudo', result: 'passed', submittedAt: '2026-08-22T09:20:00',
       },
     };
-    await page.evaluate(({ records, detail }) => {
+    const timedOutDetail = {
+      ...detail, ...records[0], description: 'Timed out validation', timedOutAt: '2026-08-22T09:30:01',
+      resolutionSource: null, resolvedByUserId: null, validationSubmission: null,
+      validationRequests: [{ ...detail.validationRequests[0], deliveryStatus: 'timed_out' }],
+    };
+    await page.evaluate(({ records, detail, timedOutDetail }) => {
       window.auditInjected = false;
       window.Store = {
         getRecords: () => records, getRules: () => [{ id: 'rule-1', name: 'GMV check' }],
-        getRule: () => ({ id: 'rule-1' }), loadRecord: async () => detail,
+        getRule: () => ({ id: 'rule-1' }),
+        loadRecord: async id => id === 'record-timeout' ? timedOutDetail : detail,
         refresh: async () => {}, exportUrl: '/export',
       };
       window.App = { navigate: () => {} };
-    }, { records, detail });
+    }, { records, detail, timedOutDetail });
     await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'records.js') });
     await page.evaluate(() => RecordsModule.render(document.getElementById('content'), {
       actionsEl: document.getElementById('actions'), navigate: () => {},
@@ -175,6 +181,11 @@ test('records expose timed-out filtering and render escaped validation audit det
   await page.click('[data-status="timed_out"]');
   assert.equal(await page.locator('tbody tr').count(), 1);
   assert.match(await page.locator('tbody tr').textContent(), /record-timeout/);
+  await page.evaluate(() => RecordsModule.openDetail('record-timeout'));
+  await page.locator('.drawer').waitFor();
+  assert.equal(await page.locator('#d-mark-processing').count(), 0, 'timed-out detail cannot return to processing');
+  assert.equal(await page.locator('#d-resolve').count(), 1, 'timed-out detail can still be resolved');
+  await page.locator('.drawer .modal-close').click();
   await page.evaluate(() => RecordsModule.openDetail('record-resolved'));
   await page.locator('.drawer').waitFor();
 
@@ -210,10 +221,12 @@ test('manual resolution relies on the server resolver and refreshes the open det
       lastSeenAt: '2026-08-22T09:00:00', deliveries: [], validationRequests: [], validationSubmission: null, timeline: [],
     };
     await page.evaluate(pending => {
-      window.records = [pending]; window.updatePayload = null; window.loadCount = 0; window.refreshCount = 0;
+      window.records = [pending]; window.updatePayload = null; window.loadCount = 0;
       window.Store = {
         getRecords: () => window.records, getRecords: () => window.records,
-        getRules: () => [], getRule: () => null, refresh: async () => { window.refreshCount += 1; }, exportUrl: '/export',
+        getRules: () => [], getRule: () => null,
+        refresh: async () => { throw new Error('detail action must rely on centralized Store.updateRecord refresh'); },
+        exportUrl: '/export',
         loadRecord: async () => {
           window.loadCount += 1;
           return window.loadCount === 1 ? pending : {
@@ -237,7 +250,6 @@ test('manual resolution relies on the server resolver and refreshes the open det
   await page.click('#d-resolve');
   await page.waitForFunction(() => window.loadCount === 2);
   assert.deepEqual(await page.evaluate(() => window.updatePayload), { status: 'resolved' });
-  assert.equal(await page.evaluate(() => window.refreshCount), 1);
   assert.match(await page.locator('.drawer').textContent(), /已解决/);
   assert.equal(await page.locator('#d-resolve, #d-mark-processing').count(), 0);
   assert.deepEqual(pageErrors, []);
@@ -269,4 +281,107 @@ test('deep record hash renders the records list before opening its detail', asyn
   assert.deepEqual(await page.evaluate(() => window.renderOrder), ['render', 'detail:record-uuid']);
   assert.equal(await page.locator('#records-list').count(), 1);
   assert.equal(await page.locator('#nav-anomaly-count').textContent(), '6');
+});
+
+test('record tabs use overview totals and request status-filtered backend pages', async t => {
+  const { page, pageErrors } = await withPage(t, async page => {
+    await page.evaluate(() => {
+      const makeRecord = (id, status) => ({
+        id, ruleId: 'rule-1', ruleName: 'GMV check', datasetName: 'Orders', severity: 'high',
+        status, occurredAt: '2026-08-22T09:00:00', field: 'gmv', value: 999,
+        expected: 'gt', assignee: null,
+      });
+      window.recordQueries = [];
+      window.currentPageRecords = [];
+      window.Store = {
+        getStats: () => ({
+          pendingRecords: 12, processingRecords: 8, timedOutRecords: 27,
+          resolvedToday: 23, criticalAnomalies: 4,
+        }),
+        getRecords: () => window.currentPageRecords,
+        getRules: () => [],
+        loadRecordsPage: async query => {
+          window.recordQueries.push({ ...query });
+          const status = query.status || 'pending';
+          window.currentPageRecords = [makeRecord(`record-${query.page}`, status)];
+          return {
+            items: window.currentPageRecords,
+            total: query.status === 'timed_out' ? 27 : 70,
+            page: query.page,
+            pageSize: query.pageSize,
+          };
+        },
+        refresh: async () => {}, exportUrl: '/export',
+      };
+    });
+    await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'records.js') });
+    await page.evaluate(() => RecordsModule.render(document.getElementById('content'), {
+      actionsEl: document.getElementById('actions'), navigate: () => {},
+    }));
+  });
+
+  await page.waitForTimeout(50);
+  assert.equal(await page.evaluate(() => window.recordQueries.length), 1);
+  assert.deepEqual(await page.evaluate(() => window.recordQueries[0]), {
+    page: 1, pageSize: 10, status: null, severity: null, ruleId: null, search: '',
+  });
+  assert.equal(await page.locator('#cnt-all').textContent(), '70');
+  assert.equal(await page.locator('#cnt-pending').textContent(), '12');
+  assert.equal(await page.locator('#cnt-processing').textContent(), '8');
+  assert.equal(await page.locator('#cnt-timed-out').textContent(), '27');
+  assert.equal(await page.locator('#cnt-resolved').textContent(), '23');
+
+  await page.click('[data-status="timed_out"]');
+  await page.waitForFunction(() => window.recordQueries.length === 2);
+  assert.equal(await page.locator('#rec-count-text').textContent(), '共 27 条记录');
+  assert.equal(await page.evaluate(() => window.recordQueries[1].status), 'timed_out');
+  await page.click('.page-btn[data-page="2"]');
+  await page.waitForFunction(() => window.recordQueries.length === 3);
+  assert.deepEqual(await page.evaluate(() => window.recordQueries[2]), {
+    page: 2, pageSize: 10, status: 'timed_out', severity: null, ruleId: null, search: '',
+  });
+  assert.deepEqual(pageErrors, []);
+});
+
+test('quick status resolution refreshes list classifications and the navigation count', async t => {
+  const { page, pageErrors } = await withPage(t, async page => {
+    await page.evaluate(() => {
+      document.body.insertAdjacentHTML('afterbegin', '<span id="nav-anomaly-count">1</span>');
+      window.summaryStats = {
+        pendingRecords: 0, processingRecords: 0, timedOutRecords: 1,
+        resolvedToday: 0, criticalAnomalies: 0, unresolvedRecords: 1,
+      };
+      window.currentRecord = {
+        id: 'record-timeout', ruleId: 'rule-1', ruleName: 'GMV check', datasetName: 'Orders',
+        severity: 'high', status: 'timed_out', occurredAt: '2026-08-22T09:00:00',
+        field: 'gmv', value: 999, expected: 'gt', assignee: null,
+      };
+      window.Store = {
+        getStats: () => window.summaryStats,
+        getRecords: () => [window.currentRecord], getRecord: () => window.currentRecord, getRules: () => [],
+        loadRecordsPage: async () => ({ items: [window.currentRecord], total: 1, page: 1, pageSize: 10 }),
+        updateRecord: async (_id, payload) => {
+          window.currentRecord = { ...window.currentRecord, status: payload.status };
+          window.summaryStats = {
+            ...window.summaryStats, timedOutRecords: 0, resolvedToday: 1, unresolvedRecords: 0,
+          };
+          return window.currentRecord;
+        },
+        refresh: async () => {}, exportUrl: '/export',
+      };
+    });
+    await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'records.js') });
+    await page.evaluate(() => RecordsModule.render(document.getElementById('content'), {
+      actionsEl: document.getElementById('actions'), navigate: () => {},
+    }));
+  });
+
+  await page.locator('[data-action="status"]').waitFor();
+  await page.click('[data-action="status"]');
+  await page.click('[role="dialog"] [data-status="resolved"]');
+  await page.waitForFunction(() => document.getElementById('cnt-resolved').textContent === '1');
+  assert.equal(await page.locator('#cnt-timed-out').textContent(), '0');
+  assert.equal(await page.locator('#nav-anomaly-count').textContent(), '0');
+  assert.equal(await page.locator('[data-id="record-timeout"][data-action="status"]').count(), 0);
+  assert.deepEqual(pageErrors, []);
 });

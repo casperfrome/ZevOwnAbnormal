@@ -55,7 +55,7 @@ test('validation rule fields and anomaly audit details map between API and UI co
       enabled: true, sync_status: 'synced', sync_error: null, last_run: null, next_run: null,
       anomaly_count: 1, created_at: '2026-08-22T08:00:00',
     }],
-    '/api/v1/anomalies?page_size=100': {
+    '/api/v1/anomalies?page=1&page_size=10': {
       items: [{
         id: 'record-1', rule_id: 'rule-1', rule_name: 'GMV check', dataset_name: 'Orders',
         severity: 'high', status: 'timed_out', business_key: { owner_id: 'u_1' }, row_details: { gmv: 999 },
@@ -159,4 +159,125 @@ test('validation rule fields and anomaly audit details map between API and UI co
   assert.deepEqual(body.validation_targets, [
     { source: 'literal', value: 'u_2' }, { source: 'field', field: 'owner_id' },
   ]);
+});
+
+test('updating one record refreshes authoritative overview counts immediately', async () => {
+  const requests = [];
+  let resolved = false;
+  const apiRecord = status => ({
+    id: 'record-1', rule_id: 'rule-1', rule_name: 'GMV check', dataset_name: 'Orders',
+    severity: 'high', status, business_key: {}, row_details: { gmv: 999 },
+    matched_conditions: [{ field: 'gmv', operator: 'gt', actual: 999 }], hit_count: 1,
+    first_seen_at: '2026-08-22T09:00:00', last_seen_at: '2026-08-22T09:10:00',
+    resolved_at: status === 'resolved' ? '2026-08-22T09:20:00' : null, assignee: null,
+    description: '', validation_deadline: null, timed_out_at: status === 'timed_out' ? '2026-08-22T09:15:00' : null,
+    resolution_source: status === 'resolved' ? 'manual' : null,
+    resolved_by_user_id: status === 'resolved' ? 'admin' : null, delivery_status: 'none',
+  });
+  const overview = () => ({
+    stats: {
+      pending_records: 0, processing_records: 0, timed_out_records: resolved ? 0 : 1,
+      resolved_records: resolved ? 1 : 0, critical_anomalies: 0, active_rules: 0,
+      total_rules: 0, online_datasources: 0, total_datasources: 0, total_datasets: 0,
+    }, recent_anomalies: [], top_rules: [],
+  });
+  const context = {
+    window: {},
+    fetch: async (url, options = {}) => {
+      requests.push({ url, options });
+      let body;
+      if (url === '/api/v1/auth/me') body = { username: 'admin' };
+      else if (url === '/api/v1/datasources' || url === '/api/v1/datasets' || url === '/api/v1/rules') body = [];
+      else if (url === '/api/v1/anomalies?page=1&page_size=10') body = { items: [apiRecord('timed_out')], total: 1, page: 1, page_size: 10 };
+      else if (url === '/api/v1/anomalies/record-1/status') { resolved = true; body = apiRecord('resolved'); }
+      else if (url === '/api/v1/overview') body = overview();
+      else throw new Error(`unexpected request ${url}`);
+      return { ok: true, status: 200, json: async () => body };
+    },
+  };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'scripts', 'data.js'), 'utf8'), context);
+  const store = context.window.Store;
+  await store.init();
+  assert.equal(store.getStats().timedOutRecords, 1);
+  assert.equal(store.getStats().unresolvedRecords, 1);
+
+  await store.updateRecord('record-1', { status: 'resolved' });
+
+  assert.equal(store.getRecord('record-1').status, 'resolved');
+  assert.equal(store.getStats().timedOutRecords, 0);
+  assert.equal(store.getStats().resolvedToday, 1);
+  assert.equal(store.getStats().unresolvedRecords, 0);
+  assert.equal(requests.filter(item => item.url === '/api/v1/overview').length, 2);
+});
+
+test('record pages are loaded from the backend with status and pagination filters', async () => {
+  const requests = [];
+  const context = {
+    window: {}, URLSearchParams,
+    fetch: async (url, options = {}) => {
+      requests.push({ url, options });
+      return {
+        ok: true, status: 200,
+        json: async () => ({
+          items: [{
+            id: 'record-21', rule_id: 'rule-1', rule_name: 'GMV check', dataset_name: 'Orders',
+            severity: 'high', status: 'timed_out', business_key: {}, row_details: { gmv: 999 },
+            matched_conditions: [{ field: 'gmv', operator: 'gt', actual: 999 }], hit_count: 1,
+            first_seen_at: '2026-08-22T09:00:00', last_seen_at: '2026-08-22T09:10:00',
+            resolved_at: null, assignee: null, description: '', validation_deadline: null,
+            timed_out_at: '2026-08-22T09:30:00', resolution_source: null,
+            resolved_by_user_id: null, delivery_status: 'none',
+          }],
+          total: 27, page: 3, page_size: 10,
+        }),
+      };
+    },
+  };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'scripts', 'data.js'), 'utf8'), context);
+  const store = context.window.Store;
+  assert.equal(typeof store.loadRecordsPage, 'function');
+
+  const result = await store.loadRecordsPage({
+    page: 3, pageSize: 10, status: 'timed_out', severity: 'high', ruleId: 'rule-1', search: 'GMV',
+  });
+
+  assert.equal(requests[0].url, '/api/v1/anomalies?page=3&page_size=10&status_filter=timed_out&severity=high&rule_id=rule-1&search=GMV');
+  assert.equal(result.total, 27);
+  assert.equal(result.page, 3);
+  assert.equal(result.pageSize, 10);
+  assert.equal(result.items[0].status, 'timed_out');
+  assert.equal(store.getRecords()[0].id, 'record-21');
+});
+
+test('the newest record-page request owns the Store cache when responses arrive out of order', async () => {
+  const pendingResponses = [];
+  const apiRecord = (id, status) => ({
+    id, rule_id: 'rule-1', rule_name: 'GMV check', dataset_name: 'Orders', severity: 'high', status,
+    business_key: {}, row_details: {}, matched_conditions: [], hit_count: 1,
+    first_seen_at: '2026-08-22T09:00:00', last_seen_at: '2026-08-22T09:00:00',
+    resolved_at: null, assignee: null, description: '', validation_deadline: null,
+    timed_out_at: null, resolution_source: null, resolved_by_user_id: null, delivery_status: 'none',
+  });
+  const context = {
+    window: {},
+    fetch: url => new Promise(resolve => pendingResponses.push({ url, resolve })),
+  };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'scripts', 'data.js'), 'utf8'), context);
+  const store = context.window.Store;
+  const first = store.loadRecordsPage({ page: 1, pageSize: 10, status: 'pending' });
+  const second = store.loadRecordsPage({ page: 1, pageSize: 10, status: 'timed_out' });
+
+  pendingResponses[1].resolve({
+    ok: true, status: 200,
+    json: async () => ({ items: [apiRecord('newest', 'timed_out')], total: 1, page: 1, page_size: 10 }),
+  });
+  await second;
+  pendingResponses[0].resolve({
+    ok: true, status: 200,
+    json: async () => ({ items: [apiRecord('stale', 'pending')], total: 1, page: 1, page_size: 10 }),
+  });
+  await first;
+
+  assert.equal(store.getRecords()[0].id, 'newest');
+  assert.equal(store.getRecords()[0].status, 'timed_out');
 });
