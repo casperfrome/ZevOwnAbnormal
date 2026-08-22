@@ -109,3 +109,28 @@ Fresh verification on the exact working tree:
 - `git diff --check` — exit 0 (only existing LF/CRLF conversion notices).
 
 No credentials were read and no external service or Feishu endpoint was contacted.
+
+## Final Fix Round 4
+
+Baseline: `1a9ac66`
+
+Scope: the final launcher token-precedence Minor finding.
+
+- **Empty process alias fallback:** launcher pre-cleaning now checks whether each canonical/legacy env key exists and whether its value trims to empty, including an explicitly empty string. Such keys are removed before `load_dotenv(..., override=False)`, allowing the same alias in `.env` to supply the token. Nonblank process aliases retain precedence; existing parameterized precedence and secret-free conflict regressions remain green for both aliases.
+
+### Round 4 TDD and verification evidence
+
+The new canonical/legacy parameterized fallback regression was observed RED in both cases: an empty process env key blocked the same `.env` alias. The minimal `name in os.environ and not value.strip()` pre-clean condition made both cases GREEN.
+
+Fresh verification on the exact working tree:
+
+- `python -m pytest tests/test_feishu_long_connection.py -q` — **35 passed**, 7 upstream `lark_oapi/pkg_resources` deprecation warnings.
+- `python -m pytest backend/tests tests -q` — **217 passed**, 7 upstream `lark_oapi/pkg_resources` deprecation warnings, 0 failed.
+- `NODE_PATH=<Codex bundled dependency path> node --test frontend/tests/*.test.js` — **25 passed**, 0 failed.
+- `python -m pytest backend/tests/test_anomaly_validation_migration.py -q` — **8 passed**.
+- `python -m compileall -q backend tests 飞书长连接启动` — exit 0.
+- Recursive bundled `node --check` for `frontend/scripts/*.js` — exit 0.
+- `docker compose config --quiet` — exit 0.
+- `git diff --check` — exit 0 (only existing LF/CRLF conversion notices).
+
+No credentials were read and no external service or Feishu endpoint was contacted.

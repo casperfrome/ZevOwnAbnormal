@@ -572,6 +572,30 @@ def test_repository_env_loader_lets_dotenv_replace_whitespace_only_process_alias
     assert launcher.get_required_env("SENTINEL_INTERNAL_TOKEN") == "file-token"
 
 
+@pytest.mark.parametrize("process_name", [
+    "SENTINEL_INTERNAL_TOKEN",
+    "INTERNAL_EXECUTION_TOKEN",
+])
+def test_repository_env_loader_lets_dotenv_replace_empty_process_alias(
+    tmp_path, monkeypatch, process_name,
+):
+    launcher = importlib.import_module("飞书长连接启动")
+    env_file = tmp_path / ".env"
+    env_file.write_text(f'{process_name}="  file-token  "\n', encoding="utf-8")
+    monkeypatch.setattr(launcher, "ENV_FILE", env_file, raising=False)
+    monkeypatch.setenv(process_name, "")
+    other_name = (
+        "INTERNAL_EXECUTION_TOKEN"
+        if process_name == "SENTINEL_INTERNAL_TOKEN"
+        else "SENTINEL_INTERNAL_TOKEN"
+    )
+    monkeypatch.delenv(other_name, raising=False)
+
+    launcher.load_repository_env()
+
+    assert launcher.get_required_env("SENTINEL_INTERNAL_TOKEN") == "file-token"
+
+
 def test_required_environment_values_are_trimmed(monkeypatch):
     launcher = importlib.import_module("飞书长连接启动")
     monkeypatch.setenv("FEISHU_APP_ID", "  app-id\t")

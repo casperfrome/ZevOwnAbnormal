@@ -27,7 +27,7 @@ def load_repository_env() -> None:
         ("SENTINEL_INTERNAL_TOKEN", explicit_canonical),
         ("INTERNAL_EXECUTION_TOKEN", explicit_legacy),
     ):
-        if value and not value.strip():
+        if name in os.environ and not value.strip():
             os.environ.pop(name, None)
     load_dotenv(ENV_FILE, override=False)
     loaded_canonical = os.getenv("SENTINEL_INTERNAL_TOKEN", "")
