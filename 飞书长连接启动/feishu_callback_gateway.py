@@ -13,6 +13,7 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
 
 
 ERROR_TOAST = "处理验证请求失败，请稍后重试"
+SUPPORTED_TOAST_TYPES = frozenset({"success", "info", "warning", "error"})
 
 
 class CallbackPayloadError(ValueError):
@@ -108,29 +109,49 @@ def _map_api_response(payload: object) -> P2CardActionTriggerResponse:
     card = _mapping(response.get("card"))
     toast_type = _required_text(toast.get("type"), "toast.type")
     toast_content = _required_text(toast.get("content"), "toast.content")
+    if toast_type not in SUPPORTED_TOAST_TYPES:
+        raise CallbackPayloadError("unsupported toast.type")
+    _validate_raw_card(card)
     return P2CardActionTriggerResponse({
         "toast": {"type": toast_type, "content": toast_content},
         "card": {"type": "raw", "data": card},
     })
 
 
+def _validate_raw_card(card: dict[str, Any]) -> None:
+    if card.get("schema") != "2.0":
+        raise CallbackPayloadError("unsupported card schema")
+    header = _mapping(card.get("header"))
+    title = _mapping(header.get("title"))
+    if title.get("tag") != "plain_text":
+        raise CallbackPayloadError("unsupported card title")
+    _required_text(title.get("content"), "card.header.title.content")
+    _required_text(header.get("template"), "card.header.template")
+    body = _mapping(card.get("body"))
+    elements = body.get("elements")
+    if not isinstance(elements, list) or not elements or not all(isinstance(item, dict) for item in elements):
+        raise CallbackPayloadError("invalid card body elements")
+
+
 class CardActionGateway:
     """Handle one card action without allowing transport failures to escape."""
 
-    def __init__(self, settings: GatewaySettings, *, post: Callable[..., Any] = httpx.post):
+    def __init__(self, settings: GatewaySettings, *, client_factory: Callable[..., httpx.Client] = httpx.Client):
         self._settings = settings
-        self._post = post
+        self._client = client_factory(timeout=10.0)
+
+    def close(self) -> None:
+        self._client.close()
 
     def handle(self, event: P2CardActionTrigger) -> P2CardActionTriggerResponse:
         try:
             payload = normalize_card_action(event)
-            response = self._post(
+            response = self._client.post(
                 f"{self._settings.api_base_url}/api/internal/feishu/card-actions",
                 headers={"X-Internal-Token": self._settings.internal_token},
                 json=payload,
-                timeout=10.0,
             )
-            if response.status_code != 200:
+            if not 200 <= response.status_code < 300:
                 return _error_response()
             return _map_api_response(response.json())
         except Exception:

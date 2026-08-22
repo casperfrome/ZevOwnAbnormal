@@ -34,7 +34,10 @@ def main() -> None:
     )
 
     print("Establishing Feishu long connection. Press Ctrl+C to stop.")
-    client.start()
+    try:
+        client.start()
+    finally:
+        callback_gateway.close()
 
 
 if __name__ == "__main__":

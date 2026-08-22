@@ -41,7 +41,7 @@ Pop-Location
 
 如需接收飞书卡片验证回调，在另一个终端设置以下环境变量后启动长连接：
 `FEISHU_APP_ID`、`FEISHU_APP_SECRET`、`SENTINEL_API_BASE_URL` 和
-`INTERNAL_EXECUTION_TOKEN`）：
+`INTERNAL_EXECUTION_TOKEN`：
 
 ```powershell
 & 'D:\PythonVEnv\FirstVEnv\Scripts\python.exe' .\飞书长连接启动\飞书长连接启动.py
