@@ -15,6 +15,11 @@ STORE_DAILY_COLUMNS = (
     "metric_date, store_id, store_name, province, manager_open_id, manager_user_id, "
     "gmv, order_count, avg_order_value, refund_rate, avg_delivery_minutes, member_ratio, gmv_growth_rate"
 )
+DEMO_STARROCKS_TABLES = (
+    "ads_store_daily_operation",
+    "ads_region_daily_operation",
+    "ads_brand_daily_operation",
+)
 
 
 def is_injected_anomaly(store_index: int, day_offset: int) -> bool:
@@ -47,6 +52,24 @@ WHERE table_schema = %s AND table_name = %s AND column_name = %s LIMIT 1""",
     return cursor.fetchone() is not None
 
 
+def _latest_column_alter_job(cursor, table_name: str) -> dict[str, object] | None:
+    """Return the newest schema-change job for a table using SHOW metadata names."""
+    cursor.execute("SHOW ALTER TABLE COLUMN FROM tastien_ads")
+    names = [column[0].lower() for column in (cursor.description or [])]
+    jobs = [dict(zip(names, row)) for row in cursor.fetchall()]
+    matching = [job for job in jobs if str(job.get("tablename", "")) == table_name]
+    if not matching:
+        return None
+
+    def job_id(job):
+        try:
+            return int(job.get("jobid", -1))
+        except (TypeError, ValueError):
+            return -1
+
+    return max(matching, key=job_id)
+
+
 def ensure_manager_user_id_column(cursor) -> None:
     """Upgrade the pre-validation demo table and wait for async StarRocks DDL."""
     table_name = "ads_store_daily_operation"
@@ -64,15 +87,40 @@ def ensure_manager_user_id_column(cursor) -> None:
         # A previous run may already have submitted the asynchronous schema change.
         alter_error = exc
 
+    latest_job = None
+    status_error = None
     for check in range(61):
         if _starrocks_column_exists(cursor, table_name, column_name):
             return
+        try:
+            latest_job = _latest_column_alter_job(cursor, table_name)
+            status_error = None
+        except pymysql.MySQLError as exc:
+            # Some restricted StarRocks accounts cannot inspect schema-change jobs.
+            status_error = exc
+        if latest_job:
+            state = str(latest_job.get("state", "UNKNOWN")).upper()
+            if state in {"CANCELLED", "FAILED"}:
+                job_id = latest_job.get("jobid", "unknown")
+                reason = latest_job.get("msg") or latest_job.get("errormsg") or "未提供失败原因"
+                raise RuntimeError(
+                    f"StarRocks manager_user_id 列升级任务 {job_id} 状态为 {state}：{reason}"
+                )
         if check < 60:
             time.sleep(2)
 
+    diagnostic = ""
+    if latest_job:
+        diagnostic = (
+            f" 最近任务 {latest_job.get('jobid', 'unknown')} 状态为 "
+            f"{latest_job.get('state', 'UNKNOWN')}，消息："
+            f"{latest_job.get('msg') or latest_job.get('errormsg') or '无'}。"
+        )
+    elif status_error is not None:
+        diagnostic = f" SHOW ALTER TABLE COLUMN 查询失败：{status_error}。"
     message = (
         "StarRocks manager_user_id 列升级未在 120 秒内完成；"
-        "请运行 SHOW ALTER TABLE COLUMN FROM tastien_ads 检查任务，完成后重试造数。"
+        f"{diagnostic}请运行 SHOW ALTER TABLE COLUMN FROM tastien_ads 检查任务，完成后重试造数。"
     )
     if alter_error is not None:
         raise RuntimeError(message) from alter_error
@@ -180,10 +228,11 @@ def seed_starrocks(args, rng: random.Random):
             metric_date DATE, gmv DECIMAL(18,2), order_count BIGINT, active_store_count INT, avg_order_value DECIMAL(10,2), refund_rate DOUBLE
         ) ENGINE=OLAP DUPLICATE KEY(metric_date) DISTRIBUTED BY HASH(metric_date) BUCKETS 2 PROPERTIES ('replication_num'='1')""")
         ensure_manager_user_id_column(cur)
-        if args.reset:
-            cur.execute("TRUNCATE TABLE ads_store_daily_operation")
-            cur.execute("TRUNCATE TABLE ads_region_daily_operation")
-            cur.execute("TRUNCATE TABLE ads_brand_daily_operation")
+        # These three tables are dedicated generator outputs. Replace their complete
+        # contents on every run because Duplicate Key tables otherwise retain old
+        # 12-column rows and duplicate snapshots even without --reset.
+        for table_name in DEMO_STARROCKS_TABLES:
+            cur.execute(f"TRUNCATE TABLE {table_name}")
         end = date.today()
         batch = []
         region_totals = {}

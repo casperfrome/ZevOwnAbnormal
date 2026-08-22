@@ -43,6 +43,17 @@ DEMO_RULE_CONDITIONS = [
 DEMO_NOTIFICATION_TARGETS = [
     {"receive_id_type": "open_id", "source": "field", "value": None, "field": "manager_open_id"}
 ]
+DEMO_STARROCKS_FINGERPRINT = {
+    "name": "塔斯汀经营 ADS",
+    "type": "starrocks",
+    "host": "127.0.0.1",
+    "port": 9030,
+    "database": "tastien_ads",
+    "username": "root",
+    "password_encrypted": "",
+    "ssl": False,
+    "description": "StarRocks 综合经营 ADS 层",
+}
 
 
 def _is_demo_owned_rule(rule: Rule, dataset: Dataset) -> bool:
@@ -55,9 +66,19 @@ def _is_demo_owned_rule(rule: Rule, dataset: Dataset) -> bool:
     )
 
 
+def _is_seed_starrocks(datasource: Datasource) -> bool:
+    return all(
+        getattr(datasource, field) == expected
+        for field, expected in DEMO_STARROCKS_FINGERPRINT.items()
+    )
+
+
 def _upgrade_demo_dataset(dataset: Dataset, starrocks: Datasource) -> bool:
     if dataset.datasource_id != starrocks.id:
         print("检测到同名数据集但数据源不属于 demo，未自动更新；请人工核对 manager_user_id 字段。")
+        return False
+    if not _is_seed_starrocks(starrocks):
+        print("检测到同名数据源但完整 demo 数据源指纹不匹配，未自动更新；请人工迁移 manager_user_id 字段。")
         return False
     if dataset.sql == ADS_DAILY_SQL and dataset.fields == ADS_DAILY_FIELDS:
         return True
@@ -143,10 +164,18 @@ GROUP BY DATE(ordered_at), store_id ORDER BY store_id, metric_date""",
         elif (
             ads_validation_ready
             and _is_demo_owned_rule(demo_rule, ads_daily)
+            and demo_rule.enabled is False
             and demo_rule.validation_enabled is False
             and demo_rule.validation_targets == []
         ):
             demo_rule.validation_targets = [dict(target) for target in DEMO_VALIDATION_TARGETS]
+        elif (
+            ads_validation_ready
+            and _is_demo_owned_rule(demo_rule, ads_daily)
+            and demo_rule.enabled is True
+            and demo_rule.validation_targets == []
+        ):
+            print("检测到启用中的 demo 规则，未自动加入 validation target；请先停用并人工核对。")
         elif not _is_demo_owned_rule(demo_rule, ads_daily):
             print("检测到已定制的 demo 同名规则，未自动更新 validation 配置。")
         session.commit()

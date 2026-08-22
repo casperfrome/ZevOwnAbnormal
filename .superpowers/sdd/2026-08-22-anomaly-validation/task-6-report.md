@@ -3,7 +3,7 @@
 ## Scope delivered
 
 - Audited the Task 6 acceptance matrix against the backend, launcher, and frontend suites. Existing focused tests cover multi-recipient target normalization, blank row targets, delivery retry/uncertainty, callback relationship checks, validation boundaries, first-writer-wins, timeout races, administrator resolution, and card reconciliation. Fix Round 1 added the previously missing explicit absent-field test and replaced the mocked deep-link test with the real records module.
-- Closed the seed/demo integration gap with strict RED/GREEN. The generator now defines deterministic non-production `manager_user_id` values (`demo_user_#####`), upgrades an existing 12-column StarRocks demo table through metadata detection plus asynchronous-DDL polling, and uses explicit INSERT column lists. The metadata seeder upgrades only recognized legacy demo objects, preserves customized/active rule configuration, and emits a detectable manual-migration message instead of applying unsafe changes.
+- Closed the seed/demo integration gap with strict RED/GREEN. The generator now defines deterministic non-production `manager_user_id` values (`demo_user_#####`), upgrades an existing 12-column StarRocks demo table through metadata detection plus asynchronous-DDL job inspection, and uses explicit INSERT column lists. Every run replaces the complete contents of only the three generator-owned StarRocks demo tables, preventing Duplicate Key history from retaining old blank-ID rows or accumulating a second snapshot. The metadata seeder upgrades a legacy Dataset only when its datasource matches the complete seed fingerprint; same-named custom datasources and active rules receive a detectable manual-migration warning instead of an automatic validation change.
 - Added `docs/anomaly-validation-acceptance.md` and linked it from `README.md`. It documents Alembic migration, FastAPI and long-connection startup, `p2.card.action.trigger` subscription, `SENTINEL_PUBLIC_BASE_URL` recipient-side reachability, secret-safe diagnostics, automated acceptance, and the explicitly gated manual smoke using `user_id=753f6bdf`.
 - Added `.env.example` comments distinguishing the public browser/deep-link origin from the launcher-to-API origin.
 - No real Feishu request was made and no external service state was changed.
@@ -47,6 +47,17 @@ Fix Round 1 RED/GREEN:
 - GREEN: `backend/tests/test_demo_data.py` finished with `7 passed in 0.66s`.
 - The absent-field and real deep-link additions are coverage corrections for already-working production behavior. They passed against the existing validation service/router implementation, so no production state-machine or frontend routing change was made for them.
 
+Fix Round 2 RED/GREEN:
+
+- RED: `backend/tests/test_demo_data.py` finished with `4 failed, 6 passed in 0.76s`.
+  - Repeated non-reset generation left the original 12-column row and appended another snapshot.
+  - A `CANCELLED` StarRocks column job waited through the generic polling loop and lost the job reason.
+  - Exact legacy SQL/fields were upgraded on a same-named but custom datasource.
+  - An enabled legacy demo rule received a new validation target.
+- GREEN after the minimal changes: `10 passed in 0.68s`.
+- The stateful StarRocks fake applies TRUNCATE and INSERT operations to row data. It runs generation twice starting from an old blank-ID row, then asserts exactly one generated store/region/brand snapshot remains, `manager_user_id=demo_user_00001`, and an unrelated user-owned table is unchanged. This is a data-semantics assertion, not an INSERT-count proxy.
+- The async-DDL regression parses named `SHOW ALTER TABLE COLUMN` metadata and proves a cancelled job reports its job ID, terminal state, and reason without sleeping.
+
 ## Final verification
 
 ### Alembic SQLite 0001 → head
@@ -69,7 +80,7 @@ Result: exit `0`.
 & 'D:\PythonVEnv\FirstVEnv\Scripts\python.exe' -m pytest backend\tests tests -q
 ```
 
-Result: `134 passed, 7 warnings in 23.13s`, exit `0`.
+Result: `137 passed, 7 warnings in 21.88s`, exit `0`.
 
 The seven warnings are upstream deprecations from pinned `lark-oapi==1.7.2` / its vendored protobuf code (`pkg_resources`, namespace declarations, `utcfromtimestamp`, and event-loop lookup). There were no project warnings or failures.
 
@@ -83,7 +94,7 @@ node --test
 Pop-Location
 ```
 
-Result: `19 tests`, `19 passed`, `0 failed`, duration `9306.3929 ms`, exit `0`.
+Result: `19 tests`, `19 passed`, `0 failed`, duration `9738.4124 ms`, exit `0`.
 
 ### Static checks
 
@@ -101,7 +112,7 @@ Results:
 
 ## Environment-only limitations
 
-- A live MySQL 8.4 / StarRocks / DolphinScheduler deployment was not mutated or smoke-tested. StarRocks compatibility is covered with a stateful old-schema fake and SQL assertions; live asynchronous schema-change timing remains deployment-only. Alembic behavior was verified through the required disposable SQLite chain and existing MySQL dialect compilation tests.
+- A live MySQL 8.4 / StarRocks / DolphinScheduler deployment was not mutated or smoke-tested. StarRocks compatibility is covered with a stateful old-schema/data fake, parsed asynchronous-job metadata, and SQL assertions; live asynchronous schema-change timing remains deployment-only. Alembic behavior was verified through the required disposable SQLite chain and existing MySQL dialect compilation tests.
 - The raw shell initially could not resolve `playwright`; the frontend suite passed after loading the Playwright package bundled with the Codex desktop runtime. No package was downloaded or changed.
 - Feishu credentials, organization installation, permissions, recipient-side public URL reachability, WebSocket connectivity, actual message arrival, and card update delivery require the deployment environment. They were not exercised because no execution-time authorization for a real external send was provided.
 - The acceptance `user_id` appears only in human-facing smoke documentation. Production, seed, demo, tests, and callback logic do not hardcode it. The smoke keeps exactly one literal validation target and one same-user notification target, with the rule disabled until execution-time authorization.

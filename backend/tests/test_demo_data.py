@@ -24,6 +24,8 @@ class FakeStarRocksCursor:
     def __init__(self, state):
         self.state = state
         self.fetchone_result = None
+        self.fetchall_result = []
+        self.description = None
 
     def __enter__(self):
         return self
@@ -45,12 +47,27 @@ class FakeStarRocksCursor:
         elif normalized.startswith("ALTER TABLE ads_store_daily_operation ADD COLUMN manager_user_id"):
             self.state["alter_count"] += 1
             self.state["pending_column"] = "manager_user_id"
+        elif normalized == "SHOW ALTER TABLE COLUMN FROM tastien_ads":
+            self.description = [(name,) for name in self.state.get("alter_job_columns", [])]
+            self.fetchall_result = self.state.get("alter_job_rows", [])
+        elif normalized.startswith("TRUNCATE TABLE "):
+            table_name = normalized.split()[-1]
+            self.state["truncated_tables"].append(table_name)
+            self.state["tables"][table_name] = []
 
     def fetchone(self):
         return self.fetchone_result
 
+    def fetchall(self):
+        return self.fetchall_result
+
     def executemany(self, sql, rows):
-        self.state["batches"].append((" ".join(sql.split()), list(rows)))
+        normalized = " ".join(sql.split())
+        rows = list(rows)
+        self.state["batches"].append((normalized, rows))
+        table_name = normalized.split()[2]
+        columns = [column.strip() for column in normalized.split("(", 1)[1].split(")", 1)[0].split(",")]
+        self.state["tables"][table_name].extend(dict(zip(columns, row)) for row in rows)
 
 
 class FakeStarRocksConnection:
@@ -64,7 +81,7 @@ class FakeStarRocksConnection:
         pass
 
 
-def test_existing_twelve_column_starrocks_table_is_upgraded_once_and_uses_named_inserts(monkeypatch):
+def test_existing_twelve_column_starrocks_data_is_upgraded_and_replaced_idempotently(monkeypatch):
     state = {
         "columns": {
             "metric_date", "store_id", "store_name", "province", "manager_open_id", "gmv",
@@ -75,6 +92,15 @@ def test_existing_twelve_column_starrocks_table_is_upgraded_once_and_uses_named_
         "pending_visibility_checks": 2,
         "executed": [],
         "batches": [],
+        "truncated_tables": [],
+        "tables": {
+            "ads_store_daily_operation": [
+                {"store_id": "TS00001", "manager_open_id": "ou_demo_00001", "manager_user_id": ""}
+            ],
+            "ads_region_daily_operation": [{"province": "旧数据"}],
+            "ads_brand_daily_operation": [{"gmv": -1}],
+            "user_owned_table": [{"sentinel": "keep"}],
+        },
     }
     sleeps = []
 
@@ -105,6 +131,48 @@ def test_existing_twelve_column_starrocks_table_is_upgraded_once_and_uses_named_
         for sql, _ in store_inserts
     )
     assert all(len(row) == 13 for _, rows in store_inserts for row in rows)
+    assert state["truncated_tables"] == [
+        "ads_store_daily_operation",
+        "ads_region_daily_operation",
+        "ads_brand_daily_operation",
+    ] * 2
+    assert len(state["tables"]["ads_store_daily_operation"]) == 1
+    assert state["tables"]["ads_store_daily_operation"][0]["store_id"] == "TS00001"
+    assert state["tables"]["ads_store_daily_operation"][0]["manager_user_id"] == "demo_user_00001"
+    assert len(state["tables"]["ads_region_daily_operation"]) == 1
+    assert len(state["tables"]["ads_brand_daily_operation"]) == 1
+    assert state["tables"]["user_owned_table"] == [{"sentinel": "keep"}]
+
+
+def test_cancelled_starrocks_column_job_reports_job_reason_without_waiting(monkeypatch):
+    state = {
+        "columns": set(),
+        "alter_count": 0,
+        "pending_visibility_checks": 999,
+        "executed": [],
+        "batches": [],
+        "truncated_tables": [],
+        "tables": {},
+        "alter_job_columns": ["JobId", "TableName", "State", "Msg"],
+        "alter_job_rows": [
+            (4321, "ads_store_daily_operation", "CANCELLED", "schema change rejected")
+        ],
+    }
+    sleeps = []
+    cursor = FakeStarRocksCursor(state)
+    monkeypatch.setattr(generate_demo_data.time, "sleep", sleeps.append)
+
+    try:
+        generate_demo_data.ensure_manager_user_id_column(cursor)
+    except RuntimeError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("cancelled StarRocks schema-change job should fail")
+
+    assert "4321" in message
+    assert "CANCELLED" in message
+    assert "schema change rejected" in message
+    assert sleeps == []
 
 
 def test_seeded_rule_is_disabled_but_ready_for_demo_user_id_field(tmp_path, monkeypatch):
@@ -140,6 +208,7 @@ def test_seed_platform_upgrades_legacy_demo_metadata_without_enabling_rule(tmp_p
         source = Datasource(
             name="塔斯汀经营 ADS", type="starrocks", host="127.0.0.1", port=9030,
             database="tastien_ads", username="root", password_encrypted="",
+            description="StarRocks 综合经营 ADS 层",
         )
         dataset = Dataset(
             name="门店综合经营日报", datasource=source, description="StarRocks 门店级 ADS 指标，用于异常检测",
@@ -261,5 +330,91 @@ def test_seed_platform_does_not_point_new_rule_at_unmigrated_custom_dataset(tmp_
             assert rule.validation_targets == []
             assert rule.enabled is False
             assert "未自动更新" in capsys.readouterr().out
+    finally:
+        engine.dispose()
+
+
+def test_seed_platform_does_not_upgrade_legacy_metadata_on_same_named_custom_datasource(
+    tmp_path, monkeypatch, capsys
+):
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'custom-source-legacy-dataset.sqlite'}"
+    engine, factory = make_session_factory(database_url, testing=True)
+    Base.metadata.create_all(engine)
+    with factory() as session:
+        source = Datasource(
+            name="塔斯汀经营 ADS", type="starrocks", host="customer-starrocks.internal", port=9030,
+            database="tastien_ads", username="root", password_encrypted="",
+            description="customer-owned datasource",
+        )
+        dataset = Dataset(
+            name="门店综合经营日报", datasource=source, description="customer-owned dataset",
+            sql=seed_platform.LEGACY_ADS_DAILY_SQL,
+            fields=seed_platform.LEGACY_ADS_DAILY_FIELDS,
+        )
+        session.add(dataset)
+        session.commit()
+        dataset_id = dataset.id
+    engine.dispose()
+    monkeypatch.setattr(seed_platform, "get_settings", lambda: Settings(database_url=database_url))
+
+    seed_platform.main()
+
+    engine, factory = make_session_factory(database_url, testing=True)
+    try:
+        with factory() as session:
+            dataset = session.get(Dataset, dataset_id)
+            rule = session.scalar(select(Rule).where(Rule.name == "门店高退款率检测"))
+            assert dataset.sql == seed_platform.LEGACY_ADS_DAILY_SQL
+            assert dataset.fields == seed_platform.LEGACY_ADS_DAILY_FIELDS
+            assert rule.validation_targets == []
+            assert "数据源指纹" in capsys.readouterr().out
+    finally:
+        engine.dispose()
+
+
+def test_seed_platform_does_not_add_validation_target_to_active_legacy_demo_rule(
+    tmp_path, monkeypatch, capsys
+):
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'active-legacy-rule.sqlite'}"
+    engine, factory = make_session_factory(database_url, testing=True)
+    Base.metadata.create_all(engine)
+    with factory() as session:
+        source = Datasource(
+            name="塔斯汀经营 ADS", type="starrocks", host="127.0.0.1", port=9030,
+            database="tastien_ads", username="root", password_encrypted="",
+            description="StarRocks 综合经营 ADS 层",
+        )
+        dataset = Dataset(
+            name="门店综合经营日报", datasource=source,
+            description="StarRocks 门店级 ADS 指标，用于异常检测",
+            sql=seed_platform.LEGACY_ADS_DAILY_SQL,
+            fields=seed_platform.LEGACY_ADS_DAILY_FIELDS,
+        )
+        rule = Rule(
+            name="门店高退款率检测", description=seed_platform.DEMO_RULE_DESCRIPTION,
+            dataset=dataset, severity="high", logic="AND",
+            conditions=[dict(condition) for condition in seed_platform.DEMO_RULE_CONDITIONS],
+            anomaly_key_fields=["store_id", "metric_date"],
+            schedule={"frequency": "day", "interval": 1, "time": "09:00", "start_date": "2026-08-22", "end_date": None},
+            notification_targets=[dict(target) for target in seed_platform.DEMO_NOTIFICATION_TARGETS],
+            validation_enabled=False, validation_targets=[], validation_timeout_minutes=1440,
+            enabled=True, sync_status="synced",
+        )
+        session.add(rule)
+        session.commit()
+        rule_id = rule.id
+    engine.dispose()
+    monkeypatch.setattr(seed_platform, "get_settings", lambda: Settings(database_url=database_url))
+
+    seed_platform.main()
+
+    engine, factory = make_session_factory(database_url, testing=True)
+    try:
+        with factory() as session:
+            rule = session.get(Rule, rule_id)
+            assert rule.enabled is True
+            assert rule.validation_enabled is False
+            assert rule.validation_targets == []
+            assert "启用中的 demo 规则" in capsys.readouterr().out
     finally:
         engine.dispose()

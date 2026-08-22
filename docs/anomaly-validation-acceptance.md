@@ -29,10 +29,16 @@ Pop-Location
 
 演示数据兼容说明：`generate_demo_data.py` 会通过 `information_schema.columns` 检查旧版
 `ads_store_daily_operation`，必要时提交 StarRocks `ADD COLUMN manager_user_id`，等待异步 schema change
-可见后才使用显式列名写入。若 120 秒内未完成，脚本会提示运行
-`SHOW ALTER TABLE COLUMN FROM tastien_ads`；待任务完成后重新运行造数即可。`seed_platform.py` 只自动升级
-仍匹配旧 demo SQL/字段/规则特征的对象。检测到同名但已定制的 Dataset/Rule 时会打印“未自动更新”及人工补列说明，
-不会覆盖定制配置、启用规则或写入指向不存在字段的 validation target。
+可见后才使用显式列名写入。轮询会检查 `SHOW ALTER TABLE COLUMN FROM tastien_ads`；任务进入
+`CANCELLED`/`FAILED` 时立即报告任务 ID、状态和 StarRocks 返回的原因，超时时也附带最近任务状态。
+三张 `ads_*_daily_operation` 表是此生成器的专用完整输出，所以每次运行（包括不带 `--reset`）都会先仅清空
+这三张表再写入一套确定数据，避免 Duplicate Key 表保留旧 12 列行或叠加重复 snapshot；其他表不会被清空。
+`--reset` 仍额外负责删除并重建整个 demo 数据库。
+
+`seed_platform.py` 只在 datasource 的名称、类型、主机、端口、数据库、用户、SSL、密码占位和描述均匹配
+seed 指纹，而且 Dataset 仍精确匹配旧 demo SQL/字段时自动迁移。即使 SQL/字段看似旧版，同名自定义
+datasource 也只提示人工迁移。规则只有在 demo 特征匹配、`enabled=false`、实时校验未启用且目标为空时才会
+自动加入字段 target；启用中的规则只提示先停用核对，不改 validation 配置。
 
 可用一次性 SQLite 文件验证完整 `0001 -> head` 链，不触碰正式数据库：
 
@@ -128,16 +134,34 @@ Get-ChildItem frontend -Recurse -Filter '*.js' -File | ForEach-Object { node --c
 仅当凭证已配置、应用权限已发布、公共深链已从目标用户网络验证，并且执行当时明确授权发送真实飞书消息后，才执行本节。验收目标为 `user_id=753f6bdf`；该值只用于本次人工验收，不写入 seed、生产默认值或自动化脚本。
 
 1. 启动 FastAPI 和长连接，确认两者无配置错误。
-2. 通过 `POST /api/v1/rules` 新建临时规则（后端会强制以 `enabled=false` 保存），或编辑一条已明确停用的临时规则。保存后再次从 API/UI 确认规则仍为停用状态。
-3. `notification_targets` 是规则必填配置：只添加一个普通通知目标，类型选择固定 `user_id`，值为 `753f6bdf`。
-4. 开启“实时校验”，先删除 seed 可能带入的 `manager_user_id` 字段目标和其他目标，再只添加一个固定 literal `user_id=753f6bdf`，然后仍以停用状态保存。普通通知与互动校验目标相同且类型同为 `user_id` 时，服务会抑制同一接收人的旧文本通知，只发送互动卡片。
-5. 检查规则 API 响应：`enabled=false`、普通通知目标恰好一个、校验目标恰好一个，二者都为上述固定 `user_id`。到此仍没有外部发送。
-6. 仅在执行当时再次确认本次真实发送已获明确授权，然后启用或手动触发该临时规则，使其命中一行演示数据。授权前不得调用 enable/execute。
-7. 确认只收到一张交互卡片，卡片包含异常描述、规则、数据集、严重程度、截止时间和详情深链，且没有同一规则的重复普通文本通知。
-8. 打开深链，确认页面进入异常记录列表后自动打开正确 UUID 的详情抽屉。
-9. 先提交空白内容，确认出现安全错误提示且异常未解决；再提交 1-1000 字说明，确认异常只产生一条正式 submission，并显示解决人、文本和时间。
-10. 重复点击原卡片，确认结果幂等且不会覆盖首次文本。本 smoke 始终只配置这一位接收人，不扩展到第二接收者。
-11. 观察卡片最终变为只读解决态；临时网络失败时，后台扫描应在后续周期重试关闭。
-12. 停用临时规则并记录异常 UUID、卡片 `message_id`、时间线和最终状态。记录标识即可，不复制凭证、内部令牌或完整回调载荷。
+2. 从 `GET /api/v1/datasets` 取得准备验收的数据集 UUID，然后用下面的最小完整 payload 新建临时规则。请求明确发送 `enabled:false`；不要依赖服务端替调用方停用，也不要在这一步使用原有启用规则：
 
-未获得真实发送授权时，到第 5 步为止并保持规则停用；报告“外部副作用未执行”，不能以自动化通过替代真实飞书到达性结论。
+   ```json
+   {
+     "name": "人工验收-实时校验-唯一后缀",
+     "description": "仅用于已授权的人工 smoke",
+     "dataset_id": "<DATASET_UUID>",
+     "severity": "high",
+     "logic": "AND",
+     "conditions": [{"field": "refund_rate", "operator": "gt", "value": 0.15}],
+     "anomaly_key_fields": ["store_id", "metric_date"],
+     "schedule": {"frequency": "day", "interval": 1, "time": "09:00", "start_date": "2026-08-22", "end_date": null},
+     "notification_targets": [{"receive_id_type": "user_id", "source": "literal", "value": "753f6bdf"}],
+     "validation_enabled": true,
+     "validation_targets": [{"source": "literal", "value": "753f6bdf"}],
+     "validation_timeout_minutes": 1440,
+     "enabled": false
+   }
+   ```
+
+3. `notification_targets` 是必填项。上面的普通通知目标和互动校验目标是同一位固定 `user_id`；服务会抑制这个接收人的重复旧文本通知，只保留互动卡片。本 smoke 不添加第二接收者，也不使用 seed 的 `manager_user_id` 字段 target。
+4. 检查 POST 响应并通过 GET/UI 复核：`enabled=false`、普通通知目标恰好一个、校验目标恰好一个，二者都为上述固定 `user_id`。到此仍没有外部发送。
+5. 仅在执行当时再次确认本次真实发送已获明确授权，之后才允许发送后续规则 PUT（若部署流程需要）、调用 `/rules/{rule_id}/enable` 或 `/rules/{rule_id}/execute`，使临时规则命中一行演示数据。二次授权前不得调用这些端点。
+6. 确认只收到一张交互卡片，卡片包含异常描述、规则、数据集、严重程度、截止时间和详情深链，且没有同一规则的重复普通文本通知。
+7. 打开深链，确认页面进入异常记录列表后自动打开正确 UUID 的详情抽屉。
+8. 先提交空白内容，确认出现安全错误提示且异常未解决；再提交 1-1000 字说明，确认异常只产生一条正式 submission，并显示解决人、文本和时间。
+9. 重复点击原卡片，确认结果幂等且不会覆盖首次文本。本 smoke 始终只配置这一位接收人，不扩展到第二接收者。
+10. 观察卡片最终变为只读解决态；临时网络失败时，后台扫描应在后续周期重试关闭。
+11. 停用临时规则并记录异常 UUID、卡片 `message_id`、时间线和最终状态。记录标识即可，不复制凭证、内部令牌或完整回调载荷。
+
+未获得真实发送授权时，到第 4 步为止并保持规则停用；报告“外部副作用未执行”，不能以自动化通过替代真实飞书到达性结论。
