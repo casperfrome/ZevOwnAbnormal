@@ -10,6 +10,10 @@ class FeishuError(RuntimeError):
     pass
 
 
+class FeishuDeliveryUncertainError(FeishuError):
+    pass
+
+
 class FeishuConfigurationError(RuntimeError):
     pass
 
@@ -98,19 +102,27 @@ class FeishuClient:
         }
         if idempotency_key:
             payload["uuid"] = idempotency_key
-        response = self._client.post(
-            "/open-apis/im/v1/messages",
-            params={"receive_id_type": receive_id_type},
-            headers={"Authorization": f"Bearer {token}"},
-            json=payload,
-        )
+        try:
+            response = self._client.post(
+                "/open-apis/im/v1/messages",
+                params={"receive_id_type": receive_id_type},
+                headers={"Authorization": f"Bearer {token}"},
+                json=payload,
+            )
+        except httpx.TransportError as exc:
+            raise FeishuDeliveryUncertainError("发送飞书卡片结果未知: 网络响应丢失") from exc
         self._ensure_success(response, "发送飞书卡片失败")
-        body = self._response_body(response, "发送飞书卡片失败")
+        try:
+            body = self._response_body(response, "发送飞书卡片失败")
+        except FeishuError as exc:
+            raise FeishuDeliveryUncertainError("发送飞书卡片结果未知: 成功响应无法解析") from exc
+        if not isinstance(body.get("code"), int):
+            raise FeishuDeliveryUncertainError("发送飞书卡片结果未知: 成功响应缺少 code")
         if body.get("code") != 0:
             raise FeishuError(f"发送飞书卡片失败: {body.get('msg', body)}")
         message_id = body.get("data", {}).get("message_id") if isinstance(body.get("data"), dict) else None
         if not isinstance(message_id, str) or not message_id:
-            raise FeishuError("发送飞书卡片失败: 飞书响应缺少 message_id")
+            raise FeishuDeliveryUncertainError("发送飞书卡片结果未知: 飞书响应缺少 message_id")
         return message_id
 
     def patch_interactive(self, message_id: str, card: dict) -> None:

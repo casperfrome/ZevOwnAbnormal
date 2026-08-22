@@ -162,6 +162,7 @@ class AnomalyValidationRequest(Base, TimestampMixin):
     message_id: Mapped[str | None] = mapped_column(String(150), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    send_started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class AnomalyValidationSubmission(Base):

@@ -317,6 +317,222 @@ def test_delivery_retry_uses_stable_remote_idempotency_key(monkeypatch):
         engine.dispose()
 
 
+def test_delivery_commits_sending_claim_and_releases_transaction_before_post(tmp_path):
+    """Sending without a durable claim, or while holding its DB transaction, must fail."""
+    from app.validation_service import deliver_validation_requests
+
+    database_path = tmp_path / "two-phase.sqlite"
+    engine, factory, session, rule = build_session(
+        f"sqlite+pysqlite:///{database_path}", testing=False,
+    )
+    anomaly = make_anomaly(rule)
+    session.add(anomaly)
+    session.flush()
+    validation_request = AnomalyValidationRequest(anomaly_id=anomaly.id, recipient_user_id="user-1")
+    session.add(validation_request)
+    session.commit()
+    request_id = validation_request.id
+    observations = []
+
+    def handler(request: httpx.Request):
+        if request.url.path.endswith("tenant_access_token/internal/"):
+            return httpx.Response(200, json={"code": 0, "tenant_access_token": "token", "expire": 7200})
+        with factory() as observer:
+            persisted = observer.get(AnomalyValidationRequest, request_id)
+            observations.append((persisted.delivery_status, persisted.send_started_at, session.in_transaction()))
+        return httpx.Response(200, json={"code": 0, "data": {"message_id": "om_card"}})
+
+    try:
+        client = FeishuClient("cli", "secret", transport=httpx.MockTransport(handler))
+        assert deliver_validation_requests(
+            session, Settings(feishu_app_id="cli", feishu_app_secret="secret"), client=client, now=NOW,
+        ) == 0
+
+        assert observations == [("sending", NOW, False)]
+        assert validation_request.delivery_status == "sent"
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_lost_sent_commit_becomes_uncertain_after_dedupe_window_without_resend(tmp_path, monkeypatch):
+    """Remote success plus lost local commit must never POST again after Feishu's one-hour window."""
+    from app.validation_service import deliver_validation_requests
+
+    database_path = tmp_path / "uncertain.sqlite"
+    engine, factory, session, rule = build_session(
+        f"sqlite+pysqlite:///{database_path}", testing=False,
+    )
+    anomaly = make_anomaly(rule)
+    session.add(anomaly)
+    session.flush()
+    validation_request = AnomalyValidationRequest(anomaly_id=anomaly.id, recipient_user_id="user-1")
+    session.add(validation_request)
+    session.commit()
+    request_id = validation_request.id
+    posts = []
+
+    def handler(request: httpx.Request):
+        if request.url.path.endswith("tenant_access_token/internal/"):
+            return httpx.Response(200, json={"code": 0, "tenant_access_token": "token", "expire": 7200})
+        posts.append(json.loads(request.content))
+        return httpx.Response(200, json={"code": 0, "data": {"message_id": "om_remote"}})
+
+    original_commit = session.commit
+
+    def lose_sent_commit():
+        if any(
+            isinstance(item, AnomalyValidationRequest) and item.delivery_status == "sent"
+            for item in session.dirty
+        ):
+            session.rollback()
+            raise RuntimeError("simulated local commit loss")
+        original_commit()
+
+    monkeypatch.setattr(session, "commit", lose_sent_commit)
+    first_client = FeishuClient("cli", "secret", transport=httpx.MockTransport(handler))
+    assert deliver_validation_requests(
+        session, Settings(feishu_app_id="cli", feishu_app_secret="secret"), client=first_client, now=NOW,
+    ) == 1
+
+    with factory() as verify_sending:
+        persisted = verify_sending.get(AnomalyValidationRequest, request_id)
+        assert persisted.delivery_status == "sending"
+        assert persisted.send_started_at == NOW
+        assert persisted.message_id is None
+
+    monkeypatch.setattr(session, "commit", original_commit)
+    late_client = FeishuClient("cli", "secret", transport=httpx.MockTransport(handler))
+    assert deliver_validation_requests(
+        session,
+        Settings(feishu_app_id="cli", feishu_app_secret="secret"),
+        client=late_client,
+        now=NOW + timedelta(hours=1, seconds=1),
+    ) == 1
+
+    with factory() as verify_uncertain:
+        persisted = verify_uncertain.get(AnomalyValidationRequest, request_id)
+        assert persisted.delivery_status == "uncertain"
+        assert "人工" in persisted.last_error
+    assert len(posts) == 1
+    assert posts[0]["uuid"] == request_id
+    session.close()
+    engine.dispose()
+
+
+def test_abandoned_sending_claim_recovers_inside_safe_window():
+    """An abandoned claim must retry with the same UUID while deduplication is still safe."""
+    from app.validation_service import deliver_validation_requests
+
+    engine, _, session, rule = build_session()
+    posts = []
+    try:
+        anomaly = make_anomaly(rule)
+        session.add(anomaly)
+        session.flush()
+        request = AnomalyValidationRequest(
+            anomaly_id=anomaly.id,
+            recipient_user_id="user-1",
+            delivery_status="sending",
+            send_started_at=NOW,
+            updated_at=NOW,
+        )
+        session.add(request)
+        session.commit()
+
+        client = FeishuClient("cli", "secret", transport=httpx.MockTransport(lambda http_request: (
+            httpx.Response(200, json={"code": 0, "tenant_access_token": "token", "expire": 7200})
+            if http_request.url.path.endswith("tenant_access_token/internal/")
+            else (posts.append(json.loads(http_request.content)) or httpx.Response(
+                200, json={"code": 0, "data": {"message_id": "om_recovered"}},
+            ))
+        )))
+        assert deliver_validation_requests(
+            session,
+            Settings(feishu_app_id="cli", feishu_app_secret="secret"),
+            client=client,
+            now=NOW + timedelta(seconds=31),
+        ) == 0
+
+        assert len(posts) == 1
+        assert posts[0]["uuid"] == request.id
+        assert request.delivery_status == "sent"
+        assert request.message_id == "om_recovered"
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_missing_configuration_marks_expired_sending_claim_uncertain_without_post():
+    """Configuration failure must not strand an expired ambiguous send as retryable."""
+    from app.validation_service import deliver_validation_requests
+
+    engine, _, session, rule = build_session()
+    try:
+        anomaly = make_anomaly(rule)
+        session.add(anomaly)
+        session.flush()
+        request = AnomalyValidationRequest(
+            anomaly_id=anomaly.id,
+            recipient_user_id="user-1",
+            delivery_status="sending",
+            send_started_at=NOW,
+            updated_at=NOW,
+        )
+        session.add(request)
+        session.commit()
+
+        assert deliver_validation_requests(
+            session, Settings(feishu_app_id="", feishu_app_secret=""),
+            now=NOW + timedelta(hours=1, seconds=1),
+        ) == 1
+        assert request.delivery_status == "uncertain"
+        assert "人工" in request.last_error
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_ambiguous_attempt_is_not_downgraded_by_later_definitive_errors(monkeypatch):
+    """Once any attempt may have created a card, later rejections must not make the request freely retryable."""
+    from app.validation_service import deliver_validation_requests
+
+    engine, _, session, rule = build_session()
+    send_attempts = 0
+    try:
+        anomaly = make_anomaly(rule)
+        session.add(anomaly)
+        session.flush()
+        request = AnomalyValidationRequest(anomaly_id=anomaly.id, recipient_user_id="user-1")
+        session.add(request)
+        session.commit()
+
+        def handler(http_request: httpx.Request):
+            nonlocal send_attempts
+            if http_request.url.path.endswith("tenant_access_token/internal/"):
+                return httpx.Response(200, json={"code": 0, "tenant_access_token": "token", "expire": 7200})
+            send_attempts += 1
+            if send_attempts == 1:
+                raise httpx.ReadTimeout("response lost", request=http_request)
+            return httpx.Response(500, json={"code": 1, "msg": "definitive rejection"})
+
+        monkeypatch.setattr("app.validation_service.time.sleep", lambda _: None)
+        client = FeishuClient("cli", "secret", transport=httpx.MockTransport(handler))
+        assert deliver_validation_requests(
+            session,
+            Settings(feishu_app_id="cli", feishu_app_secret="secret"),
+            client=client,
+            now=NOW,
+        ) == 1
+
+        assert send_attempts == 3
+        assert request.delivery_status == "sending"
+        assert request.send_started_at == NOW
+    finally:
+        session.close()
+        engine.dispose()
+
+
 def test_two_delivery_workers_send_only_one_card_for_a_request(tmp_path):
     """Two workers selecting the same pending request must produce one outbound card."""
     from app.validation_service import deliver_validation_requests

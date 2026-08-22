@@ -63,6 +63,7 @@ def test_validation_models_persist_defaults_and_enforce_first_submission():
         request = AnomalyValidationRequest(anomaly_id=anomaly.id, recipient_user_id="u_1")
         session.add(request)
         session.commit()
+        assert request.send_started_at is None
         submission = AnomalyValidationSubmission(
             anomaly_id=anomaly.id, request_id=request.id, submitted_by_user_id="u_1",
             submitted_text="accepted text", validator_type="pseudo", result="passed",

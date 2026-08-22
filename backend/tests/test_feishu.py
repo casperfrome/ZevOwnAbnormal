@@ -57,6 +57,32 @@ def test_feishu_sends_and_patches_interactive_cards_with_shared_token():
     assert requests[2].headers["Authorization"] == "Bearer token"
 
 
+def test_feishu_classifies_transport_loss_and_success_without_message_id_as_uncertain():
+    """An ambiguous create result must not be treated as a definitive retryable rejection."""
+    from app.feishu import FeishuDeliveryUncertainError
+
+    responses = iter([
+        httpx.ReadTimeout("response lost"),
+        httpx.Response(200, json={"code": 0, "data": {}}),
+    ])
+
+    def handler(request: httpx.Request):
+        if request.url.path.endswith("tenant_access_token/internal/"):
+            return httpx.Response(200, json={"code": 0, "tenant_access_token": "token", "expire": 7200})
+        response = next(responses)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    client = FeishuClient("cli_app", "secret", transport=httpx.MockTransport(handler))
+    card = {"schema": "2.0", "body": {"elements": []}}
+
+    with pytest.raises(FeishuDeliveryUncertainError):
+        client.send_interactive("user_id", "user-1", card, idempotency_key="request-1")
+    with pytest.raises(FeishuDeliveryUncertainError):
+        client.send_interactive("user_id", "user-1", card, idempotency_key="request-1")
+
+
 @pytest.mark.parametrize(
     "send_response",
     [

@@ -12,7 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .config import Settings
-from .feishu import FeishuClient, FeishuConfigurationError
+from .feishu import FeishuClient, FeishuConfigurationError, FeishuDeliveryUncertainError, FeishuError
 from .models import (
     AnomalyEvent,
     AnomalyRecord,
@@ -43,6 +43,9 @@ class SubmissionResult:
 
 
 _SQLITE_LOCK_STRIPES = tuple(threading.Lock() for _ in range(64))
+_FEISHU_DEDUPE_WINDOW = timedelta(hours=1)
+_FEISHU_RETRY_SAFETY_MARGIN = timedelta(minutes=1)
+_DELIVERY_CLAIM_LEASE = timedelta(seconds=30)
 
 
 def resolve_validation_targets(targets: list[dict], row: dict[str, Any]) -> list[str]:
@@ -180,10 +183,11 @@ def deliver_validation_requests(
     request_ids: list[str] | None = None,
     rule_id: str | None = None,
     client: FeishuClient | None = None,
+    now: datetime | None = None,
 ) -> int:
     query = select(AnomalyValidationRequest.id).join(
         AnomalyRecord, AnomalyValidationRequest.anomaly_id == AnomalyRecord.id
-    ).where(AnomalyValidationRequest.delivery_status.in_(["pending", "failed"]))
+    ).where(AnomalyValidationRequest.delivery_status.in_(["pending", "failed", "sending"]))
     if request_ids is not None:
         if not request_ids:
             return 0
@@ -199,41 +203,57 @@ def deliver_validation_requests(
     try:
         active_client, owns_client = _active_client(settings, client)
     except Exception as exc:
-        return _mark_delivery_configuration_failure(session, pending_ids, exc)
+        failure_time = now if now is not None else utcnow()
+        return _mark_delivery_configuration_failure(session, pending_ids, exc, failure_time)
     failures = 0
     try:
         for request_id in pending_ids:
-            with _serialize_sqlite(session, f"delivery:{request_id}"):
-                pair = session.execute(
-                    select(AnomalyValidationRequest, AnomalyRecord).join(
-                        AnomalyRecord, AnomalyValidationRequest.anomaly_id == AnomalyRecord.id
-                    ).where(AnomalyValidationRequest.id == request_id).with_for_update()
-                ).one_or_none()
-                if pair is None or pair[0].delivery_status not in {"pending", "failed"}:
-                    session.commit()
-                    continue
-                request, anomaly = pair
-                for attempt in range(3):
-                    request.delivery_attempts += 1
-                    try:
-                        request.message_id = active_client.send_interactive(
-                            "user_id",
-                            request.recipient_user_id,
-                            build_validation_card(anomaly, settings.sentinel_public_base_url),
-                            idempotency_key=request.id,
-                        )
-                        request.delivery_status = anomaly.status if anomaly.status in {"timed_out", "resolved"} else "sent"
-                        request.last_error = None
-                        request.delivered_at = utcnow()
+            claim_time = now if now is not None else utcnow()
+            claim_outcome, pair = _claim_validation_delivery(session, request_id, claim_time)
+            if claim_outcome == "uncertain":
+                failures += 1
+                continue
+            if claim_outcome != "claimed" or pair is None:
+                continue
+            request, anomaly = pair
+            message_id = None
+            final_error: Exception | None = None
+            ambiguous_error: Exception | None = None
+            for attempt in range(3):
+                if attempt:
+                    retry_time = now if now is not None else utcnow()
+                    if not _record_validation_delivery_retry(session, request.id, retry_time):
+                        final_error = RuntimeError("发送认领已失效")
+                        ambiguous_error = ambiguous_error or final_error
                         break
-                    except Exception as exc:
-                        request.delivery_status = "failed"
-                        request.last_error = str(exc)[:2000]
-                        if attempt < 2:
-                            time.sleep((0.2, 0.5)[attempt])
-                if request.delivery_status == "failed":
+                try:
+                    message_id = active_client.send_interactive(
+                        "user_id",
+                        request.recipient_user_id,
+                        build_validation_card(anomaly, settings.sentinel_public_base_url),
+                        idempotency_key=request.id,
+                    )
+                    break
+                except FeishuDeliveryUncertainError as exc:
+                    final_error = exc
+                    ambiguous_error = ambiguous_error or exc
+                except FeishuError as exc:
+                    final_error = exc
+                except Exception as exc:
+                    final_error = exc
+                    ambiguous_error = ambiguous_error or exc
+                if attempt < 2:
+                    time.sleep((0.2, 0.5)[attempt])
+            finish_time = now if now is not None else utcnow()
+            if message_id is not None:
+                if not _finish_validation_delivery(session, request.id, anomaly.status, message_id, finish_time):
                     failures += 1
-                session.commit()
+            elif ambiguous_error is not None:
+                _leave_validation_delivery_uncertain(session, request.id, ambiguous_error, finish_time)
+                failures += 1
+            else:
+                _fail_validation_delivery_definitively(session, request.id, final_error, finish_time)
+                failures += 1
         return failures
     finally:
         if owns_client and active_client is not None:
@@ -244,6 +264,7 @@ def _mark_delivery_configuration_failure(
     session: Session,
     request_ids: list[str],
     error: Exception,
+    failed_at: datetime,
 ) -> int:
     failures = 0
     for request_id in request_ids:
@@ -253,15 +274,161 @@ def _mark_delivery_configuration_failure(
                     AnomalyValidationRequest.id == request_id
                 ).with_for_update()
             )
-            if request is None or request.delivery_status not in {"pending", "failed"}:
+            if request is None:
+                session.commit()
+                continue
+            if request.delivery_status == "sending":
+                if not _can_safely_retry_delivery(request, failed_at):
+                    request.delivery_status = "uncertain"
+                    request.last_error = "飞书发送结果未知且已进入一小时去重窗口安全边界，请人工核查"
+                    request.updated_at = failed_at
+                failures += 1
+                session.commit()
+                continue
+            if request.delivery_status not in {"pending", "failed"}:
                 session.commit()
                 continue
             request.delivery_attempts += 1
             request.delivery_status = "failed"
             request.last_error = str(error)[:2000]
+            request.send_started_at = None
             failures += 1
             session.commit()
     return failures
+
+
+def _claim_validation_delivery(
+    session: Session,
+    request_id: str,
+    claim_time: datetime,
+) -> tuple[str, tuple[AnomalyValidationRequest, AnomalyRecord] | None]:
+    with _serialize_sqlite(session, f"delivery:{request_id}"):
+        pair = session.execute(
+            select(AnomalyValidationRequest, AnomalyRecord).join(
+                AnomalyRecord, AnomalyValidationRequest.anomaly_id == AnomalyRecord.id
+            ).where(AnomalyValidationRequest.id == request_id).with_for_update()
+        ).one_or_none()
+        if pair is None:
+            session.commit()
+            return "skipped", None
+        request, _ = pair
+        if request.delivery_status in {"pending", "failed"}:
+            request.delivery_status = "sending"
+            request.send_started_at = claim_time
+        elif request.delivery_status == "sending":
+            if not _can_safely_retry_delivery(request, claim_time):
+                request.delivery_status = "uncertain"
+                request.last_error = "飞书发送结果未知且已进入一小时去重窗口安全边界，请人工核查"
+                request.updated_at = claim_time
+                session.commit()
+                return "uncertain", None
+            if request.updated_at and claim_time < request.updated_at + _DELIVERY_CLAIM_LEASE:
+                session.commit()
+                return "skipped", None
+        else:
+            session.commit()
+            return "skipped", None
+        request.delivery_attempts += 1
+        request.last_error = None
+        request.updated_at = claim_time
+        session.commit()
+        return "claimed", pair
+
+
+def _record_validation_delivery_retry(session: Session, request_id: str, retry_time: datetime) -> bool:
+    with _serialize_sqlite(session, f"delivery:{request_id}"):
+        request = session.scalar(
+            select(AnomalyValidationRequest).where(
+                AnomalyValidationRequest.id == request_id
+            ).with_for_update()
+        )
+        if request is None or request.delivery_status != "sending":
+            session.commit()
+            return False
+        if not _can_safely_retry_delivery(request, retry_time):
+            request.delivery_status = "uncertain"
+            request.last_error = "飞书发送结果未知且已进入一小时去重窗口安全边界，请人工核查"
+            request.updated_at = retry_time
+            session.commit()
+            return False
+        request.delivery_attempts += 1
+        request.updated_at = retry_time
+        session.commit()
+        return True
+
+
+def _can_safely_retry_delivery(request: AnomalyValidationRequest, retry_time: datetime) -> bool:
+    return (
+        request.send_started_at is not None
+        and retry_time + _FEISHU_RETRY_SAFETY_MARGIN < request.send_started_at + _FEISHU_DEDUPE_WINDOW
+    )
+
+
+def _finish_validation_delivery(
+    session: Session,
+    request_id: str,
+    anomaly_status: str,
+    message_id: str,
+    finished_at: datetime,
+) -> bool:
+    with _serialize_sqlite(session, f"delivery:{request_id}"):
+        try:
+            request = session.scalar(
+                select(AnomalyValidationRequest).where(
+                    AnomalyValidationRequest.id == request_id
+                ).with_for_update()
+            )
+            if request is None or request.delivery_status != "sending":
+                session.commit()
+                return False
+            request.message_id = message_id
+            request.delivery_status = anomaly_status if anomaly_status in {"timed_out", "resolved"} else "sent"
+            request.last_error = None
+            request.delivered_at = finished_at
+            request.updated_at = finished_at
+            session.commit()
+            return True
+        except Exception:
+            session.rollback()
+            return False
+
+
+def _leave_validation_delivery_uncertain(
+    session: Session,
+    request_id: str,
+    error: Exception | None,
+    failed_at: datetime,
+) -> None:
+    with _serialize_sqlite(session, f"delivery:{request_id}"):
+        request = session.scalar(
+            select(AnomalyValidationRequest).where(
+                AnomalyValidationRequest.id == request_id
+            ).with_for_update()
+        )
+        if request is not None and request.delivery_status == "sending":
+            request.last_error = str(error or "飞书发送结果未知")[:2000]
+            request.updated_at = failed_at
+        session.commit()
+
+
+def _fail_validation_delivery_definitively(
+    session: Session,
+    request_id: str,
+    error: Exception | None,
+    failed_at: datetime,
+) -> None:
+    with _serialize_sqlite(session, f"delivery:{request_id}"):
+        request = session.scalar(
+            select(AnomalyValidationRequest).where(
+                AnomalyValidationRequest.id == request_id
+            ).with_for_update()
+        )
+        if request is not None and request.delivery_status == "sending":
+            request.delivery_status = "failed"
+            request.send_started_at = None
+            request.last_error = str(error or "飞书明确拒绝发送")[:2000]
+            request.updated_at = failed_at
+        session.commit()
 
 
 def transition_anomaly(
