@@ -165,6 +165,7 @@ window.UI = (function () {
     const map = {
       pending:    { cls: 'accent',  label: '未处理' },
       processing: { cls: 'warning', label: '处理中' },
+      timed_out:  { cls: 'neutral', label: '已超时' },
       resolved:   { cls: 'success', label: '已解决' },
     };
     const m = map[status] || map.pending;

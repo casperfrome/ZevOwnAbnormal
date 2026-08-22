@@ -169,8 +169,8 @@ window.OverviewModule = (function () {
       </div>
       <div class="stat-card animate-rise" style="animation-delay:120ms;">
         <div class="stat-card-header"><span class="stat-card-label">待处理异常</span><div class="stat-card-icon" style="background:var(--color-accent-soft);color:var(--color-accent);">${Icon.alert({ size: 16 })}</div></div>
-        <div class="stat-card-value">${stats.pendingRecords + stats.processingRecords}</div>
-        <div class="stat-card-delta ${stats.pendingRecords > 0 ? 'down' : 'neutral'}">${stats.pendingRecords} 未处理 · ${stats.processingRecords} 处理中</div>
+        <div class="stat-card-value">${stats.unresolvedRecords ?? (stats.pendingRecords + stats.processingRecords + (stats.timedOutRecords || 0))}</div>
+        <div class="stat-card-delta ${(stats.pendingRecords + (stats.timedOutRecords || 0)) > 0 ? 'down' : 'neutral'}">${stats.pendingRecords} 未处理 · ${stats.processingRecords} 处理中 · ${stats.timedOutRecords || 0} 超时</div>
       </div>
       <div class="stat-card animate-rise" style="animation-delay:180ms;">
         <div class="stat-card-header"><span class="stat-card-label">数据源在线</span><div class="stat-card-icon" style="background:var(--color-success-soft);color:var(--color-success);">${Icon.database({ size: 16 })}</div></div>

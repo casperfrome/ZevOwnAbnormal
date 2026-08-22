@@ -238,6 +238,9 @@ window.RulesModule = (function () {
       schedule: { frequency: 'day', interval: 1, time: '09:00', start: '2026-08-09', end: '' },
       enabled: true,
       notify: { type: 'feishu', openIds: [], userIds: [], fieldSource: null, mode: 'manual' },
+      validationEnabled: false,
+      validationTargets: [],
+      validationTimeoutMinutes: 1440,
     };
 
     const datasets = Store.getDatasets();
@@ -259,8 +262,29 @@ window.RulesModule = (function () {
                 <option value="low" ${data.severity === 'low' ? 'selected' : ''}>低 — 周度复盘</option>
               </select>
             `, { required: true })}
-            ${UI.field('描述', `<input class="input" id="f-desc" value="${escapeHtml(data.description || '')}" placeholder="规则的业务含义与处理建议" />`, { optional: true, span2: true })}
+            ${UI.field('异常描述', `<input class="input" id="f-desc" value="${escapeHtml(data.description || '')}" placeholder="说明异常现象与验证人需要确认的内容" />`, { optional: true, span2: true })}
           </div>
+        </div>
+
+        <div class="form-section validation-config">
+          <div class="form-section-title">${Icon.shield({ size: 14 })}实时校验</div>
+          <div class="form-section-desc">异常触发后，将校验卡片发送给指定 user_id，首位有效提交人完成闭环</div>
+          <div class="validation-toggle-row">
+            <div>
+              <div class="cell-strong">启用实时校验</div>
+              <div class="cell-muted">关闭时保留目标配置，但不会发起校验请求</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="f-validation-enabled" ${data.validationEnabled ? 'checked' : ''} aria-label="启用实时校验" />
+              <span class="switch-slider"></span>
+            </label>
+          </div>
+          <div class="form-grid validation-fields-grid">
+            ${UI.field('超时时间（分钟）', `<input class="input mono" id="f-validation-timeout" type="number" min="1" max="43200" value="${data.validationTimeoutMinutes ?? 1440}" />`, { required: true, help: '1–43200 分钟；到期未提交将标记为已超时' })}
+            ${UI.field('固定验证人 user_id', `<div class="tag-input" id="f-validation-userids"><input type="text" placeholder="输入 user_id 后回车" id="f-validation-userids-input" /></div>`, { optional: true, help: '可配置多个；保存时会自动收录尚未回车的内容' })}
+            ${UI.field('数据集字段目标', `<select class="select" id="f-validation-fields" multiple size="4"><option value="">请先选择数据集…</option></select>`, { optional: true, span2: true, help: '可多选；每行从所选字段读取 user_id' })}
+          </div>
+          <div class="field-error" id="f-validation-target-error" style="display:none;">${Icon.alert({ size: 12 })}<span></span></div>
         </div>
 
         <div class="form-section">
@@ -363,6 +387,8 @@ window.RulesModule = (function () {
     let unionIds = (data.notificationTargets || []).filter(t => t.source === 'literal' && t.receive_id_type === 'union_id').map(t => t.value);
     let emails = (data.notificationTargets || []).filter(t => t.source === 'literal' && t.receive_id_type === 'email').map(t => t.value);
     let chatIds = (data.notificationTargets || []).filter(t => t.source === 'literal' && t.receive_id_type === 'chat_id').map(t => t.value);
+    let validationUserIds = (data.validationTargets || []).filter(t => t.source === 'literal').map(t => t.value);
+    let validationFields = (data.validationTargets || []).filter(t => t.source === 'field').map(t => t.field);
 
     // ---------- Logic segmented ----------
     m.dialog.querySelectorAll('#f-logic button').forEach(b => {
@@ -378,6 +404,7 @@ window.RulesModule = (function () {
     const datasetSel = m.dialog.querySelector('#f-dataset');
     const fieldSel = m.dialog.querySelector('#f-field');
     const fieldSourceSel = m.dialog.querySelector('#f-field-source');
+    const validationFieldsSel = m.dialog.querySelector('#f-validation-fields');
     const keyFieldsSel = m.dialog.querySelector('#f-key-fields');
     const fieldsPreview = m.dialog.querySelector('#dataset-fields-preview');
 
@@ -385,6 +412,7 @@ window.RulesModule = (function () {
       if (!datasetId) {
         fieldSel.innerHTML = '<option value="">请先选择数据集…</option>';
         fieldSourceSel.innerHTML = '<option value="">请选择字段…</option>';
+        validationFieldsSel.innerHTML = '<option value="">请先选择数据集…</option>';
         keyFieldsSel.innerHTML = '<option value="">请选择字段…</option>';
         fieldsPreview.innerHTML = '';
         return;
@@ -394,6 +422,7 @@ window.RulesModule = (function () {
       const opts = ds.fields.map(f => `<option value="${f.name}" ${data.field === f.name ? 'selected' : ''}>${escapeHtml(f.name)} · ${f.type}</option>`).join('');
       fieldSel.innerHTML = `<option value="">请选择字段…</option>${opts}`;
       fieldSourceSel.innerHTML = `<option value="">请选择字段…</option>${ds.fields.map(f => `<option value="${f.name}" ${data.notify.fieldSource === f.name ? 'selected' : ''}>${escapeHtml(f.name)} · ${f.type}</option>`).join('')}`;
+      validationFieldsSel.innerHTML = ds.fields.map(f => `<option value="${f.name}" ${validationFields.includes(f.name) ? 'selected' : ''}>${escapeHtml(f.name)} · ${f.type}</option>`).join('');
       keyFieldsSel.innerHTML = ds.fields.map(f => `<option value="${f.name}" ${(data.anomalyKeyFields || []).includes(f.name) ? 'selected' : ''}>${escapeHtml(f.name)} · ${f.type}</option>`).join('');
       fieldsPreview.innerHTML = `
         <div class="schedule-preview" style="background:var(--color-info-soft);border-color:var(--color-info-line);color:#0369A1;margin-top:var(--space-3);">
@@ -560,6 +589,9 @@ window.RulesModule = (function () {
       wireTagInput('#f-emails', '#f-emails-input', emails),
       wireTagInput('#f-chatids', '#f-chatids-input', chatIds),
     ];
+    const commitPendingValidationTarget = wireTagInput(
+      '#f-validation-userids', '#f-validation-userids-input', validationUserIds,
+    );
 
     // ---------- Cancel / Test / Save ----------
     m.dialog.querySelector('[data-action="cancel"]').addEventListener('click', () => m.close());
@@ -605,6 +637,28 @@ window.RulesModule = (function () {
       if (notifyMode === 'field' && m.dialog.querySelector('#f-field-source').value) notificationTargets.push({ receive_id_type: m.dialog.querySelector('#f-field-id-type').value, source: 'field', field: m.dialog.querySelector('#f-field-source').value });
       if (!notificationTargets.length) { UI.toast({ type: 'warning', title: '请至少配置一个飞书接收目标' }); return; }
 
+      commitPendingValidationTarget();
+      validationFields = [...validationFieldsSel.selectedOptions].map(option => option.value).filter(Boolean);
+      const validationTargets = [
+        ...validationUserIds.map(value => ({ source: 'literal', value })),
+        ...validationFields.map(field => ({ source: 'field', field })),
+      ];
+      const validationEnabled = m.dialog.querySelector('#f-validation-enabled').checked;
+      const validationTimeoutMinutes = Number(m.dialog.querySelector('#f-validation-timeout').value);
+      const validationError = m.dialog.querySelector('#f-validation-target-error');
+      let validationMessage = '';
+      if (!Number.isInteger(validationTimeoutMinutes) || validationTimeoutMinutes < 1 || validationTimeoutMinutes > 43200) {
+        validationMessage = '超时时间必须是 1–43200 之间的整数分钟';
+      } else if (validationEnabled && !validationTargets.length) {
+        validationMessage = '启用实时校验时，请至少配置一个验证目标';
+      }
+      validationError.querySelector('span').textContent = validationMessage;
+      validationError.style.display = validationMessage ? 'flex' : 'none';
+      if (validationMessage) {
+        m.dialog.querySelector('.validation-config').scrollIntoView({ block: 'center', behavior: 'smooth' });
+        return;
+      }
+
       const payload = {
         name,
         description: m.dialog.querySelector('#f-desc').value.trim(),
@@ -616,6 +670,9 @@ window.RulesModule = (function () {
         conditions: validConditions,
         anomalyKeyFields,
         notificationTargets,
+        validationEnabled,
+        validationTargets,
+        validationTimeoutMinutes,
         logic,
         schedule: {
           frequency: freqSel.value,

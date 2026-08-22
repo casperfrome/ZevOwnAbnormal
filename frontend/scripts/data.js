@@ -48,10 +48,28 @@ window.Store = (function () {
       start: r.schedule.start_date, end: r.schedule.end_date,
     },
     notify: targetsToNotify(r.notification_targets || []), notificationTargets: r.notification_targets || [],
+    validationEnabled: !!r.validation_enabled,
+    validationTargets: r.validation_targets || [],
+    validationTimeoutMinutes: r.validation_timeout_minutes ?? 1440,
     enabled: r.enabled, syncStatus: r.sync_status, syncError: r.sync_error,
     lastRun: r.last_run || null, nextRun: r.next_run || null, anomalyCount: r.anomaly_count || 0,
     createdAt: r.created_at,
   });
+  const mapValidationRequest = item => ({
+    recipientUserId: item.recipient_user_id,
+    deliveryStatus: item.delivery_status,
+    deliveryAttempts: item.delivery_attempts || 0,
+    messageId: item.message_id,
+    lastError: item.last_error,
+    deliveredAt: item.delivered_at,
+  });
+  const mapValidationSubmission = item => item ? ({
+    submittedByUserId: item.submitted_by_user_id,
+    submittedText: item.submitted_text,
+    validatorType: item.validator_type,
+    result: item.result,
+    submittedAt: item.submitted_at,
+  }) : null;
   const mapRecord = r => {
     const first = (r.matched_conditions || [])[0] || {};
     return {
@@ -61,8 +79,13 @@ window.Store = (function () {
       expected: first.operator || '', details: r.row_details || {}, businessKey: r.business_key || {},
       matchedConditions: r.matched_conditions || [], hitCount: r.hit_count || 1,
       deliveryStatus: r.delivery_status, assignee: r.assignee,
+      description: r.description || '', validationDeadline: r.validation_deadline || null,
+      timedOutAt: r.timed_out_at || null, resolvedAt: r.resolved_at || null,
+      resolutionSource: r.resolution_source || null, resolvedByUserId: r.resolved_by_user_id || null,
       timeline: (r.timeline || []).map(e => ({ time: e.created_at, type: e.type, title: e.description, desc: '' })),
       deliveries: r.deliveries || [],
+      validationRequests: (r.validation_requests || []).map(mapValidationRequest),
+      validationSubmission: mapValidationSubmission(r.validation_submission),
     };
   };
 
@@ -107,6 +130,9 @@ window.Store = (function () {
       schedule: { frequency: data.schedule.frequency, interval: Number(data.schedule.interval || 1), time: data.schedule.time || null,
         start_date: data.schedule.start || new Date().toISOString().slice(0, 10), end_date: data.schedule.end || null },
       notification_targets: targets, enabled: !!data.enabled,
+      validation_enabled: !!data.validationEnabled,
+      validation_targets: data.validationTargets || [],
+      validation_timeout_minutes: Number(data.validationTimeoutMinutes ?? 1440),
     };
   }
 
@@ -148,14 +174,24 @@ window.Store = (function () {
     bulkUpdateRecords: async (ids, status) => { await request('/anomalies/bulk-status', { method: 'POST', body: JSON.stringify({ ids, status }) }); await refresh(); },
     exportUrl: '/api/v1/anomalies/export',
     getOverview: () => state.overview,
-    getStats: () => ({
-      pendingRecords: state.records.filter(r => r.status === 'pending').length,
-      processingRecords: state.records.filter(r => r.status === 'processing').length,
-      activeRules: state.rules.filter(r => r.enabled).length, totalRules: state.rules.length,
-      onlineDatasources: state.datasources.filter(d => d.status === 'online').length, totalDatasources: state.datasources.length,
-      totalDatasets: state.datasets.length,
-      criticalAnomalies: state.records.filter(r => r.severity === 'critical' && r.status !== 'resolved').length,
-      resolvedToday: state.records.filter(r => r.status === 'resolved').length,
-    }),
+    getStats: () => {
+      const server = state.overview?.stats || {};
+      const pendingRecords = server.pending_records ?? state.records.filter(r => r.status === 'pending').length;
+      const processingRecords = server.processing_records ?? state.records.filter(r => r.status === 'processing').length;
+      const timedOutRecords = server.timed_out_records ?? state.records.filter(r => r.status === 'timed_out').length;
+      return {
+        pendingRecords,
+        processingRecords,
+        timedOutRecords,
+        unresolvedRecords: pendingRecords + processingRecords + timedOutRecords,
+        activeRules: server.active_rules ?? state.rules.filter(r => r.enabled).length,
+        totalRules: server.total_rules ?? state.rules.length,
+        onlineDatasources: server.online_datasources ?? state.datasources.filter(d => d.status === 'online').length,
+        totalDatasources: server.total_datasources ?? state.datasources.length,
+        totalDatasets: server.total_datasets ?? state.datasets.length,
+        criticalAnomalies: server.critical_anomalies ?? state.records.filter(r => r.severity === 'critical' && r.status !== 'resolved').length,
+        resolvedToday: server.resolved_records ?? state.records.filter(r => r.status === 'resolved').length,
+      };
+    },
   };
 })();

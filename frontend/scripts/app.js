@@ -33,7 +33,7 @@
     const navCount = document.getElementById('nav-anomaly-count');
     if (navCount) {
       const stats = Store.getStats();
-      const unresolved = stats.pendingRecords + stats.processingRecords;
+      const unresolved = stats.unresolvedRecords ?? (stats.pendingRecords + stats.processingRecords + (stats.timedOutRecords || 0));
       navCount.textContent = unresolved;
       navCount.classList.toggle('muted', unresolved === 0);
     }
@@ -67,10 +67,25 @@
     }
   }
 
-  function navigate(route) {
-    if (!routes[route]) route = 'records';
-    history.replaceState(null, '', '#' + route);
+  function parseRoute(target) {
+    const parts = String(target || 'records').replace(/^#/, '').split('/');
+    const route = routes[parts[0]] ? parts[0] : 'records';
+    let detailId = null;
+    if (parts[0] === 'records' && parts[1]) {
+      try { detailId = decodeURIComponent(parts.slice(1).join('/')); }
+      catch (_) { detailId = parts.slice(1).join('/'); }
+    }
+    return { route, detailId };
+  }
+
+  function navigate(target) {
+    const { route, detailId } = parseRoute(target);
+    const hash = detailId ? `#records/${encodeURIComponent(detailId)}` : '#' + route;
+    history.replaceState(null, '', hash);
     renderRoute(route);
+    if (detailId && window.RecordsModule && typeof RecordsModule.openDetail === 'function') {
+      Promise.resolve().then(() => RecordsModule.openDetail(detailId));
+    }
     // Close mobile sidebar
     document.getElementById('sidebar').classList.remove('open');
     document.getElementById('sidebar-backdrop').classList.remove('show');
@@ -98,7 +113,7 @@
   });
 
   // Expose before loading so modules can navigate after async requests.
-  window.App = { navigate };
+  window.App = { navigate, parseRoute };
 
   // ---------- Initial route ----------
   const initial = (location.hash || '#records').slice(1);

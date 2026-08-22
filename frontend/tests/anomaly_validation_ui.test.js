@@ -1,0 +1,272 @@
+const assert = require('node:assert/strict');
+const path = require('node:path');
+const test = require('node:test');
+const { chromium } = require('playwright');
+
+const frontendRoot = path.join(__dirname, '..');
+const executablePath = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+
+async function withPage(t, setup) {
+  const browser = await chromium.launch({ headless: true, executablePath });
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  const pageErrors = [];
+  page.on('pageerror', error => pageErrors.push(error.message));
+  await page.setContent('<!doctype html><html><body><div id="toast-container"></div><div id="actions"></div><div id="content"></div></body></html>');
+  await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'icons.js') });
+  await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'components.js') });
+  await setup(page);
+  return { page, pageErrors };
+}
+
+function datasetFixture() {
+  return {
+    id: 'dataset-1', name: 'Orders', rowCount: 100,
+    fields: [
+      { name: 'order_id', type: 'varchar' },
+      { name: 'owner_id', type: 'varchar' },
+      { name: 'reviewer_id', type: 'varchar' },
+      { name: 'amount', type: 'decimal' },
+    ],
+  };
+}
+
+test('rule form saves real-time validation targets and reports an inline error when enabled without targets', async t => {
+  const { page, pageErrors } = await withPage(t, async page => {
+    await page.evaluate(dataset => {
+      window.createdRule = null;
+      window.Store = {
+        getRules: () => [], getDatasets: () => [dataset],
+        getDataset: id => id === dataset.id ? dataset : null,
+        addRule: async payload => { window.createdRule = payload; },
+      };
+    }, datasetFixture());
+    await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'rules.js') });
+    await page.evaluate(() => RulesModule.render(document.getElementById('content'), {
+      actionsEl: document.getElementById('actions'), navigate: () => {},
+    }));
+  });
+
+  await page.click('#r-add');
+  assert.equal(await page.getByText('异常描述', { exact: true }).count(), 1);
+  assert.equal(await page.getByText('实时校验', { exact: true }).count(), 1);
+  assert.equal(await page.getByText('飞书通知', { exact: true }).count(), 1, 'normal notifications remain a distinct section');
+  await page.fill('#f-name', 'Validation rule');
+  await page.selectOption('#f-dataset', 'dataset-1');
+  await page.selectOption('#f-field', 'amount');
+  await page.selectOption('#f-key-fields', 'order_id');
+  await page.selectOption('.condition-row [data-c="field"]', 'amount');
+  await page.fill('#f-openids-input', 'ou_notify');
+  await page.check('#f-validation-enabled');
+  await page.fill('#f-validation-timeout', '30');
+  await page.click('#f-save');
+
+  assert.equal(await page.evaluate(() => window.createdRule), null);
+  const targetError = page.locator('#f-validation-target-error');
+  assert.equal(await targetError.isVisible(), true);
+  assert.match(await targetError.textContent(), /至少.*验证目标/);
+
+  await page.fill('#f-validation-userids-input', 'u_typed_not_entered');
+  await page.selectOption('#f-validation-fields', ['owner_id', 'reviewer_id']);
+  await page.click('#f-save');
+  await page.waitForTimeout(25);
+
+  const created = await page.evaluate(() => window.createdRule);
+  assert.equal(created.validationEnabled, true);
+  assert.equal(created.validationTimeoutMinutes, 30);
+  assert.deepEqual(created.validationTargets, [
+    { source: 'literal', value: 'u_typed_not_entered' },
+    { source: 'field', field: 'owner_id' },
+    { source: 'field', field: 'reviewer_id' },
+  ]);
+  assert.deepEqual(pageErrors, []);
+});
+
+test('disabled real-time validation preserves configured targets when editing', async t => {
+  const { page, pageErrors } = await withPage(t, async page => {
+    const dataset = datasetFixture();
+    const rule = {
+      id: 'rule-1', name: 'Validation rule', description: 'Review issue', datasetId: dataset.id,
+      datasetName: dataset.name, field: 'amount', severity: 'medium', enabled: true, anomalyCount: 0,
+      lastRun: null, logic: 'AND', conditions: [{ field: 'amount', op: 'gt', value: '100' }],
+      anomalyKeyFields: ['order_id'], schedule: { frequency: 'day', interval: 1, time: '09:00', start: '2026-08-22', end: '' },
+      notify: { mode: 'manual', openIds: ['ou_notify'], userIds: [], fieldSource: null },
+      notificationTargets: [{ receive_id_type: 'open_id', source: 'literal', value: 'ou_notify' }],
+      validationEnabled: false,
+      validationTargets: [{ source: 'literal', value: 'u_1' }, { source: 'field', field: 'owner_id' }],
+      validationTimeoutMinutes: 60,
+    };
+    await page.evaluate(({ dataset, rule }) => {
+      window.savedRule = null;
+      window.Store = {
+        getRules: () => [rule], getRule: () => rule, getDatasets: () => [dataset], getDataset: () => dataset,
+        updateRule: async (_id, payload) => { window.savedRule = payload; },
+      };
+    }, { dataset, rule });
+    await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'rules.js') });
+    await page.evaluate(() => RulesModule.render(document.getElementById('content'), {
+      actionsEl: document.getElementById('actions'), navigate: () => {},
+    }));
+  });
+
+  await page.click('[data-action="edit"]');
+  assert.equal(await page.isChecked('#f-validation-enabled'), false);
+  assert.equal(await page.locator('#f-validation-userids .tag-pill').count(), 1);
+  assert.deepEqual(
+    await page.locator('#f-validation-fields option:checked').evaluateAll(options => options.map(option => option.value)),
+    ['owner_id'],
+  );
+  await page.click('#f-save');
+  await page.waitForTimeout(25);
+
+  const saved = await page.evaluate(() => window.savedRule);
+  assert.equal(saved.validationEnabled, false);
+  assert.deepEqual(saved.validationTargets, [
+    { source: 'literal', value: 'u_1' }, { source: 'field', field: 'owner_id' },
+  ]);
+  assert.deepEqual(pageErrors, []);
+});
+
+test('records expose timed-out filtering and render escaped validation audit detail without reopen controls', async t => {
+  const { page, pageErrors } = await withPage(t, async page => {
+    const records = [
+      {
+        id: 'record-timeout', ruleId: 'rule-1', ruleName: 'GMV check', datasetName: 'Orders', severity: 'high',
+        status: 'timed_out', occurredAt: '2026-08-22T09:00:00', field: 'gmv', value: 999, expected: 'gt',
+        assignee: null,
+      },
+      {
+        id: 'record-resolved', ruleId: 'rule-1', ruleName: 'GMV check', datasetName: 'Orders', severity: 'high',
+        status: 'resolved', occurredAt: '2026-08-22T08:00:00', field: 'gmv', value: 999, expected: 'gt',
+        assignee: null,
+      },
+    ];
+    const detail = {
+      ...records[1], description: '<img src=x onerror="window.auditInjected=true">',
+      validationDeadline: '2026-08-22T09:30:00', timedOutAt: null, resolutionSource: 'validation',
+      resolvedByUserId: 'u_1', businessKey: { owner_id: 'u_1' }, details: { gmv: 999 }, hitCount: 1,
+      lastSeenAt: '2026-08-22T09:10:00', deliveries: [], timeline: [],
+      validationRequests: [{
+        recipientUserId: 'u_1', deliveryStatus: 'resolved', deliveryAttempts: 2,
+        messageId: 'om_1', lastError: null, deliveredAt: '2026-08-22T09:01:00',
+      }],
+      validationSubmission: {
+        submittedByUserId: 'u_1', submittedText: '<script>window.auditInjected=true</script>approved',
+        validatorType: 'pseudo', result: 'passed', submittedAt: '2026-08-22T09:20:00',
+      },
+    };
+    await page.evaluate(({ records, detail }) => {
+      window.auditInjected = false;
+      window.Store = {
+        getRecords: () => records, getRules: () => [{ id: 'rule-1', name: 'GMV check' }],
+        getRule: () => ({ id: 'rule-1' }), loadRecord: async () => detail,
+        refresh: async () => {}, exportUrl: '/export',
+      };
+      window.App = { navigate: () => {} };
+    }, { records, detail });
+    await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'records.js') });
+    await page.evaluate(() => RecordsModule.render(document.getElementById('content'), {
+      actionsEl: document.getElementById('actions'), navigate: () => {},
+    }));
+  });
+
+  assert.equal(await page.getByText('已超时', { exact: true }).count() > 0, true);
+  assert.equal(await page.locator('#cnt-timed-out').textContent(), '1');
+  await page.click('[data-status="timed_out"]');
+  assert.equal(await page.locator('tbody tr').count(), 1);
+  assert.match(await page.locator('tbody tr').textContent(), /record-timeout/);
+  await page.evaluate(() => RecordsModule.openDetail('record-resolved'));
+  await page.locator('.drawer').waitFor();
+
+  const drawerText = await page.locator('.drawer').textContent();
+  assert.match(drawerText, /异常描述/);
+  assert.match(drawerText, /校验截止时间/);
+  assert.match(drawerText, /解决来源/);
+  assert.match(drawerText, /u_1/);
+  assert.match(drawerText, /approved/);
+  assert.match(drawerText, /resolved/);
+  assert.equal(await page.evaluate(() => window.auditInjected), false);
+  assert.equal(await page.locator('.drawer script, .drawer img').count(), 0);
+  assert.equal(await page.locator('#d-mark-processing, #d-resolve').count(), 0);
+  assert.equal(await page.locator('[data-id="record-resolved"][data-action="status"]').count(), 0);
+  await page.locator('.drawer .modal-close').click();
+  await page.click('[data-status="all"]');
+  await page.locator('[data-id="record-resolved"].rec-row-check').check();
+  assert.equal(
+    await page.locator('[data-bulk="processing"]').count(),
+    0,
+    'bulk controls must not offer a reopen path when a resolved record is selected',
+  );
+  assert.deepEqual(pageErrors, []);
+});
+
+test('manual resolution relies on the server resolver and refreshes the open detail', async t => {
+  const { page, pageErrors } = await withPage(t, async page => {
+    const pending = {
+      id: 'record-1', ruleId: 'rule-1', ruleName: 'GMV check', datasetName: 'Orders', severity: 'high',
+      status: 'pending', occurredAt: '2026-08-22T09:00:00', field: 'gmv', value: 999, expected: 'gt',
+      assignee: null, description: 'Review', validationDeadline: null, timedOutAt: null,
+      resolutionSource: null, resolvedByUserId: null, businessKey: {}, details: {}, hitCount: 1,
+      lastSeenAt: '2026-08-22T09:00:00', deliveries: [], validationRequests: [], validationSubmission: null, timeline: [],
+    };
+    await page.evaluate(pending => {
+      window.records = [pending]; window.updatePayload = null; window.loadCount = 0; window.refreshCount = 0;
+      window.Store = {
+        getRecords: () => window.records, getRecords: () => window.records,
+        getRules: () => [], getRule: () => null, refresh: async () => { window.refreshCount += 1; }, exportUrl: '/export',
+        loadRecord: async () => {
+          window.loadCount += 1;
+          return window.loadCount === 1 ? pending : {
+            ...pending, status: 'resolved', resolutionSource: 'manual', resolvedByUserId: 'admin',
+          };
+        },
+        updateRecord: async (_id, payload) => {
+          window.updatePayload = payload;
+          window.records = [{ ...pending, status: 'resolved', resolutionSource: 'manual', resolvedByUserId: 'admin' }];
+        },
+      };
+      window.App = { navigate: () => {} };
+    }, pending);
+    await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'records.js') });
+    await page.evaluate(() => RecordsModule.render(document.getElementById('content'), {
+      actionsEl: document.getElementById('actions'), navigate: () => {},
+    }));
+  });
+
+  await page.evaluate(() => RecordsModule.openDetail('record-1'));
+  await page.click('#d-resolve');
+  await page.waitForFunction(() => window.loadCount === 2);
+  assert.deepEqual(await page.evaluate(() => window.updatePayload), { status: 'resolved' });
+  assert.equal(await page.evaluate(() => window.refreshCount), 1);
+  assert.match(await page.locator('.drawer').textContent(), /已解决/);
+  assert.equal(await page.locator('#d-resolve, #d-mark-processing').count(), 0);
+  assert.deepEqual(pageErrors, []);
+});
+
+test('deep record hash renders the records list before opening its detail', async t => {
+  const browser = await chromium.launch({ headless: true, executablePath });
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  await page.setContent(`<!doctype html><html><body>
+    <div id="toast-container"></div><div id="sidebar"></div><div id="sidebar-backdrop"></div>
+    <button id="sidebar-toggle"></button><div id="breadcrumb"><span class="crumb-current"></span></div>
+    <span id="nav-anomaly-count"></span><div class="nav-item" data-route="records"></div><main id="page-root"></main>
+  </body></html>`);
+  await page.evaluate(() => {
+    location.hash = '#records/record-uuid';
+    window.Icon = { bug: () => '', alert: () => '' };
+    window.UI = { loadingState: () => 'loading', emptyState: () => 'empty', toast: () => {} };
+    window.Store = { init: async () => {}, getStats: () => ({ pendingRecords: 1, processingRecords: 2, timedOutRecords: 3 }) };
+    window.renderOrder = [];
+    window.RecordsModule = {
+      render: content => { window.renderOrder.push('render'); content.innerHTML = '<div id="records-list">list</div>'; },
+      openDetail: async id => { window.renderOrder.push(`detail:${id}`); },
+    };
+  });
+  await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'app.js') });
+  await page.waitForFunction(() => window.renderOrder.length === 2);
+
+  assert.deepEqual(await page.evaluate(() => window.renderOrder), ['render', 'detail:record-uuid']);
+  assert.equal(await page.locator('#records-list').count(), 1);
+  assert.equal(await page.locator('#nav-anomaly-count').textContent(), '6');
+});

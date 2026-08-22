@@ -28,6 +28,7 @@ window.RecordsModule = (function () {
           <div class="tab active" data-status="all">全部 <span class="tab-count" id="cnt-all">0</span></div>
           <div class="tab" data-status="pending">未处理 <span class="tab-count" id="cnt-pending">0</span></div>
           <div class="tab" data-status="processing">处理中 <span class="tab-count" id="cnt-processing">0</span></div>
+          <div class="tab" data-status="timed_out">已超时 <span class="tab-count" id="cnt-timed-out">0</span></div>
           <div class="tab" data-status="resolved">已解决 <span class="tab-count" id="cnt-resolved">0</span></div>
         </div>
         <div class="toolbar" id="rec-toolbar"></div>
@@ -44,9 +45,11 @@ window.RecordsModule = (function () {
     const all = Store.getRecords();
     const pending = all.filter(r => r.status === 'pending').length;
     const processing = all.filter(r => r.status === 'processing').length;
+    const timedOut = all.filter(r => r.status === 'timed_out').length;
     const resolved = all.filter(r => r.status === 'resolved').length;
     const critical = all.filter(r => r.severity === 'critical' && r.status !== 'resolved').length;
 
+    document.getElementById('rec-stats').classList.add('five-up');
     document.getElementById('rec-stats').innerHTML = `
       <div class="stat-card animate-rise" style="animation-delay:60ms;${pending > 0 ? 'border-left:3px solid var(--color-accent);' : ''}">
         <div class="stat-card-header"><span class="stat-card-label">未处理</span><div class="stat-card-icon" style="background:var(--color-accent-soft);color:var(--color-accent);">${Icon.alert({ size: 16 })}</div></div>
@@ -59,11 +62,16 @@ window.RecordsModule = (function () {
         <div class="stat-card-delta neutral">跟进中</div>
       </div>
       <div class="stat-card animate-rise" style="animation-delay:180ms;">
+        <div class="stat-card-header"><span class="stat-card-label">已超时</span><div class="stat-card-icon timeout-icon">${Icon.clock({ size: 16 })}</div></div>
+        <div class="stat-card-value">${timedOut}</div>
+        <div class="stat-card-delta ${timedOut > 0 ? 'down' : 'neutral'}">等待人工闭环</div>
+      </div>
+      <div class="stat-card animate-rise" style="animation-delay:210ms;">
         <div class="stat-card-header"><span class="stat-card-label">已解决</span><div class="stat-card-icon" style="background:var(--color-success-soft);color:var(--color-success);">${Icon.check({ size: 16 })}</div></div>
         <div class="stat-card-value">${resolved}</div>
         <div class="stat-card-delta up">已闭环</div>
       </div>
-      <div class="stat-card animate-rise" style="animation-delay:240ms;${critical > 0 ? 'border-left:3px solid var(--color-danger);' : ''}">
+      <div class="stat-card animate-rise" style="animation-delay:270ms;${critical > 0 ? 'border-left:3px solid var(--color-danger);' : ''}">
         <div class="stat-card-header"><span class="stat-card-label">严重异常</span><div class="stat-card-icon" style="background:var(--color-danger-soft);color:var(--color-danger);">${Icon.bug({ size: 16 })}</div></div>
         <div class="stat-card-value">${critical}</div>
         <div class="stat-card-delta ${critical > 0 ? 'down' : 'neutral'}">${critical > 0 ? '需紧急响应' : '无严重'}</div>
@@ -76,6 +84,7 @@ window.RecordsModule = (function () {
     document.getElementById('cnt-all').textContent = all.length;
     document.getElementById('cnt-pending').textContent = all.filter(r => r.status === 'pending').length;
     document.getElementById('cnt-processing').textContent = all.filter(r => r.status === 'processing').length;
+    document.getElementById('cnt-timed-out').textContent = all.filter(r => r.status === 'timed_out').length;
     document.getElementById('cnt-resolved').textContent = all.filter(r => r.status === 'resolved').length;
 
     document.querySelectorAll('#rec-tabs .tab').forEach(tab => {
@@ -142,6 +151,7 @@ window.RecordsModule = (function () {
     const totalPages = Math.max(1, Math.ceil(total / state.pageSize));
     if (state.page > totalPages) state.page = totalPages;
     const pageItems = all.slice((state.page - 1) * state.pageSize, state.page * state.pageSize);
+    const selectedRecords = Store.getRecords().filter(record => state.selected.has(record.id));
 
     const countText = document.getElementById('rec-count-text');
     if (countText) countText.textContent = `共 ${total} 条记录`;
@@ -205,7 +215,7 @@ window.RecordsModule = (function () {
                 <td>
                   <div class="cell-actions">
                     <button class="row-action" data-action="view" data-id="${r.id}" data-tooltip="查看详情" aria-label="查看">${Icon.eye({ size: 15 })}</button>
-                    <button class="row-action" data-action="status" data-id="${r.id}" data-tooltip="更新状态" aria-label="状态">${Icon.check({ size: 15 })}</button>
+                    ${r.status !== 'resolved' ? `<button class="row-action" data-action="status" data-id="${r.id}" data-tooltip="更新状态" aria-label="状态">${Icon.check({ size: 15 })}</button>` : ''}
                   </div>
                 </td>
               </tr>
@@ -220,8 +230,8 @@ window.RecordsModule = (function () {
             <button class="btn btn-ghost btn-sm" id="rec-clear-sel">取消</button>
           </div>
           <div class="flex items-center gap-2">
-            <button class="btn btn-secondary btn-sm" data-bulk="processing">标记处理中</button>
-            <button class="btn btn-secondary btn-sm" data-bulk="resolved">标记已解决</button>
+            ${selectedRecords.every(r => ['pending', 'processing'].includes(r.status)) && selectedRecords.some(r => r.status === 'pending') ? '<button class="btn btn-secondary btn-sm" data-bulk="processing">标记处理中</button>' : ''}
+            ${selectedRecords.every(r => r.status !== 'resolved') ? '<button class="btn btn-secondary btn-sm" data-bulk="resolved">标记已解决</button>' : ''}
             <button class="btn btn-secondary btn-sm" data-bulk="export">${Icon.download({ size: 14 })}导出选中</button>
           </div>
         </div>
@@ -298,7 +308,7 @@ window.RecordsModule = (function () {
       subtitle: `${r.id} · ${r.ruleName}`,
       body: `
         <div class="flex flex-col gap-2">
-          ${['pending', 'processing', 'resolved'].map(s => {
+          ${(r.status === 'timed_out' ? ['resolved'] : ['pending', 'processing', 'resolved']).map(s => {
             const labels = { pending: '未处理', processing: '处理中', resolved: '已解决' };
             const icons = { pending: Icon.alert({ size: 16 }), processing: Icon.clock({ size: 16 }), resolved: Icon.check({ size: 16 }) };
             const colors = { pending: 'accent', processing: 'warning', resolved: 'success' };
@@ -364,7 +374,50 @@ window.RecordsModule = (function () {
               <div class="detail-value text-mono">${escapeHtml(r.occurredAt)}</div>
               <div class="detail-label">处理人</div>
               <div class="detail-value">${r.assignee ? escapeHtml(r.assignee) : '<span class="text-muted">未分配</span>'}</div>
+              <div class="detail-label">异常描述</div>
+              <div class="detail-value">${r.description ? escapeHtml(r.description) : '<span class="text-muted">—</span>'}</div>
+              <div class="detail-label">校验截止时间</div>
+              <div class="detail-value text-mono">${escapeHtml(r.validationDeadline || '—')}</div>
+              <div class="detail-label">超时时间</div>
+              <div class="detail-value text-mono">${escapeHtml(r.timedOutAt || '—')}</div>
+              <div class="detail-label">解决来源</div>
+              <div class="detail-value text-mono">${escapeHtml(r.resolutionSource || '—')}</div>
+              <div class="detail-label">解决人 user_id</div>
+              <div class="detail-value text-mono">${escapeHtml(r.resolvedByUserId || '—')}</div>
             </div>
+          </div>
+        </div>
+
+        <div class="section validation-audit" style="box-shadow:none;border:1px solid var(--color-line);margin-top:var(--space-4);">
+          <div class="section-header" style="padding: var(--space-4) var(--space-5);">
+            <div><div class="section-title">${Icon.shield({ size: 14 })} 实时校验审计</div></div>
+          </div>
+          <div class="section-body">
+            ${(r.validationRequests || []).length ? `
+              <div class="eyebrow mb-2">请求投递与关闭状态</div>
+              <div class="results-wrap validation-request-table">
+                <table class="results-table">
+                  <thead><tr><th>验证人 user_id</th><th>状态</th><th>尝试</th><th>送达时间</th><th>message_id / 错误</th></tr></thead>
+                  <tbody>${r.validationRequests.map(item => `<tr>
+                    <td class="text-mono">${escapeHtml(item.recipientUserId)}</td>
+                    <td>${escapeHtml(item.deliveryStatus)}</td>
+                    <td>${item.deliveryAttempts}</td>
+                    <td class="text-mono">${escapeHtml(item.deliveredAt || '—')}</td>
+                    <td>${escapeHtml(item.messageId || item.lastError || '—')}</td>
+                  </tr>`).join('')}</tbody>
+                </table>
+              </div>` : '<div class="text-muted">当前异常没有实时校验请求</div>'}
+            ${r.validationSubmission ? `
+              <div class="validation-winner">
+                <div class="eyebrow">生效提交</div>
+                <div class="detail-grid">
+                  <div class="detail-label">提交人 user_id</div><div class="detail-value text-mono">${escapeHtml(r.validationSubmission.submittedByUserId)}</div>
+                  <div class="detail-label">提交时间</div><div class="detail-value text-mono">${escapeHtml(r.validationSubmission.submittedAt)}</div>
+                  <div class="detail-label">验证类型 / 结果</div><div class="detail-value text-mono">${escapeHtml(r.validationSubmission.validatorType)} / ${escapeHtml(r.validationSubmission.result)}</div>
+                </div>
+                <div class="detail-label" style="margin-top:var(--space-3);">提交内容</div>
+                <pre class="validation-submission-text">${escapeHtml(r.validationSubmission.submittedText)}</pre>
+              </div>` : ''}
           </div>
         </div>
 
@@ -468,12 +521,16 @@ window.RecordsModule = (function () {
       renderTabs();
     });
     d.drawer.querySelector('#d-resolve')?.addEventListener('click', async () => {
-      await Store.updateRecord(id, { status: 'resolved', assignee: r.assignee || '超级管理员' });
-      UI.toast({ type: 'success', title: '已标记为已解决', desc: r.id });
-      d.close();
-      renderList();
-      renderStats();
-      renderTabs();
+      try {
+        await Store.updateRecord(id, { status: 'resolved' });
+        await Store.refresh();
+        UI.toast({ type: 'success', title: '已标记为已解决', desc: r.id });
+        d.close();
+        renderList();
+        renderStats();
+        renderTabs();
+        await openDetail(id);
+      } catch (error) { UI.toast({ type: 'error', title: '更新失败', desc: error.message }); }
     });
   }
 
@@ -484,5 +541,5 @@ window.RecordsModule = (function () {
     UI.toast({ type: 'success', title: '导出已开始', desc: `${all.length} 条记录 · CSV 格式` });
   }
 
-  return { render };
+  return { render, openDetail };
 })();
