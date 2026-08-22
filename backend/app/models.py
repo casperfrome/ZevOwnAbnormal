@@ -164,6 +164,12 @@ class AnomalyValidationRequest(Base, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("anomaly_id", "recipient_user_id", name="uq_validation_request_recipient"),
         Index("ix_validation_requests_delivery_status_updated", "delivery_status", "updated_at"),
+        Index(
+            "ix_validation_requests_eligible_retry",
+            "delivery_status",
+            "next_attempt_at",
+            "updated_at",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -175,6 +181,13 @@ class AnomalyValidationRequest(Base, TimestampMixin):
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     send_started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    consecutive_failures: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default=text("0"),
+        nullable=False,
+    )
 
 
 class AnomalyValidationSubmission(Base):

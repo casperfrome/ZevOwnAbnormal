@@ -6,11 +6,11 @@ from datetime import datetime, timedelta
 
 import httpx
 import pytest
-from sqlalchemy import event, select
+from sqlalchemy import event, select, update
 
 from app.config import Settings
 from app.database import Base, make_session_factory
-from app.feishu import FeishuClient, FeishuDeliveryUncertainError
+from app.feishu import FeishuClient, FeishuDeliveryUncertainError, FeishuError
 from app.models import (
     AnomalyEvent,
     AnomalyRecord,
@@ -729,6 +729,7 @@ def test_token_fetch_failure_is_safe_to_retry_after_clearing_the_sending_claim(m
         assert rejected_posts == 3
         assert request.delivery_status == "failed"
         assert request.send_started_at is None
+        assert request.next_attempt_at is not None
 
         recovered_client = FeishuClient("cli", "secret", transport=httpx.MockTransport(lambda http_request: (
             httpx.Response(200, json={"code": 0, "tenant_access_token": "token", "expire": 7200})
@@ -739,7 +740,7 @@ def test_token_fetch_failure_is_safe_to_retry_after_clearing_the_sending_claim(m
             session,
             Settings(feishu_app_id="cli", feishu_app_secret="secret"),
             client=recovered_client,
-            now=NOW + timedelta(minutes=10),
+            now=request.next_attempt_at,
         ) == 0
         assert request.delivery_status == "sent"
         assert request.message_id == "om_recovered"
@@ -776,6 +777,65 @@ def test_resolved_anomaly_closes_a_never_posted_request_without_sending():
         engine.dispose()
 
 
+def test_resolution_between_candidate_scan_and_claim_prevents_the_first_post(
+    tmp_path, monkeypatch,
+):
+    """The locked claim must refresh anomaly state instead of trusting the pre-scan identity map."""
+    from app import validation_service
+
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'resolved-claim-race.sqlite'}"
+    engine, factory, session, rule = build_session(database_url, testing=False)
+    posts = []
+    try:
+        anomaly = make_anomaly(rule)
+        session.add(anomaly)
+        session.flush()
+        request = AnomalyValidationRequest(anomaly_id=anomaly.id, recipient_user_id="user-1")
+        session.add(request)
+        session.commit()
+
+        original_claim = validation_service._claim_validation_delivery
+        transitioned = False
+
+        def resolve_before_claim(active_session, request_id, claim_time):
+            nonlocal transitioned
+            if not transitioned:
+                transitioned = True
+                with factory() as resolver:
+                    resolver.execute(
+                        update(AnomalyRecord).where(AnomalyRecord.id == anomaly.id).values(
+                            status="resolved",
+                            active_fingerprint=None,
+                            resolved_at=claim_time,
+                        )
+                    )
+                    resolver.commit()
+            return original_claim(active_session, request_id, claim_time)
+
+        class NoPostClient:
+            def send_interactive(self, *_args, **_kwargs):
+                posts.append("unexpected")
+                return "om_unexpected"
+
+        monkeypatch.setattr(
+            validation_service, "_claim_validation_delivery", resolve_before_claim,
+        )
+
+        assert validation_service.deliver_validation_requests(
+            session, Settings(), client=NoPostClient(), now=NOW,
+        ) == 0
+
+        session.expire_all()
+        persisted = session.get(AnomalyValidationRequest, request.id)
+        assert posts == []
+        assert persisted.delivery_status == "resolved"
+        assert persisted.delivery_attempts == 0
+        assert persisted.send_started_at is None
+    finally:
+        session.close()
+        engine.dispose()
+
+
 def test_initial_delivery_recovery_honors_the_maintenance_batch_limit():
     """One maintenance scan must not claim or POST more requests than its configured batch."""
     from app.validation_service import deliver_validation_requests
@@ -807,6 +867,122 @@ def test_initial_delivery_recovery_honors_the_maintenance_batch_limit():
     finally:
         session.close()
         engine.dispose()
+
+
+def test_blocked_sending_requests_do_not_starve_a_new_pending_request():
+    """Lease-held/exhausted rows must be excluded before LIMIT is applied."""
+    from app.validation_service import deliver_validation_requests
+
+    engine, _, session, rule = build_session()
+    sends = []
+    try:
+        anomaly = make_anomaly(rule)
+        session.add(anomaly)
+        session.flush()
+        blocked = [
+            AnomalyValidationRequest(
+                anomaly_id=anomaly.id,
+                recipient_user_id=f"blocked-{index}",
+                delivery_status="sending",
+                delivery_attempts=3,
+                send_started_at=NOW,
+                next_attempt_at=NOW + timedelta(hours=1),
+                updated_at=NOW,
+            )
+            for index in range(50)
+        ]
+        pending = AnomalyValidationRequest(
+            anomaly_id=anomaly.id,
+            recipient_user_id="new-pending",
+        )
+        session.add_all([*blocked, pending])
+        session.commit()
+
+        class RecordingClient:
+            def send_interactive(self, _receive_id_type, recipient, _card, *, idempotency_key=None):
+                sends.append((recipient, idempotency_key))
+                return "om_pending"
+
+        assert deliver_validation_requests(
+            session,
+            Settings(),
+            client=RecordingClient(),
+            now=NOW + timedelta(minutes=1),
+            limit=1,
+        ) == 0
+
+        assert sends == [("new-pending", pending.id)]
+        assert pending.delivery_status == "sent"
+        assert all(item.delivery_status == "sending" for item in blocked)
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_definitive_failure_backoff_survives_restart_and_retries_when_eligible(
+    tmp_path, monkeypatch,
+):
+    """A permanent rejection must not receive three more POSTs on every maintenance minute."""
+    from app.validation_service import deliver_validation_requests
+
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'delivery-backoff.sqlite'}"
+    engine, _, session, rule = build_session(database_url, testing=False)
+    posts = []
+    anomaly = make_anomaly(rule)
+    session.add(anomaly)
+    session.flush()
+    request = AnomalyValidationRequest(anomaly_id=anomaly.id, recipient_user_id="user-1")
+    session.add(request)
+    session.commit()
+    request_id = request.id
+
+    class RejectedClient:
+        def send_interactive(self, *_args, idempotency_key=None, **_kwargs):
+            posts.append(idempotency_key)
+            raise FeishuError("recipient rejected")
+
+    monkeypatch.setattr("app.validation_service.time.sleep", lambda _: None)
+    assert deliver_validation_requests(
+        session, Settings(), client=RejectedClient(), now=NOW,
+    ) == 1
+    assert request.delivery_status == "failed"
+    retry_at = request.next_attempt_at
+    assert retry_at is not None
+    assert retry_at >= NOW + timedelta(minutes=5)
+    first_cycle_posts = len(posts)
+    session.close()
+    engine.dispose()
+
+    restarted_engine, restarted_factory = make_session_factory(database_url, testing=False)
+    try:
+        with restarted_factory() as restarted:
+            class SuccessClient:
+                def send_interactive(self, *_args, idempotency_key=None, **_kwargs):
+                    posts.append(idempotency_key)
+                    return "om_recovered"
+
+            assert deliver_validation_requests(
+                restarted,
+                Settings(),
+                client=SuccessClient(),
+                now=NOW + timedelta(minutes=1),
+            ) == 0
+            assert len(posts) == first_cycle_posts
+            assert restarted.get(AnomalyValidationRequest, request_id).delivery_status == "failed"
+
+            assert deliver_validation_requests(
+                restarted,
+                Settings(),
+                client=SuccessClient(),
+                now=retry_at,
+            ) == 0
+            recovered = restarted.get(AnomalyValidationRequest, request_id)
+            assert posts[-1] == request_id
+            assert recovered.delivery_status == "sent"
+            assert recovered.next_attempt_at is None
+            assert recovered.consecutive_failures == 0
+    finally:
+        restarted_engine.dispose()
 
 
 def test_two_delivery_workers_send_only_one_card_for_a_request(tmp_path):
@@ -910,6 +1086,47 @@ def test_timeout_is_idempotent_and_late_submission_resolves():
         assert [event.event_type for event in session.scalars(select(AnomalyEvent).order_by(AnomalyEvent.created_at))] == [
             "validation_timed_out", "validation_resolved",
         ]
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_expiration_is_bounded_and_stops_between_records(caplog):
+    from app.validation_service import expire_due_anomalies
+
+    engine, _, session, rule = build_session()
+    checks = 0
+    try:
+        anomalies = []
+        for index in range(3):
+            anomaly = make_anomaly(rule)
+            anomaly.fingerprint = str(index) * 64
+            anomaly.active_fingerprint = anomaly.fingerprint
+            anomaly.validation_deadline = NOW - timedelta(minutes=index + 1)
+            anomalies.append(anomaly)
+        session.add_all(anomalies)
+        session.commit()
+
+        def should_stop():
+            nonlocal checks
+            checks += 1
+            return checks > 1
+
+        with caplog.at_level("WARNING", logger="app.validation_service"):
+            assert expire_due_anomalies(
+                session,
+                now=NOW,
+                limit=2,
+                should_stop=should_stop,
+            ) == 1
+
+        session.expire_all()
+        assert [item.status for item in anomalies].count("timed_out") == 1
+        assert [item.status for item in anomalies].count("pending") == 2
+        assert len(list(session.scalars(select(AnomalyEvent).where(
+            AnomalyEvent.event_type == "validation_timed_out"
+        )))) == 1
+        assert any("下一轮" in record.getMessage() for record in caplog.records)
     finally:
         session.close()
         engine.dispose()

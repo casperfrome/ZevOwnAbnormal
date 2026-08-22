@@ -101,6 +101,10 @@ def get_current_admin(user: User = Depends(get_current_user)) -> str:
     return user.username
 
 
+def get_current_reader(user: User = Depends(get_current_user)) -> User:
+    return user
+
+
 @router.post("/tests/feishu-message")
 def test_feishu_message(
     payload: FeishuMessageTestRequest,
@@ -295,7 +299,10 @@ def anomaly_dict(item: AnomalyRecord, delivery_status: str | None = None) -> dic
 
 
 @router.get("/datasources")
-def list_datasources(session: Session = Depends(get_session)):
+def list_datasources(
+    session: Session = Depends(get_session),
+    _reader: User = Depends(get_current_reader),
+):
     return [datasource_dict(item) for item in session.scalars(select(Datasource).order_by(Datasource.created_at.desc()))]
 
 
@@ -330,7 +337,11 @@ def test_datasource_config(payload: DatasourceCreate, _admin_username: str = Dep
 
 
 @router.get("/datasources/{datasource_id}")
-def get_datasource(datasource_id: str, session: Session = Depends(get_session)):
+def get_datasource(
+    datasource_id: str,
+    session: Session = Depends(get_session),
+    _reader: User = Depends(get_current_reader),
+):
     item = session.get(Datasource, datasource_id)
     if not item:
         raise HTTPException(404, "数据源不存在")
@@ -387,7 +398,10 @@ def test_datasource(datasource_id: str, session: Session = Depends(get_session),
 
 
 @router.get("/datasets")
-def list_datasets(session: Session = Depends(get_session)):
+def list_datasets(
+    session: Session = Depends(get_session),
+    _reader: User = Depends(get_current_reader),
+):
     return [dataset_dict(item) for item in session.scalars(select(Dataset).order_by(Dataset.created_at.desc()))]
 
 
@@ -407,7 +421,11 @@ def create_dataset(payload: DatasetCreate, session: Session = Depends(get_sessio
 
 
 @router.get("/datasets/{dataset_id}")
-def get_dataset(dataset_id: str, session: Session = Depends(get_session)):
+def get_dataset(
+    dataset_id: str,
+    session: Session = Depends(get_session),
+    _reader: User = Depends(get_current_reader),
+):
     item = session.get(Dataset, dataset_id)
     if not item:
         raise HTTPException(404, "数据集不存在")
@@ -487,7 +505,10 @@ def validate_dataset_sql(payload: dict):
 
 
 @router.get("/rules")
-def list_rules(session: Session = Depends(get_session)):
+def list_rules(
+    session: Session = Depends(get_session),
+    _reader: User = Depends(get_current_reader),
+):
     query = select(Rule).where(Rule.deleted_at.is_(None)).order_by(Rule.created_at.desc())
     return [rule_dict(item) for item in session.scalars(query)]
 
@@ -511,7 +532,11 @@ def create_rule(payload: RuleCreate, session: Session = Depends(get_session), se
 
 
 @router.get("/rules/{rule_id}")
-def get_rule(rule_id: str, session: Session = Depends(get_session)):
+def get_rule(
+    rule_id: str,
+    session: Session = Depends(get_session),
+    _reader: User = Depends(get_current_reader),
+):
     item = session.get(Rule, rule_id)
     if not item or item.deleted_at:
         raise HTTPException(404, "规则不存在")
@@ -593,7 +618,11 @@ def disable_rule(rule_id: str, session: Session = Depends(get_session), settings
 
 
 @router.get("/rule-runs/{run_id}")
-def get_rule_run(run_id: str, session: Session = Depends(get_session)):
+def get_rule_run(
+    run_id: str,
+    session: Session = Depends(get_session),
+    _reader: User = Depends(get_current_reader),
+):
     item = session.get(RuleRun, run_id)
     if not item:
         raise HTTPException(404, "执行批次不存在")
@@ -662,6 +691,7 @@ def list_anomalies(
     sort_key: Literal["occurredAt", "severity"] = "occurredAt",
     sort_order: Literal["asc", "desc"] = "desc",
     session: Session = Depends(get_session),
+    _reader: User = Depends(get_current_reader),
 ):
     ordering = _anomaly_ordering(sort_key, sort_order)
     dialect_name = session.get_bind().dialect.name
@@ -716,6 +746,7 @@ def export_anomalies(
     sort_key: Literal["occurredAt", "severity"] = "occurredAt",
     sort_order: Literal["asc", "desc"] = "desc",
     session: Session = Depends(get_session),
+    _reader: User = Depends(get_current_reader),
 ):
     output = io.StringIO()
     writer = csv.writer(output)
@@ -736,7 +767,11 @@ def export_anomalies(
 
 
 @router.get("/anomalies/{anomaly_id}")
-def get_anomaly(anomaly_id: str, session: Session = Depends(get_session)):
+def get_anomaly(
+    anomaly_id: str,
+    session: Session = Depends(get_session),
+    _reader: User = Depends(get_current_reader),
+):
     item = session.get(AnomalyRecord, anomaly_id)
     if not item:
         raise HTTPException(404, "异常记录不存在")
@@ -840,7 +875,10 @@ def bulk_anomaly_status(
 
 
 @router.get("/overview")
-def overview(session: Session = Depends(get_session)):
+def overview(
+    session: Session = Depends(get_session),
+    _reader: User = Depends(get_current_reader),
+):
     anomalies = list(session.scalars(select(AnomalyRecord)))
     rules = list(session.scalars(select(Rule).where(Rule.deleted_at.is_(None))))
     datasources = list(session.scalars(select(Datasource)))

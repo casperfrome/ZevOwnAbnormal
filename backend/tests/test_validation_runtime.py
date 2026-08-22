@@ -31,7 +31,10 @@ def test_maintenance_cycle_uses_a_fresh_closed_session_and_runs_domain_operation
         finally:
             events.append(("close", session))
 
-    monkeypatch.setattr("app.main.expire_due_anomalies", lambda session: events.append(("expire", session)))
+    monkeypatch.setattr(
+        "app.main.expire_due_anomalies",
+        lambda session, **kwargs: events.append(("expire", session, kwargs)),
+    )
     monkeypatch.setattr(
         "app.main.deliver_validation_requests",
         lambda session, settings, **kwargs: events.append(("deliver", session, kwargs)),
@@ -47,10 +50,12 @@ def test_maintenance_cycle_uses_a_fresh_closed_session_and_runs_domain_operation
 
     assert sessions[0] is not sessions[1]
     assert events == [
-        ("open", sessions[0]), ("expire", sessions[0]),
+        ("open", sessions[0]),
+        ("expire", sessions[0], {"limit": 50, "should_stop": None}),
         ("deliver", sessions[0], {"limit": 50, "should_stop": None}),
         ("reconcile", sessions[0], {"limit": 50, "should_stop": None}), ("close", sessions[0]),
-        ("open", sessions[1]), ("expire", sessions[1]),
+        ("open", sessions[1]),
+        ("expire", sessions[1], {"limit": 50, "should_stop": None}),
         ("deliver", sessions[1], {"limit": 50, "should_stop": None}),
         ("reconcile", sessions[1], {"limit": 50, "should_stop": None}), ("close", sessions[1]),
     ]
@@ -185,6 +190,82 @@ def test_settings_accept_the_sentinel_internal_token_name_from_env_file(tmp_path
     settings = Settings(_env_file=env_file)
 
     assert settings.internal_execution_token == "sentinel-token-name"
+
+
+@pytest.mark.parametrize(
+    ("contents", "expected"),
+    [
+        ("SENTINEL_INTERNAL_TOKEN=canonical-only\n", "canonical-only"),
+        ("INTERNAL_EXECUTION_TOKEN=legacy-only\n", "legacy-only"),
+        (
+            "SENTINEL_INTERNAL_TOKEN=shared-value\n"
+            "INTERNAL_EXECUTION_TOKEN=shared-value\n",
+            "shared-value",
+        ),
+    ],
+)
+def test_settings_accept_canonical_or_legacy_file_tokens_at_equal_priority(
+    tmp_path, monkeypatch, contents, expected,
+):
+    monkeypatch.delenv("SENTINEL_INTERNAL_TOKEN", raising=False)
+    monkeypatch.delenv("INTERNAL_EXECUTION_TOKEN", raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text(contents, encoding="utf-8")
+
+    assert Settings(_env_file=env_file).internal_execution_token == expected
+
+
+def test_settings_reject_conflicting_nonempty_file_tokens_without_disclosing_values(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.delenv("SENTINEL_INTERNAL_TOKEN", raising=False)
+    monkeypatch.delenv("INTERNAL_EXECUTION_TOKEN", raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "SENTINEL_INTERNAL_TOKEN=canonical-secret\n"
+        "INTERNAL_EXECUTION_TOKEN=legacy-secret\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError) as conflict:
+        Settings(_env_file=env_file)
+
+    assert "SENTINEL_INTERNAL_TOKEN" in str(conflict.value)
+    assert "INTERNAL_EXECUTION_TOKEN" in str(conflict.value)
+    assert "canonical-secret" not in str(conflict.value)
+    assert "legacy-secret" not in str(conflict.value)
+
+
+@pytest.mark.parametrize(
+    ("process_name", "file_name"),
+    [
+        ("SENTINEL_INTERNAL_TOKEN", "INTERNAL_EXECUTION_TOKEN"),
+        ("INTERNAL_EXECUTION_TOKEN", "SENTINEL_INTERNAL_TOKEN"),
+    ],
+)
+def test_explicit_process_token_overrides_the_other_alias_in_dotenv(
+    tmp_path, monkeypatch, process_name, file_name,
+):
+    monkeypatch.delenv("SENTINEL_INTERNAL_TOKEN", raising=False)
+    monkeypatch.delenv("INTERNAL_EXECUTION_TOKEN", raising=False)
+    monkeypatch.setenv(process_name, "process-token")
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"{file_name}=file-token\n", encoding="utf-8")
+
+    assert Settings(_env_file=env_file).internal_execution_token == "process-token"
+
+
+def test_settings_reject_conflicting_process_tokens_without_disclosing_values(
+    monkeypatch,
+):
+    monkeypatch.setenv("SENTINEL_INTERNAL_TOKEN", "canonical-process-secret")
+    monkeypatch.setenv("INTERNAL_EXECUTION_TOKEN", "legacy-process-secret")
+
+    with pytest.raises(ValueError) as conflict:
+        Settings(_env_file=None)
+
+    assert "canonical-process-secret" not in str(conflict.value)
+    assert "legacy-process-secret" not in str(conflict.value)
 
 
 def test_settings_preserve_explicit_internal_token_constructor_values():

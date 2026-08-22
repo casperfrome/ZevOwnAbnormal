@@ -23,6 +23,7 @@ MIGRATION_PATH = (
 )
 INITIAL_MIGRATION_PATH = MIGRATION_PATH.with_name("20260809_0001_initial.py")
 INDEX_MIGRATION_PATH = MIGRATION_PATH.with_name("20260822_0004_validation_query_indexes.py")
+RETRY_MIGRATION_PATH = MIGRATION_PATH.with_name("20260822_0005_validation_delivery_retry_schedule.py")
 
 
 def load_migration():
@@ -43,6 +44,14 @@ def load_initial_migration():
 
 def load_index_migration():
     spec = importlib.util.spec_from_file_location("anomaly_validation_0004", INDEX_MIGRATION_PATH)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_retry_migration():
+    spec = importlib.util.spec_from_file_location("anomaly_validation_0005", RETRY_MIGRATION_PATH)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
@@ -206,3 +215,71 @@ def test_query_index_migration_adds_common_filter_sort_and_maintenance_indexes_o
         "ix_validation_requests_delivery_status_updated": ["delivery_status", "updated_at"],
     }
     engine.dispose()
+
+
+def test_retry_schedule_migration_adds_persistent_fair_queue_columns_and_index():
+    migration = load_retry_migration()
+    engine = sa.create_engine("sqlite+pysqlite:///:memory:")
+    metadata = sa.MetaData()
+    sa.Table(
+        "anomaly_validation_requests", metadata,
+        sa.Column("id", sa.String(36), primary_key=True),
+        sa.Column("delivery_status", sa.String(20), nullable=False),
+        sa.Column("updated_at", sa.DateTime(), nullable=False),
+    )
+    metadata.create_all(engine)
+
+    with engine.begin() as connection:
+        migration.op = Operations(MigrationContext.configure(connection))
+        migration.upgrade()
+        inspector = sa.inspect(connection)
+        columns = {item["name"]: item for item in inspector.get_columns(
+            "anomaly_validation_requests"
+        )}
+        indexes = {
+            item["name"]: item["column_names"]
+            for item in inspector.get_indexes("anomaly_validation_requests")
+        }
+
+    assert columns["next_attempt_at"]["nullable"] is True
+    assert columns["consecutive_failures"]["nullable"] is False
+    assert "0" in str(columns["consecutive_failures"]["default"])
+    assert indexes["ix_validation_requests_eligible_retry"] == [
+        "delivery_status", "next_attempt_at", "updated_at",
+    ]
+    engine.dispose()
+
+
+def test_retry_schedule_columns_and_eligible_index_compile_for_mysql_84():
+    migration = load_retry_migration()
+    dialect = mysql.dialect()
+    dialect.server_version_info = (8, 4, 10)
+
+    next_attempt_ddl = str(CreateColumn(
+        migration._next_attempt_column()
+    ).compile(dialect=dialect))
+    failure_count_ddl = str(CreateColumn(
+        migration._consecutive_failures_column()
+    ).compile(dialect=dialect))
+    metadata = sa.MetaData()
+    requests = sa.Table(
+        "anomaly_validation_requests",
+        metadata,
+        sa.Column("delivery_status", sa.String(20), nullable=False),
+        sa.Column("next_attempt_at", sa.DateTime()),
+        sa.Column("updated_at", sa.DateTime(), nullable=False),
+    )
+    eligible_index = sa.Index(
+        migration.ELIGIBLE_INDEX,
+        requests.c.delivery_status,
+        requests.c.next_attempt_at,
+        requests.c.updated_at,
+    )
+    index_ddl = str(sa.schema.CreateIndex(eligible_index).compile(dialect=dialect))
+
+    assert "next_attempt_at DATETIME" in next_attempt_ddl
+    assert "consecutive_failures INTEGER NOT NULL DEFAULT 0" in failure_count_ddl
+    assert (
+        "CREATE INDEX ix_validation_requests_eligible_retry "
+        "ON anomaly_validation_requests (delivery_status, next_attempt_at, updated_at)"
+    ) == index_ddl

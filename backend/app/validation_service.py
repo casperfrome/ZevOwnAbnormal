@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Callable, Iterator
 
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -48,6 +48,8 @@ _FEISHU_DEDUPE_WINDOW = timedelta(hours=1)
 _FEISHU_RETRY_SAFETY_MARGIN = timedelta(minutes=1)
 _DELIVERY_CLAIM_LEASE = timedelta(seconds=30)
 _MAX_DELIVERY_ATTEMPTS = 3
+_DELIVERY_RETRY_BASE_DELAY = timedelta(minutes=5)
+_DELIVERY_RETRY_MAX_DELAY = timedelta(hours=1)
 logger = logging.getLogger(__name__)
 
 
@@ -192,6 +194,63 @@ def _active_client(
     ), True
 
 
+def _delivery_uncertain_at(request: AnomalyValidationRequest) -> datetime | None:
+    if request.send_started_at is None:
+        return None
+    return (
+        request.send_started_at
+        + _FEISHU_DEDUPE_WINDOW
+        - _FEISHU_RETRY_SAFETY_MARGIN
+    )
+
+
+def _delivery_retry_delay(consecutive_failures: int) -> timedelta:
+    exponent = min(max(consecutive_failures - 1, 0), 10)
+    seconds = _DELIVERY_RETRY_BASE_DELAY.total_seconds() * (2 ** exponent)
+    return timedelta(seconds=min(seconds, _DELIVERY_RETRY_MAX_DELAY.total_seconds()))
+
+
+def _schedule_delivery_retry(
+    request: AnomalyValidationRequest,
+    failed_at: datetime,
+) -> None:
+    request.consecutive_failures += 1
+    request.next_attempt_at = failed_at + _delivery_retry_delay(
+        request.consecutive_failures
+    )
+    request.updated_at = failed_at
+
+
+def _eligible_delivery_predicate(scan_time: datetime):
+    scheduled_now = or_(
+        AnomalyValidationRequest.next_attempt_at.is_(None),
+        AnomalyValidationRequest.next_attempt_at <= scan_time,
+    )
+    uncertainty_cutoff = scan_time - (
+        _FEISHU_DEDUPE_WINDOW - _FEISHU_RETRY_SAFETY_MARGIN
+    )
+    lease_cutoff = scan_time - _DELIVERY_CLAIM_LEASE
+    sending_ready = and_(
+        AnomalyValidationRequest.delivery_status == "sending",
+        or_(
+            AnomalyValidationRequest.send_started_at.is_(None),
+            AnomalyValidationRequest.send_started_at <= uncertainty_cutoff,
+            and_(
+                AnomalyValidationRequest.delivery_attempts < _MAX_DELIVERY_ATTEMPTS,
+                AnomalyValidationRequest.updated_at <= lease_cutoff,
+                scheduled_now,
+            ),
+        ),
+    )
+    return or_(
+        and_(
+            AnomalyValidationRequest.delivery_status.in_(["pending", "failed"]),
+            scheduled_now,
+        ),
+        sending_ready,
+    )
+
+
 def deliver_validation_requests(
     session: Session,
     settings: Settings,
@@ -203,16 +262,24 @@ def deliver_validation_requests(
     limit: int | None = None,
     should_stop: Callable[[], bool] | None = None,
 ) -> int:
+    scan_time = now if now is not None else utcnow()
     query = select(AnomalyValidationRequest.id).join(
         AnomalyRecord, AnomalyValidationRequest.anomaly_id == AnomalyRecord.id
-    ).where(AnomalyValidationRequest.delivery_status.in_(["pending", "failed", "sending"]))
+    ).where(_eligible_delivery_predicate(scan_time))
     if request_ids is not None:
         if not request_ids:
             return 0
         query = query.where(AnomalyValidationRequest.id.in_(request_ids))
     if rule_id is not None:
         query = query.where(AnomalyRecord.rule_id == rule_id)
-    query = query.order_by(AnomalyValidationRequest.created_at, AnomalyValidationRequest.id)
+    query = query.order_by(
+        func.coalesce(
+            AnomalyValidationRequest.next_attempt_at,
+            AnomalyValidationRequest.created_at,
+        ),
+        AnomalyValidationRequest.updated_at,
+        AnomalyValidationRequest.id,
+    )
     if limit is not None:
         query = query.limit(limit + 1)
     candidate_ids = list(session.scalars(query))
@@ -221,7 +288,7 @@ def deliver_validation_requests(
     session.commit()
     if not pending_ids:
         return 0
-    failure_time = now if now is not None else utcnow()
+    failure_time = scan_time
     pending_ids = _close_resolved_never_sent_requests(session, pending_ids, failure_time)
     if not pending_ids:
         if has_more:
@@ -324,6 +391,7 @@ def _close_resolved_never_sent_requests(
                 and request.message_id is None
             ):
                 request.delivery_status = "resolved"
+                request.next_attempt_at = None
                 request.last_error = None
                 request.updated_at = closed_at
                 session.commit()
@@ -353,8 +421,19 @@ def _mark_delivery_configuration_failure(
             if request.delivery_status == "sending":
                 if not _can_safely_retry_delivery(request, failed_at):
                     request.delivery_status = "uncertain"
+                    request.next_attempt_at = None
                     request.last_error = "飞书发送结果未知且已进入一小时去重窗口安全边界，请人工核查"
                     request.updated_at = failed_at
+                else:
+                    _schedule_delivery_retry(request, failed_at)
+                    uncertain_at = _delivery_uncertain_at(request)
+                    if uncertain_at is not None:
+                        request.next_attempt_at = min(
+                            request.next_attempt_at,
+                            uncertain_at,
+                        )
+                    if request.last_error is None:
+                        request.last_error = str(error)[:2000]
                 failures += 1
                 session.commit()
                 continue
@@ -365,6 +444,7 @@ def _mark_delivery_configuration_failure(
             request.delivery_status = "failed"
             request.last_error = str(error)[:2000]
             request.send_started_at = None
+            _schedule_delivery_retry(request, failed_at)
             failures += 1
             session.commit()
     return failures
@@ -379,22 +459,40 @@ def _claim_validation_delivery(
         pair = session.execute(
             select(AnomalyValidationRequest, AnomalyRecord).join(
                 AnomalyRecord, AnomalyValidationRequest.anomaly_id == AnomalyRecord.id
-            ).where(AnomalyValidationRequest.id == request_id).with_for_update()
+            ).where(AnomalyValidationRequest.id == request_id).with_for_update().execution_options(
+                populate_existing=True,
+            )
         ).one_or_none()
         if pair is None:
             session.commit()
             return "skipped", None
         request, anomaly = pair
-        if anomaly.status == "resolved" and request.delivery_status == "sending":
-            if not _can_safely_retry_delivery(request, claim_time):
-                request.delivery_status = "uncertain"
-                request.last_error = "飞书发送结果未知且已进入一小时去重窗口安全边界，请人工核查"
+        if anomaly.status == "resolved":
+            if (
+                request.delivery_status in {"pending", "failed"}
+                and request.message_id is None
+            ):
+                request.delivery_status = "resolved"
+                request.send_started_at = None
+                request.next_attempt_at = None
+                request.last_error = None
                 request.updated_at = claim_time
                 session.commit()
-                return "uncertain", None
-            session.commit()
-            return "skipped", None
+                return "skipped", None
+            if request.delivery_status == "sending":
+                if not _can_safely_retry_delivery(request, claim_time):
+                    request.delivery_status = "uncertain"
+                    request.next_attempt_at = None
+                    request.last_error = "飞书发送结果未知且已进入一小时去重窗口安全边界，请人工核查"
+                    request.updated_at = claim_time
+                    session.commit()
+                    return "uncertain", None
+                session.commit()
+                return "skipped", None
         if request.delivery_status in {"pending", "failed"}:
+            if request.next_attempt_at is not None and request.next_attempt_at > claim_time:
+                session.commit()
+                return "skipped", None
             request.delivery_status = "sending"
             request.send_started_at = claim_time
             # A definitive failure starts a new safe sequence. From this point,
@@ -403,11 +501,16 @@ def _claim_validation_delivery(
         elif request.delivery_status == "sending":
             if not _can_safely_retry_delivery(request, claim_time):
                 request.delivery_status = "uncertain"
+                request.next_attempt_at = None
                 request.last_error = "飞书发送结果未知且已进入一小时去重窗口安全边界，请人工核查"
                 request.updated_at = claim_time
                 session.commit()
                 return "uncertain", None
             if request.delivery_attempts >= _MAX_DELIVERY_ATTEMPTS:
+                request.next_attempt_at = _delivery_uncertain_at(request)
+                session.commit()
+                return "skipped", None
+            if request.next_attempt_at is not None and request.next_attempt_at > claim_time:
                 session.commit()
                 return "skipped", None
             if request.updated_at and claim_time < request.updated_at + _DELIVERY_CLAIM_LEASE:
@@ -417,6 +520,7 @@ def _claim_validation_delivery(
             session.commit()
             return "skipped", None
         request.delivery_attempts += 1
+        request.next_attempt_at = claim_time + _DELIVERY_CLAIM_LEASE
         request.last_error = None
         request.updated_at = claim_time
         session.commit()
@@ -438,11 +542,13 @@ def _record_validation_delivery_retry(session: Session, request_id: str, retry_t
             return False
         if not _can_safely_retry_delivery(request, retry_time):
             request.delivery_status = "uncertain"
+            request.next_attempt_at = None
             request.last_error = "飞书发送结果未知且已进入一小时去重窗口安全边界，请人工核查"
             request.updated_at = retry_time
             session.commit()
             return False
         request.delivery_attempts += 1
+        request.next_attempt_at = retry_time + _DELIVERY_CLAIM_LEASE
         request.updated_at = retry_time
         session.commit()
         return True
@@ -474,6 +580,8 @@ def _finish_validation_delivery(
                 return False
             request.message_id = message_id
             request.delivery_status = anomaly_status if anomaly_status in {"timed_out", "resolved"} else "sent"
+            request.next_attempt_at = None
+            request.consecutive_failures = 0
             request.last_error = None
             request.delivered_at = finished_at
             request.updated_at = finished_at
@@ -498,6 +606,7 @@ def _leave_validation_delivery_uncertain(
         )
         if request is not None and request.delivery_status == "sending":
             request.last_error = str(error or "飞书发送结果未知")[:2000]
+            request.next_attempt_at = _delivery_uncertain_at(request)
             request.updated_at = failed_at
         session.commit()
 
@@ -518,7 +627,7 @@ def _fail_validation_delivery_definitively(
             request.delivery_status = "failed"
             request.send_started_at = None
             request.last_error = str(error or "飞书明确拒绝发送")[:2000]
-            request.updated_at = failed_at
+            _schedule_delivery_retry(request, failed_at)
         session.commit()
 
 
@@ -589,18 +698,31 @@ def _apply_resolution(
     anomaly.resolved_by_user_id = user_id
 
 
-def expire_due_anomalies(session: Session, *, now: datetime | None = None) -> int:
+def expire_due_anomalies(
+    session: Session,
+    *,
+    now: datetime | None = None,
+    limit: int | None = None,
+    should_stop: Callable[[], bool] | None = None,
+) -> int:
     timeout_time = now or utcnow()
-    candidate_ids = list(session.scalars(
-        select(AnomalyRecord.id).where(
-            AnomalyRecord.status.in_(["pending", "processing"]),
-            AnomalyRecord.validation_deadline.is_not(None),
-            AnomalyRecord.validation_deadline <= timeout_time,
-        )
-    ))
+    query = select(AnomalyRecord.id).where(
+        AnomalyRecord.status.in_(["pending", "processing"]),
+        AnomalyRecord.validation_deadline.is_not(None),
+        AnomalyRecord.validation_deadline <= timeout_time,
+    ).order_by(AnomalyRecord.validation_deadline, AnomalyRecord.id)
+    if limit is not None:
+        query = query.limit(limit + 1)
+    candidate_ids = list(session.scalars(query))
+    has_more = limit is not None and len(candidate_ids) > limit
+    candidate_ids = candidate_ids[:limit] if limit is not None else candidate_ids
     session.commit()
     expired_count = 0
+    interrupted = False
     for anomaly_id in candidate_ids:
+        if should_stop is not None and should_stop():
+            interrupted = True
+            break
         result = session.execute(
             update(AnomalyRecord).where(
                 AnomalyRecord.id == anomaly_id,
@@ -617,7 +739,9 @@ def expire_due_anomalies(session: Session, *, now: datetime | None = None) -> in
                 description="实时验证已超过截止时间，仍可补充提交",
                 created_at=timeout_time,
             ))
-    session.commit()
+        session.commit()
+    if has_more or interrupted:
+        logger.warning("异常验证超时扫描仍有未完成记录，将在下一轮维护继续处理")
     session.expire_all()
     return expired_count
 

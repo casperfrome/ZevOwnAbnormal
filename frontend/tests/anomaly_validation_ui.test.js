@@ -499,6 +499,49 @@ test('record export sends current server filters and reports the server total', 
   assert.deepEqual(pageErrors, []);
 });
 
+test('record export keeps one immutable search snapshot while its count request is pending', async t => {
+  const { page, pageErrors } = await withPage(t, async page => {
+    await page.evaluate(() => {
+      window.exportFilters = null;
+      window.resolveExportCount = null;
+      const exportUrl = filters => {
+        window.exportFilters = { ...filters };
+        return '#export-snapshot';
+      };
+      exportUrl.toString = () => '#export-snapshot';
+      window.Store = {
+        getStats: () => ({ pendingRecords: 0, processingRecords: 0, timedOutRecords: 0, resolvedToday: 0, criticalAnomalies: 0 }),
+        getRecords: () => [],
+        getRules: () => [],
+        loadRecordsPage: async query => {
+          if (query.search === 'old-filter') {
+            return new Promise(resolve => { window.resolveExportCount = resolve; });
+          }
+          return { items: [], total: query.search === 'new-filter' ? 2 : 0, page: 1, pageSize: query.pageSize };
+        },
+        refresh: async () => {}, exportUrl,
+      };
+    });
+    await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'records.js') });
+    await page.evaluate(() => RecordsModule.render(document.getElementById('content'), {
+      actionsEl: document.getElementById('actions'), navigate: () => {},
+    }));
+  });
+
+  await page.locator('#rec-search').fill('old-filter');
+  await page.click('#rec-export');
+  await page.waitForFunction(() => typeof window.resolveExportCount === 'function');
+  await page.locator('#rec-search').fill('new-filter');
+  await page.evaluate(() => window.resolveExportCount({
+    items: [], total: 7, page: 1, pageSize: 10,
+  }));
+  await page.waitForFunction(() => window.exportFilters !== null);
+
+  assert.equal(await page.evaluate(() => window.exportFilters.search), 'old-filter');
+  assert.match(await page.locator('#toast-container').textContent(), /7 条记录/);
+  assert.deepEqual(pageErrors, []);
+});
+
 test('selection is scoped to the current server result and never leaks into a later bulk request', async t => {
   const { page, pageErrors } = await withPage(t, async page => {
     await page.evaluate(() => {

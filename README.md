@@ -41,8 +41,9 @@ Pop-Location
 
 如需接收飞书卡片验证回调，在另一个终端启动长连接。启动器会安全加载仓库根目录的 `.env`
 （不会覆盖终端中显式设置的环境变量），其中需包含 `FEISHU_APP_ID`、`FEISHU_APP_SECRET`、
-`SENTINEL_API_BASE_URL` 和 `SENTINEL_INTERNAL_TOKEN`；后者也兼容回退到
-`INTERNAL_EXECUTION_TOKEN`：
+`SENTINEL_API_BASE_URL` 和 canonical `SENTINEL_INTERNAL_TOKEN`。旧环境仍兼容
+`INTERNAL_EXECUTION_TOKEN`；若同一配置来源同时提供两个非空且不同的值，FastAPI 与长连接都会在
+启动时拒绝配置且不输出令牌值。终端显式环境变量优先于仓库 `.env`：
 
 ```powershell
 & 'D:\PythonVEnv\FirstVEnv\Scripts\python.exe' .\飞书长连接启动\飞书长连接启动.py
@@ -55,7 +56,7 @@ Pop-Location
 [异常实时校验部署与验收](docs/anomaly-validation-acceptance.md)。真实消息发送必须在执行当时再次获得明确授权。
 
 生产和新生成的本地配置默认 `AUTO_LOGIN=false`。先通过部署登录流程（`POST /api/v1/auth/login`）建立签名会话；`/auth/me` 会同时验证
-cookie/JWT 和当前持久化用户，管理写操作还要求该用户仍为超级管理员。仅显式设置
+cookie/JWT 和当前持久化用户。数据源、数据集、规则、执行记录、异常、CSV 与概览等管理读接口都要求已认证用户，管理写操作还要求该用户仍为超级管理员。仅显式设置
 `AUTO_LOGIN=true` 的受控开发环境才会自动登录。默认账号为 `admin`；密码由 `.env` 中的
 `SUPERADMIN_PASSWORD` 控制。
 

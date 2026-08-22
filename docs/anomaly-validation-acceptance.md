@@ -8,12 +8,12 @@
 
 - `SENTINEL_PUBLIC_BASE_URL`：写入飞书卡片“查看异常详情”深链的浏览器地址。真实验收必须是接收者设备可访问的完整 `http://` 或 `https://` 地址；`localhost`/`127.0.0.1` 仅适合浏览器与 Sentinel 在同一台机器上的本地验证。生产建议使用 HTTPS。`#records/<uuid>` 是浏览器 fragment，不会随 HTTP 请求发送给服务器；反向代理只需正确提供 SPA 根文档、静态资源和 API，无需配置带 `#` 的服务端路由。
 - `SENTINEL_API_BASE_URL`：飞书长连接进程调用 FastAPI 的服务端地址。长连接和 FastAPI 同机时可保持 `http://127.0.0.1:8000`，不要求暴露到公网。
-- `INTERNAL_EXECUTION_TOKEN` / `SENTINEL_INTERNAL_TOKEN`：FastAPI 与长连接进程使用的同一共享令牌；`bootstrap_env.py` 会为两者写入同一个随机值。不要将值写入命令历史、日志或文档。
+- `SENTINEL_INTERNAL_TOKEN`：FastAPI 与长连接进程使用的 canonical 共享令牌，`bootstrap_env.py` 只生成这一项。旧部署可继续只提供 `INTERNAL_EXECUTION_TOKEN`。同一来源同时提供两个非空且不同的值会安全地启动失败，错误只包含变量名；终端显式环境优先于仓库 `.env`。不要将值写入命令历史、日志或文档。
 - `FEISHU_APP_ID` / `FEISHU_APP_SECRET`：同一飞书应用的凭证。不要用命令打印它们。
 - `VALIDATION_TIMEOUT_SCAN_INTERVAL_SECONDS`：超时扫描与卡片收敛周期，默认 `60` 秒。
-- `VALIDATION_MAINTENANCE_BATCH_SIZE`：每轮初始投递和终态卡片收敛的最大候选数，默认 `50`；未完成项留待下一轮。
+- `VALIDATION_MAINTENANCE_BATCH_SIZE`：每轮超时扫描、初始投递和终态卡片收敛的最大候选数，默认 `50`；未完成项留待下一轮。
 - `FEISHU_HTTP_TIMEOUT_SECONDS`：单次飞书 HTTP 调用超时，默认 `10` 秒；维护轮次可在每次外部调用之间取消。
-- `AUTO_LOGIN`：生产默认 `false`。`/auth/me` 必须验证签名 cookie/JWT 及当前数据库用户，管理写操作还要求当前用户是超级管理员。公共卡片深链也要求先建立登录会话。
+- `AUTO_LOGIN`：生产默认 `false`。`/auth/me` 必须验证签名 cookie/JWT 及当前数据库用户；全部管理读接口要求已认证用户，管理写操作还要求当前用户是超级管理员。health、登录和静态入口保持公开，公共卡片深链仍要求先建立登录会话。
 
 不要用通用环境转储、shell tracing 或调试代理检查这些设置。启动器会在连接前只报告缺失的变量名，不会打印变量值。
 
@@ -29,6 +29,8 @@ Pop-Location
 ```
 
 正式数据库升级前先备份。历史规则迁移后保持 `validation_enabled=false`，历史异常不补建校验截止时间。
+`20260822_0005` 为初始卡片投递增加持久 `next_attempt_at`、连续失败计数和 eligible 队列索引。
+明确拒绝/发送前失败从 5 分钟开始指数退避（最高 1 小时）；尚未到 claim lease、已经耗尽三次但仍在飞书一小时 UUID 窗口内的请求不会占用维护 batch，进程重启也保留相同调度时间。
 
 演示数据兼容说明：`generate_demo_data.py` 会通过 `information_schema.columns` 检查旧版
 `ads_store_daily_operation`，必要时提交 StarRocks `ADD COLUMN manager_user_id`，等待异步 schema change

@@ -22,6 +22,19 @@ class CallbackPayloadError(ValueError):
     """The callback cannot be mapped to the internal API contract."""
 
 
+def resolve_internal_token(canonical: object, legacy: object) -> str:
+    canonical_value = canonical if isinstance(canonical, str) and canonical.strip() else ""
+    legacy_value = legacy if isinstance(legacy, str) and legacy.strip() else ""
+    if canonical_value and legacy_value and canonical_value != legacy_value:
+        raise RuntimeError(
+            "SENTINEL_INTERNAL_TOKEN 与 INTERNAL_EXECUTION_TOKEN 配置冲突"
+        )
+    token = canonical_value or legacy_value
+    if not token:
+        raise RuntimeError("缺少必需环境变量: SENTINEL_INTERNAL_TOKEN")
+    return token
+
+
 @dataclass(frozen=True)
 class GatewaySettings:
     api_base_url: str
@@ -33,12 +46,16 @@ class GatewaySettings:
     @classmethod
     def from_environment(cls, required_env: Callable[[str], str]) -> "GatewaySettings":
         try:
-            internal_token = required_env("SENTINEL_INTERNAL_TOKEN")
+            canonical = required_env("SENTINEL_INTERNAL_TOKEN")
         except RuntimeError:
-            internal_token = required_env("INTERNAL_EXECUTION_TOKEN")
+            canonical = ""
+        try:
+            legacy = required_env("INTERNAL_EXECUTION_TOKEN")
+        except RuntimeError:
+            legacy = ""
         return cls(
             api_base_url=required_env("SENTINEL_API_BASE_URL"),
-            internal_token=internal_token,
+            internal_token=resolve_internal_token(canonical, legacy),
         )
 
 

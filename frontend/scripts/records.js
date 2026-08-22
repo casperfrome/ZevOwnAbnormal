@@ -604,21 +604,31 @@ window.RecordsModule = (function () {
 
   async function exportRecords() {
     const serverBacked = typeof Store.loadRecordsPage === 'function';
-    if (serverBacked) {
-      if (state.searchTimer) window.clearTimeout(state.searchTimer);
-      state.searchTimer = null;
-      await renderList();
-    }
-    const count = serverBacked ? state.total : getFiltered().length;
-    if (count === 0) { UI.toast({ type: 'warning', title: '暂无数据可导出' }); return; }
-    const filters = {
+    const filters = Object.freeze({
       status: state.statusFilter === 'all' ? null : state.statusFilter,
       severity: state.severityFilter === 'all' ? null : state.severityFilter,
       ruleId: state.ruleFilter === 'all' ? null : state.ruleFilter,
       search: state.search,
       sortKey: state.sortKey,
       sortOrder: state.sortDir,
-    };
+    });
+    let count;
+    if (serverBacked) {
+      if (state.searchTimer) window.clearTimeout(state.searchTimer);
+      state.searchTimer = null;
+      try {
+        const result = await Store.loadRecordsPage({
+          ...filters, page: 1, pageSize: state.pageSize,
+        });
+        count = result.total;
+      } catch (error) {
+        UI.toast({ type: 'error', title: '导出准备失败', desc: error.message });
+        return;
+      }
+    } else {
+      count = getFiltered().length;
+    }
+    if (count === 0) { UI.toast({ type: 'warning', title: '暂无数据可导出' }); return; }
     const url = typeof Store.exportUrl === 'function' ? Store.exportUrl(filters) : Store.exportUrl;
     window.location.href = url;
     UI.toast({ type: 'success', title: '导出已开始', desc: `${count} 条记录 · CSV 格式` });

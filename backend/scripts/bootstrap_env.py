@@ -30,7 +30,6 @@ def main():
         "DATABASE_URL": "mysql+pymysql://app:dev_app_password@127.0.0.1:3306/app?charset=utf8mb4",
         "DATASOURCE_ENCRYPTION_KEY": Fernet.generate_key().decode("ascii"),
         "SESSION_SECRET": secrets.token_urlsafe(48),
-        "INTERNAL_EXECUTION_TOKEN": internal_token,
         "SENTINEL_INTERNAL_TOKEN": internal_token,
         "AUTO_LOGIN": "false",
         "SUPERADMIN_USERNAME": "admin",

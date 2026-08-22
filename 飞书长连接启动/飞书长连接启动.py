@@ -6,7 +6,11 @@ from pathlib import Path
 import lark_oapi as lark
 from dotenv import load_dotenv
 
-from feishu_callback_gateway import CardActionGateway, GatewaySettings
+from feishu_callback_gateway import (
+    CardActionGateway,
+    GatewaySettings,
+    resolve_internal_token,
+)
 
 
 ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
@@ -14,7 +18,22 @@ ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
 
 def load_repository_env() -> None:
     """Load repository-local settings while preserving explicit process overrides."""
+    explicit_canonical = os.getenv("SENTINEL_INTERNAL_TOKEN", "")
+    explicit_legacy = os.getenv("INTERNAL_EXECUTION_TOKEN", "")
+    explicit_token = None
+    if explicit_canonical.strip() or explicit_legacy.strip():
+        explicit_token = resolve_internal_token(explicit_canonical, explicit_legacy)
     load_dotenv(ENV_FILE, override=False)
+    loaded_canonical = os.getenv("SENTINEL_INTERNAL_TOKEN", "")
+    loaded_legacy = os.getenv("INTERNAL_EXECUTION_TOKEN", "")
+    if explicit_token is not None:
+        token = explicit_token
+    elif loaded_canonical.strip() or loaded_legacy.strip():
+        token = resolve_internal_token(loaded_canonical, loaded_legacy)
+    else:
+        return
+    os.environ["SENTINEL_INTERNAL_TOKEN"] = token
+    os.environ.pop("INTERNAL_EXECUTION_TOKEN", None)
 
 
 def get_required_env(name: str) -> str:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -27,6 +28,18 @@ VALID_CARD = {
     },
     "body": {"elements": [{"tag": "markdown", "content": "验证已提交"}]},
 }
+
+
+@pytest.fixture(autouse=True)
+def restore_internal_token_environment():
+    names = ("SENTINEL_INTERNAL_TOKEN", "INTERNAL_EXECUTION_TOKEN")
+    original = {name: os.environ.get(name) for name in names}
+    yield
+    for name, value in original.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
 
 
 def complete_event(
@@ -110,6 +123,46 @@ def configured_settings():
     return gateway.GatewaySettings(
         api_base_url="http://sentinel.test/", internal_token="internal-token",
     )
+
+
+@pytest.mark.parametrize(
+    ("values", "expected"),
+    [
+        ({"SENTINEL_INTERNAL_TOKEN": "canonical"}, "canonical"),
+        ({"INTERNAL_EXECUTION_TOKEN": "legacy"}, "legacy"),
+        ({
+            "SENTINEL_INTERNAL_TOKEN": "shared",
+            "INTERNAL_EXECUTION_TOKEN": "shared",
+        }, "shared"),
+    ],
+)
+def test_gateway_settings_accept_canonical_or_legacy_internal_token(values, expected):
+    gateway = importlib.import_module("feishu_callback_gateway")
+    values = {"SENTINEL_API_BASE_URL": "http://sentinel.test", **values}
+
+    def required(name):
+        if not values.get(name):
+            raise RuntimeError(f"missing {name}")
+        return values[name]
+
+    assert gateway.GatewaySettings.from_environment(required).internal_token == expected
+
+
+def test_gateway_settings_reject_conflicting_tokens_without_disclosing_values():
+    gateway = importlib.import_module("feishu_callback_gateway")
+    values = {
+        "SENTINEL_API_BASE_URL": "http://sentinel.test",
+        "SENTINEL_INTERNAL_TOKEN": "canonical-gateway-secret",
+        "INTERNAL_EXECUTION_TOKEN": "legacy-gateway-secret",
+    }
+
+    with pytest.raises(RuntimeError) as conflict:
+        gateway.GatewaySettings.from_environment(lambda name: values[name])
+
+    assert "SENTINEL_INTERNAL_TOKEN" in str(conflict.value)
+    assert "INTERNAL_EXECUTION_TOKEN" in str(conflict.value)
+    assert "canonical-gateway-secret" not in str(conflict.value)
+    assert "legacy-gateway-secret" not in str(conflict.value)
 
 
 def response_client_factory(status_code, body, requests, clients):
@@ -413,6 +466,51 @@ def test_repository_env_loader_preserves_explicit_process_values(tmp_path, monke
     launcher.load_repository_env()
 
     assert launcher.get_required_env("FEISHU_APP_ID") == "explicit-app-id"
+
+
+@pytest.mark.parametrize(
+    ("process_name", "file_name"),
+    [
+        ("SENTINEL_INTERNAL_TOKEN", "INTERNAL_EXECUTION_TOKEN"),
+        ("INTERNAL_EXECUTION_TOKEN", "SENTINEL_INTERNAL_TOKEN"),
+    ],
+)
+def test_repository_env_loader_gives_explicit_token_alias_precedence(
+    tmp_path, monkeypatch, process_name, file_name,
+):
+    launcher = importlib.import_module("飞书长连接启动")
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"{file_name}=file-token\n", encoding="utf-8")
+    monkeypatch.setattr(launcher, "ENV_FILE", env_file, raising=False)
+    monkeypatch.delenv("SENTINEL_INTERNAL_TOKEN", raising=False)
+    monkeypatch.delenv("INTERNAL_EXECUTION_TOKEN", raising=False)
+    monkeypatch.setenv(process_name, "process-token")
+
+    launcher.load_repository_env()
+
+    assert launcher.get_required_env("SENTINEL_INTERNAL_TOKEN") == "process-token"
+    assert "INTERNAL_EXECUTION_TOKEN" not in launcher.os.environ
+
+
+def test_repository_env_loader_rejects_conflicting_file_tokens_without_values(
+    tmp_path, monkeypatch,
+):
+    launcher = importlib.import_module("飞书长连接启动")
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "SENTINEL_INTERNAL_TOKEN=canonical-file-secret\n"
+        "INTERNAL_EXECUTION_TOKEN=legacy-file-secret\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(launcher, "ENV_FILE", env_file, raising=False)
+    monkeypatch.delenv("SENTINEL_INTERNAL_TOKEN", raising=False)
+    monkeypatch.delenv("INTERNAL_EXECUTION_TOKEN", raising=False)
+
+    with pytest.raises(RuntimeError) as conflict:
+        launcher.load_repository_env()
+
+    assert "canonical-file-secret" not in str(conflict.value)
+    assert "legacy-file-secret" not in str(conflict.value)
 
 
 def test_launcher_registers_callback_handler_before_starting_websocket(monkeypatch):

@@ -30,7 +30,11 @@ def run_validation_maintenance_cycle(
 ) -> None:
     should_stop = stop_event.is_set if stop_event is not None else None
     with session_factory() as session:
-        expire_due_anomalies(session)
+        expire_due_anomalies(
+            session,
+            limit=settings.validation_maintenance_batch_size,
+            should_stop=should_stop,
+        )
         if should_stop is not None and should_stop():
             logger.warning("异常验证维护已取消，初始投递与卡片收敛留待下一轮")
             return

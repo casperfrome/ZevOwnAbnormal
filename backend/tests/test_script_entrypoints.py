@@ -46,7 +46,8 @@ def test_bootstrap_env_writes_all_runtime_settings_without_printing_secrets(tmp_
     assert values["AUTO_LOGIN"] == "false"
     assert values["SENTINEL_PUBLIC_BASE_URL"] == "http://localhost:8000"
     assert values["SENTINEL_API_BASE_URL"] == "http://127.0.0.1:8000"
-    assert values["SENTINEL_INTERNAL_TOKEN"] == values["INTERNAL_EXECUTION_TOKEN"]
+    assert values["SENTINEL_INTERNAL_TOKEN"]
+    assert "INTERNAL_EXECUTION_TOKEN" not in values
     assert values["VALIDATION_TIMEOUT_SCAN_INTERVAL_SECONDS"] == "60"
     assert values["VALIDATION_MAINTENANCE_BATCH_SIZE"] == "50"
     assert values["FEISHU_HTTP_TIMEOUT_SECONDS"] == "10"
@@ -54,4 +55,4 @@ def test_bootstrap_env_writes_all_runtime_settings_without_printing_secrets(tmp_
     assert values["FEISHU_APP_SECRET"] == "test-secret-value"
     output = capsys.readouterr().out
     assert "test-secret-value" not in output
-    assert values["INTERNAL_EXECUTION_TOKEN"] not in output
+    assert values["SENTINEL_INTERNAL_TOKEN"] not in output
