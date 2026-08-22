@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import random
+import time
 from datetime import date, datetime, timedelta
 
 import pymysql
@@ -10,6 +11,10 @@ import pymysql
 PROVINCES = ["北京", "上海", "广东", "浙江", "江苏", "四川", "湖北", "湖南", "福建", "山东", "河南", "安徽"]
 CHANNELS = ["堂食", "小程序", "美团", "饿了么"]
 PRODUCTS = [("P001", "中国汉堡", 18.0), ("P002", "香辣鸡腿堡", 16.0), ("P003", "薯条", 8.0), ("P004", "可乐", 6.0), ("P005", "鸡翅", 12.0)]
+STORE_DAILY_COLUMNS = (
+    "metric_date, store_id, store_name, province, manager_open_id, manager_user_id, "
+    "gmv, order_count, avg_order_value, refund_rate, avg_delivery_minutes, member_ratio, gmv_growth_rate"
+)
 
 
 def is_injected_anomaly(store_index: int, day_offset: int) -> bool:
@@ -31,6 +36,47 @@ def mysql_connection(database=None, root=True):
 
 def starrocks_connection(database=None):
     return pymysql.connect(host="127.0.0.1", port=9030, user="root", password="", database=database, charset="utf8mb4", autocommit=True)
+
+
+def _starrocks_column_exists(cursor, table_name: str, column_name: str) -> bool:
+    cursor.execute(
+        """SELECT 1 FROM information_schema.columns
+WHERE table_schema = %s AND table_name = %s AND column_name = %s LIMIT 1""",
+        ("tastien_ads", table_name, column_name),
+    )
+    return cursor.fetchone() is not None
+
+
+def ensure_manager_user_id_column(cursor) -> None:
+    """Upgrade the pre-validation demo table and wait for async StarRocks DDL."""
+    table_name = "ads_store_daily_operation"
+    column_name = "manager_user_id"
+    if _starrocks_column_exists(cursor, table_name, column_name):
+        return
+
+    alter_error = None
+    try:
+        cursor.execute(
+            'ALTER TABLE ads_store_daily_operation ADD COLUMN manager_user_id '
+            'VARCHAR(100) DEFAULT "" AFTER manager_open_id'
+        )
+    except pymysql.MySQLError as exc:
+        # A previous run may already have submitted the asynchronous schema change.
+        alter_error = exc
+
+    for check in range(61):
+        if _starrocks_column_exists(cursor, table_name, column_name):
+            return
+        if check < 60:
+            time.sleep(2)
+
+    message = (
+        "StarRocks manager_user_id 列升级未在 120 秒内完成；"
+        "请运行 SHOW ALTER TABLE COLUMN FROM tastien_ads 检查任务，完成后重试造数。"
+    )
+    if alter_error is not None:
+        raise RuntimeError(message) from alter_error
+    raise RuntimeError(message)
 
 
 def seed_mysql(args, rng: random.Random):
@@ -133,6 +179,7 @@ def seed_starrocks(args, rng: random.Random):
         cur.execute("""CREATE TABLE IF NOT EXISTS ads_brand_daily_operation (
             metric_date DATE, gmv DECIMAL(18,2), order_count BIGINT, active_store_count INT, avg_order_value DECIMAL(10,2), refund_rate DOUBLE
         ) ENGINE=OLAP DUPLICATE KEY(metric_date) DISTRIBUTED BY HASH(metric_date) BUCKETS 2 PROPERTIES ('replication_num'='1')""")
+        ensure_manager_user_id_column(cur)
         if args.reset:
             cur.execute("TRUNCATE TABLE ads_store_daily_operation")
             cur.execute("TRUNCATE TABLE ads_region_daily_operation")
@@ -169,14 +216,31 @@ def seed_starrocks(args, rng: random.Random):
                 brand[1] += order_count
                 brand[2] += refund_rate
                 if len(batch) >= args.batch_size:
-                    cur.executemany("INSERT INTO ads_store_daily_operation VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", batch)
+                    cur.executemany(
+                        f"INSERT INTO ads_store_daily_operation ({STORE_DAILY_COLUMNS}) "
+                        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                        batch,
+                    )
                     batch.clear()
         if batch:
-            cur.executemany("INSERT INTO ads_store_daily_operation VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", batch)
+            cur.executemany(
+                f"INSERT INTO ads_store_daily_operation ({STORE_DAILY_COLUMNS}) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                batch,
+            )
         region_rows = [(day, province, round(v[0], 2), v[1], v[2], round(v[3] / v[2], 4)) for (day, province), v in region_totals.items()]
         brand_rows = [(day, round(v[0], 2), v[1], args.stores, round(v[0] / v[1], 2), round(v[2] / args.stores, 4)) for day, v in brand_totals.items()]
-        cur.executemany("INSERT INTO ads_region_daily_operation VALUES (%s,%s,%s,%s,%s,%s)", region_rows)
-        cur.executemany("INSERT INTO ads_brand_daily_operation VALUES (%s,%s,%s,%s,%s,%s)", brand_rows)
+        cur.executemany(
+            "INSERT INTO ads_region_daily_operation "
+            "(metric_date, province, gmv, order_count, store_count, refund_rate) VALUES (%s,%s,%s,%s,%s,%s)",
+            region_rows,
+        )
+        cur.executemany(
+            "INSERT INTO ads_brand_daily_operation "
+            "(metric_date, gmv, order_count, active_store_count, avg_order_value, refund_rate) "
+            "VALUES (%s,%s,%s,%s,%s,%s)",
+            brand_rows,
+        )
     conn.close()
 
 

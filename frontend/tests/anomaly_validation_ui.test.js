@@ -255,7 +255,7 @@ test('manual resolution relies on the server resolver and refreshes the open det
   assert.deepEqual(pageErrors, []);
 });
 
-test('deep record hash renders the records list before opening its detail', async t => {
+async function openRealRecordsDeepLink(t, recordId) {
   const browser = await chromium.launch({ headless: true, executablePath });
   t.after(() => browser.close());
   const page = await browser.newPage();
@@ -264,23 +264,55 @@ test('deep record hash renders the records list before opening its detail', asyn
     <button id="sidebar-toggle"></button><div id="breadcrumb"><span class="crumb-current"></span></div>
     <span id="nav-anomaly-count"></span><div class="nav-item" data-route="records"></div><main id="page-root"></main>
   </body></html>`);
-  await page.evaluate(() => {
-    location.hash = '#records/record-uuid';
-    window.Icon = { bug: () => '', alert: () => '' };
-    window.UI = { loadingState: () => 'loading', emptyState: () => 'empty', toast: () => {} };
-    window.Store = { init: async () => {}, getStats: () => ({ pendingRecords: 1, processingRecords: 2, timedOutRecords: 3 }) };
-    window.renderOrder = [];
-    window.RecordsModule = {
-      render: content => { window.renderOrder.push('render'); content.innerHTML = '<div id="records-list">list</div>'; },
-      openDetail: async id => { window.renderOrder.push(`detail:${id}`); },
+  await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'icons.js') });
+  await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'components.js') });
+  await page.evaluate(recordId => {
+    location.hash = `#records/${recordId}`;
+    const record = {
+      id: 'record-uuid', ruleId: 'rule-1', ruleName: 'GMV check', datasetName: 'Orders', severity: 'high',
+      status: 'pending', occurredAt: '2026-08-22T09:00:00', field: 'gmv', value: 999, expected: 'gt',
+      assignee: null, description: 'Investigate GMV', validationDeadline: null, timedOutAt: null,
+      resolutionSource: null, resolvedByUserId: null, businessKey: {}, details: { gmv: 999 }, hitCount: 1,
+      lastSeenAt: '2026-08-22T09:00:00', deliveries: [], validationRequests: [], validationSubmission: null,
+      timeline: [],
     };
-  });
+    window.detailRequests = [];
+    window.Store = {
+      init: async () => {},
+      getStats: () => ({ pendingRecords: 1, processingRecords: 0, timedOutRecords: 0, resolvedToday: 0 }),
+      getRecords: () => [record], getRecord: () => record,
+      getRules: () => [{ id: 'rule-1', name: 'GMV check' }], getRule: () => ({ id: 'rule-1' }),
+      loadRecordsPage: async () => ({ items: [record], total: 1, page: 1, pageSize: 10 }),
+      loadRecord: async id => {
+        window.detailRequests.push(id);
+        if (id !== record.id) throw new Error('record not found');
+        return record;
+      },
+      refresh: async () => {}, exportUrl: '/export',
+    };
+  }, recordId);
+  await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'records.js') });
   await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'app.js') });
-  await page.waitForFunction(() => window.renderOrder.length === 2);
+  await page.locator('#rec-table tbody tr').waitFor();
+  return { page, browser };
+}
 
-  assert.deepEqual(await page.evaluate(() => window.renderOrder), ['render', 'detail:record-uuid']);
-  assert.equal(await page.locator('#records-list').count(), 1);
-  assert.equal(await page.locator('#nav-anomaly-count').textContent(), '6');
+test('valid deep record hash loads real records module and opens fetched detail', async t => {
+  const { page } = await openRealRecordsDeepLink(t, 'record-uuid');
+  await page.locator('.drawer').waitFor();
+
+  assert.deepEqual(await page.evaluate(() => window.detailRequests), ['record-uuid']);
+  assert.match(await page.locator('.drawer').textContent(), /异常详情 · record-uuid/);
+  assert.match(await page.locator('#rec-table tbody tr').textContent(), /record-uuid/);
+});
+
+test('unknown deep record hash keeps real records list and shows a toast', async t => {
+  const { page } = await openRealRecordsDeepLink(t, 'missing-uuid');
+  await page.getByText('详情加载失败', { exact: true }).waitFor();
+
+  assert.deepEqual(await page.evaluate(() => window.detailRequests), ['missing-uuid']);
+  assert.match(await page.locator('#rec-table tbody tr').textContent(), /record-uuid/);
+  assert.equal(await page.locator('.drawer').count(), 0);
 });
 
 test('record tabs use overview totals and request status-filtered backend pages', async t => {

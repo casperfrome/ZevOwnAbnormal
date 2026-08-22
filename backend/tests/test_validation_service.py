@@ -121,6 +121,28 @@ def test_disabled_validation_does_not_snapshot_or_create_requests():
         engine.dispose()
 
 
+def test_missing_row_field_target_creates_no_validation_request():
+    """A configured field absent from the anomaly row must not become a recipient."""
+    from app.validation_service import snapshot_validation
+
+    engine, _, session, rule = build_session()
+    try:
+        rule.validation_enabled = True
+        rule.validation_targets = [{"source": "field", "field": "missing_user_id"}]
+        anomaly = make_anomaly(rule)
+        assert "missing_user_id" not in anomaly.row_details
+        session.add(anomaly)
+        session.flush()
+
+        assert snapshot_validation(session, rule, anomaly, now=NOW) == []
+        session.commit()
+
+        assert list(session.scalars(select(AnomalyValidationRequest))) == []
+    finally:
+        session.close()
+        engine.dispose()
+
+
 def test_snapshot_is_idempotent_for_anomaly_recipient_pairs():
     """Retrying snapshot creation must not violate the request uniqueness contract."""
     from app.validation_service import snapshot_validation
