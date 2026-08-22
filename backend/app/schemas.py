@@ -95,6 +95,50 @@ class NotificationTarget(BaseModel):
         return self
 
 
+class ValidationTarget(BaseModel):
+    source: Literal["literal", "field"]
+    value: str | None = None
+    field: str | None = None
+
+    @field_validator("value", "field", mode="before")
+    @classmethod
+    def normalize_target_text(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+    @model_validator(mode="after")
+    def validate_source(self):
+        if self.source == "literal" and not self.value:
+            raise ValueError("固定验证目标需要 value")
+        if self.source == "field" and not self.field:
+            raise ValueError("字段验证目标需要 field")
+        return self
+
+
+class RuleValidationConfig(BaseModel):
+    validation_enabled: bool = False
+    validation_targets: list[ValidationTarget] = Field(default_factory=list)
+    validation_timeout_minutes: int = Field(default=1440, ge=1, le=43200)
+
+    @model_validator(mode="after")
+    def validate_enabled_targets(self):
+        if self.validation_enabled and not self.validation_targets:
+            raise ValueError("启用实时验证时至少需要一个验证目标")
+        return self
+
+
+class FeishuCardActionCallback(BaseModel):
+    anomaly_id: str = Field(min_length=1)
+    operator_user_id: str = Field(min_length=1)
+    message_id: str = Field(min_length=1)
+    action: str = Field(min_length=1)
+    validation_text: str = ""
+
+    @field_validator("anomaly_id", "operator_user_id", "message_id", "action", "validation_text", mode="before")
+    @classmethod
+    def normalize_callback_text(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+
 class FeishuMessageTestRequest(BaseModel):
     receive_id_type: Literal["open_id", "union_id", "user_id", "email", "chat_id"]
     receive_id: str = Field(min_length=1, max_length=255)
@@ -125,7 +169,7 @@ class RuleSchedule(BaseModel):
         return self
 
 
-class RuleCreate(BaseModel):
+class RuleCreate(RuleValidationConfig):
     name: str
     description: str = ""
     dataset_id: str

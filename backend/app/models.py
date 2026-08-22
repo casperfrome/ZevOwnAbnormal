@@ -74,6 +74,9 @@ class Rule(Base, TimestampMixin):
     anomaly_key_fields: Mapped[list[str]] = mapped_column(JSON, nullable=False)
     schedule: Mapped[dict] = mapped_column(JSON, nullable=False)
     notification_targets: Mapped[list[dict]] = mapped_column(JSON, nullable=False)
+    validation_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    validation_targets: Mapped[list[dict]] = mapped_column(JSON, default=list, nullable=False)
+    validation_timeout_minutes: Mapped[int] = mapped_column(Integer, default=1440, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     sync_status: Mapped[str] = mapped_column(String(30), default="pending", nullable=False)
     sync_error: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -106,6 +109,7 @@ class AnomalyRecord(Base):
     dataset_name: Mapped[str] = mapped_column(String(150), nullable=False)
     severity: Mapped[str] = mapped_column(String(20), nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
     fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     active_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
     business_key: Mapped[dict] = mapped_column(JSON, nullable=False)
@@ -115,6 +119,10 @@ class AnomalyRecord(Base):
     first_seen_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    validation_deadline: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    timed_out_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    resolution_source: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    resolved_by_user_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     assignee: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
 
@@ -140,3 +148,31 @@ class NotificationDelivery(Base):
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class AnomalyValidationRequest(Base, TimestampMixin):
+    __tablename__ = "anomaly_validation_requests"
+    __table_args__ = (UniqueConstraint("anomaly_id", "recipient_user_id", name="uq_validation_request_recipient"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    anomaly_id: Mapped[str] = mapped_column(ForeignKey("anomaly_records.id"), nullable=False)
+    recipient_user_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    delivery_status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)
+    delivery_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    message_id: Mapped[str | None] = mapped_column(String(150), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class AnomalyValidationSubmission(Base):
+    __tablename__ = "anomaly_validation_submissions"
+    __table_args__ = (UniqueConstraint("anomaly_id", name="uq_validation_submission_anomaly"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    anomaly_id: Mapped[str] = mapped_column(ForeignKey("anomaly_records.id"), nullable=False)
+    request_id: Mapped[str] = mapped_column(ForeignKey("anomaly_validation_requests.id"), nullable=False)
+    submitted_by_user_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    submitted_text: Mapped[str] = mapped_column(Text, nullable=False)
+    validator_type: Mapped[str] = mapped_column(String(30), default="pseudo", nullable=False)
+    result: Mapped[str] = mapped_column(String(30), default="passed", nullable=False)
+    submitted_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)

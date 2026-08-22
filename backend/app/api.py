@@ -117,6 +117,9 @@ def rule_dict(item: Rule) -> dict:
         "anomaly_key_fields": item.anomaly_key_fields,
         "schedule": item.schedule,
         "notification_targets": item.notification_targets,
+        "validation_enabled": item.validation_enabled,
+        "validation_targets": item.validation_targets,
+        "validation_timeout_minutes": item.validation_timeout_minutes,
         "enabled": item.enabled,
         "sync_status": item.sync_status,
         "sync_error": item.sync_error,
@@ -148,6 +151,11 @@ def anomaly_dict(item: AnomalyRecord, delivery_status: str | None = None) -> dic
         "matched_conditions": item.matched_conditions, "hit_count": item.hit_count,
         "first_seen_at": item.first_seen_at, "last_seen_at": item.last_seen_at,
         "resolved_at": item.resolved_at, "assignee": item.assignee,
+        "description": item.description,
+        "validation_deadline": item.validation_deadline,
+        "timed_out_at": item.timed_out_at,
+        "resolution_source": item.resolution_source,
+        "resolved_by_user_id": item.resolved_by_user_id,
         "delivery_status": delivery_status or "none",
     }
 
