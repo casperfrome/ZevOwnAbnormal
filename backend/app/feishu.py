@@ -82,17 +82,27 @@ class FeishuClient:
             raise FeishuError("发送飞书消息失败: 飞书响应缺少 message_id")
         return message_id
 
-    def send_interactive(self, receive_id_type: str, recipient: str, card: dict) -> str:
+    def send_interactive(
+        self,
+        receive_id_type: str,
+        recipient: str,
+        card: dict,
+        *,
+        idempotency_key: str | None = None,
+    ) -> str:
         token = self._tenant_token()
+        payload = {
+            "receive_id": recipient,
+            "msg_type": "interactive",
+            "content": json.dumps(card, ensure_ascii=False),
+        }
+        if idempotency_key:
+            payload["uuid"] = idempotency_key
         response = self._client.post(
             "/open-apis/im/v1/messages",
             params={"receive_id_type": receive_id_type},
             headers={"Authorization": f"Bearer {token}"},
-            json={
-                "receive_id": recipient,
-                "msg_type": "interactive",
-                "content": json.dumps(card, ensure_ascii=False),
-            },
+            json=payload,
         )
         self._ensure_success(response, "发送飞书卡片失败")
         body = self._response_body(response, "发送飞书卡片失败")

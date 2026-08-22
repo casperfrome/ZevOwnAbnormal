@@ -40,14 +40,17 @@ def test_feishu_sends_and_patches_interactive_cards_with_shared_token():
     client = FeishuClient("cli_app", "secret", transport=httpx.MockTransport(handler))
     card = {"schema": "2.0", "body": {"elements": [{"tag": "markdown", "content": "hello"}]}}
 
-    assert client.send_interactive("user_id", "user-1", card) == "om_card"
+    assert client.send_interactive("user_id", "user-1", card, idempotency_key="request-1") == "om_card"
     client.patch_interactive("om_card", card)
 
     assert len(requests) == 3
     send_payload = json.loads(requests[1].content)
     patch_payload = json.loads(requests[2].content)
     assert requests[1].url.params["receive_id_type"] == "user_id"
-    assert send_payload == {"receive_id": "user-1", "msg_type": "interactive", "content": json.dumps(card, ensure_ascii=False)}
+    assert send_payload == {
+        "receive_id": "user-1", "msg_type": "interactive",
+        "content": json.dumps(card, ensure_ascii=False), "uuid": "request-1",
+    }
     assert requests[2].method == "PATCH"
     assert requests[2].url.path == "/open-apis/im/v1/messages/om_card"
     assert patch_payload == {"content": json.dumps(card, ensure_ascii=False)}

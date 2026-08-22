@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Iterator
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -42,8 +42,7 @@ class SubmissionResult:
     submission: AnomalyValidationSubmission | None
 
 
-_sqlite_locks_guard = threading.Lock()
-_sqlite_locks: dict[str, threading.Lock] = {}
+_SQLITE_LOCK_STRIPES = tuple(threading.Lock() for _ in range(64))
 
 
 def resolve_validation_targets(targets: list[dict], row: dict[str, Any]) -> list[str]:
@@ -91,6 +90,7 @@ def snapshot_validation(
             description=f"已向 {len(new_recipients)} 位验证人发送实时验证请求",
             created_at=snapshot_time,
         ))
+    if recipients:
         legacy_deliveries = list(session.scalars(select(NotificationDelivery).where(
             NotificationDelivery.anomaly_id == anomaly.id,
             NotificationDelivery.receive_id_type == "user_id",
@@ -181,7 +181,7 @@ def deliver_validation_requests(
     rule_id: str | None = None,
     client: FeishuClient | None = None,
 ) -> int:
-    query = select(AnomalyValidationRequest, AnomalyRecord).join(
+    query = select(AnomalyValidationRequest.id).join(
         AnomalyRecord, AnomalyValidationRequest.anomaly_id == AnomalyRecord.id
     ).where(AnomalyValidationRequest.delivery_status.in_(["pending", "failed"]))
     if request_ids is not None:
@@ -190,45 +190,77 @@ def deliver_validation_requests(
         query = query.where(AnomalyValidationRequest.id.in_(request_ids))
     if rule_id is not None:
         query = query.where(AnomalyRecord.rule_id == rule_id)
-    pending = list(session.execute(query))
-    if not pending:
+    pending_ids = list(session.scalars(query))
+    session.commit()
+    if not pending_ids:
         return 0
-    failures = 0
     active_client = None
     owns_client = False
     try:
         active_client, owns_client = _active_client(settings, client)
-        for request, anomaly in pending:
-            for attempt in range(3):
-                request.delivery_attempts += 1
-                try:
-                    request.message_id = active_client.send_interactive(
-                        "user_id",
-                        request.recipient_user_id,
-                        build_validation_card(anomaly, settings.sentinel_public_base_url),
-                    )
-                    request.delivery_status = anomaly.status if anomaly.status in {"timed_out", "resolved"} else "sent"
-                    request.last_error = None
-                    request.delivered_at = utcnow()
-                    break
-                except Exception as exc:
-                    request.delivery_status = "failed"
-                    request.last_error = str(exc)[:2000]
-                    if attempt < 2:
-                        time.sleep((0.2, 0.5)[attempt])
-            if request.delivery_status == "failed":
-                failures += 1
-        session.commit()
     except Exception as exc:
-        for request, _ in pending:
-            request.delivery_attempts += 1
-            request.delivery_status = "failed"
-            request.last_error = str(exc)[:2000]
-        session.commit()
-        failures = len(pending)
+        return _mark_delivery_configuration_failure(session, pending_ids, exc)
+    failures = 0
+    try:
+        for request_id in pending_ids:
+            with _serialize_sqlite(session, f"delivery:{request_id}"):
+                pair = session.execute(
+                    select(AnomalyValidationRequest, AnomalyRecord).join(
+                        AnomalyRecord, AnomalyValidationRequest.anomaly_id == AnomalyRecord.id
+                    ).where(AnomalyValidationRequest.id == request_id).with_for_update()
+                ).one_or_none()
+                if pair is None or pair[0].delivery_status not in {"pending", "failed"}:
+                    session.commit()
+                    continue
+                request, anomaly = pair
+                for attempt in range(3):
+                    request.delivery_attempts += 1
+                    try:
+                        request.message_id = active_client.send_interactive(
+                            "user_id",
+                            request.recipient_user_id,
+                            build_validation_card(anomaly, settings.sentinel_public_base_url),
+                            idempotency_key=request.id,
+                        )
+                        request.delivery_status = anomaly.status if anomaly.status in {"timed_out", "resolved"} else "sent"
+                        request.last_error = None
+                        request.delivered_at = utcnow()
+                        break
+                    except Exception as exc:
+                        request.delivery_status = "failed"
+                        request.last_error = str(exc)[:2000]
+                        if attempt < 2:
+                            time.sleep((0.2, 0.5)[attempt])
+                if request.delivery_status == "failed":
+                    failures += 1
+                session.commit()
+        return failures
     finally:
         if owns_client and active_client is not None:
             active_client.close()
+
+
+def _mark_delivery_configuration_failure(
+    session: Session,
+    request_ids: list[str],
+    error: Exception,
+) -> int:
+    failures = 0
+    for request_id in request_ids:
+        with _serialize_sqlite(session, f"delivery:{request_id}"):
+            request = session.scalar(
+                select(AnomalyValidationRequest).where(
+                    AnomalyValidationRequest.id == request_id
+                ).with_for_update()
+            )
+            if request is None or request.delivery_status not in {"pending", "failed"}:
+                session.commit()
+                continue
+            request.delivery_attempts += 1
+            request.delivery_status = "failed"
+            request.last_error = str(error)[:2000]
+            failures += 1
+            session.commit()
     return failures
 
 
@@ -255,45 +287,69 @@ def transition_anomaly(
     if anomaly.status == target_status:
         return False
     changed_at = now or utcnow()
+    if target_status == "resolved":
+        if source != "manual" or not isinstance(user_id, str) or not user_id.strip():
+            raise InvalidValidationTransition("解决异常需要已识别的管理员")
+        _apply_resolution(anomaly, changed_at, "manual", user_id.strip())
+        return True
     anomaly.status = target_status
     if target_status == "timed_out":
         anomaly.timed_out_at = changed_at
-    if target_status == "resolved":
-        anomaly.resolved_at = changed_at
-        anomaly.active_fingerprint = None
-        anomaly.resolution_source = source
-        anomaly.resolved_by_user_id = user_id
     return True
+
+
+def _apply_resolution(
+    anomaly: AnomalyRecord,
+    resolved_at: datetime,
+    source: str,
+    user_id: str,
+) -> None:
+    anomaly.status = "resolved"
+    anomaly.resolved_at = resolved_at
+    anomaly.active_fingerprint = None
+    anomaly.resolution_source = source
+    anomaly.resolved_by_user_id = user_id
 
 
 def expire_due_anomalies(session: Session, *, now: datetime | None = None) -> int:
     timeout_time = now or utcnow()
-    due = list(session.scalars(
-        select(AnomalyRecord).where(
+    candidate_ids = list(session.scalars(
+        select(AnomalyRecord.id).where(
             AnomalyRecord.status.in_(["pending", "processing"]),
             AnomalyRecord.validation_deadline.is_not(None),
             AnomalyRecord.validation_deadline <= timeout_time,
-        ).with_for_update()
+        )
     ))
-    for anomaly in due:
-        transition_anomaly(session, anomaly, "timed_out", now=timeout_time, allow_timeout=True)
-        session.add(AnomalyEvent(
-            anomaly_id=anomaly.id,
-            event_type="validation_timed_out",
-            description="实时验证已超过截止时间，仍可补充提交",
-            created_at=timeout_time,
-        ))
     session.commit()
-    return len(due)
+    expired_count = 0
+    for anomaly_id in candidate_ids:
+        result = session.execute(
+            update(AnomalyRecord).where(
+                AnomalyRecord.id == anomaly_id,
+                AnomalyRecord.status.in_(["pending", "processing"]),
+                AnomalyRecord.validation_deadline.is_not(None),
+                AnomalyRecord.validation_deadline <= timeout_time,
+            ).values(status="timed_out", timed_out_at=timeout_time)
+        )
+        if result.rowcount == 1:
+            expired_count += 1
+            session.add(AnomalyEvent(
+                anomaly_id=anomaly_id,
+                event_type="validation_timed_out",
+                description="实时验证已超过截止时间，仍可补充提交",
+                created_at=timeout_time,
+            ))
+    session.commit()
+    session.expire_all()
+    return expired_count
 
 
 @contextmanager
-def _serialize_submission(session: Session, anomaly_id: str) -> Iterator[None]:
+def _serialize_sqlite(session: Session, key: str) -> Iterator[None]:
     if session.get_bind().dialect.name != "sqlite":
         yield
         return
-    with _sqlite_locks_guard:
-        lock = _sqlite_locks.setdefault(anomaly_id, threading.Lock())
+    lock = _SQLITE_LOCK_STRIPES[hash(key) % len(_SQLITE_LOCK_STRIPES)]
     with lock:
         yield
 
@@ -316,7 +372,7 @@ def submit_validation(
         raise ValidationTextError("验证说明长度必须为 1-1000 个字符")
 
     submitted_at = now or utcnow()
-    with _serialize_submission(session, anomaly_id):
+    with _serialize_sqlite(session, f"submission:{anomaly_id}"):
         anomaly = session.scalar(
             select(AnomalyRecord).where(AnomalyRecord.id == anomaly_id).with_for_update()
         )
@@ -348,14 +404,7 @@ def submit_validation(
             submitted_at=submitted_at,
         )
         session.add(submission)
-        transition_anomaly(
-            session,
-            anomaly,
-            "resolved",
-            now=submitted_at,
-            source="validation",
-            user_id=operator_user_id,
-        )
+        _apply_resolution(anomaly, submitted_at, "validation", operator_user_id)
         session.add(AnomalyEvent(
             anomaly_id=anomaly.id,
             event_type="validation_resolved",
@@ -386,8 +435,16 @@ def reconcile_validation_cards(
             AnomalyRecord, AnomalyValidationRequest.anomaly_id == AnomalyRecord.id
         ).where(
             AnomalyValidationRequest.message_id.is_not(None),
-            AnomalyRecord.status.in_(["timed_out", "resolved"]),
-            AnomalyValidationRequest.delivery_status.in_(["sent", "timed_out", "update_failed"]),
+            or_(
+                and_(
+                    AnomalyRecord.status == "timed_out",
+                    AnomalyValidationRequest.delivery_status.in_(["sent", "update_failed"]),
+                ),
+                and_(
+                    AnomalyRecord.status == "resolved",
+                    AnomalyValidationRequest.delivery_status.in_(["sent", "timed_out", "update_failed"]),
+                ),
+            ),
         )
     ))
     if not candidates:

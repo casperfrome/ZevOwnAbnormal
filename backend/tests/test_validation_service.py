@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 
 import httpx
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select
 
 from app.config import Settings
 from app.database import Base, make_session_factory
@@ -27,8 +27,8 @@ from app.rule_engine import EvaluationMatch
 NOW = datetime(2026, 8, 22, 4, 0, 0)
 
 
-def build_session(database_url="sqlite+pysqlite:///:memory:"):
-    engine, factory = make_session_factory(database_url, testing=True)
+def build_session(database_url="sqlite+pysqlite:///:memory:", *, testing=True):
+    engine, factory = make_session_factory(database_url, testing=testing)
     Base.metadata.create_all(engine)
     session = factory()
     datasource = Datasource(
@@ -135,11 +135,16 @@ def test_snapshot_is_idempotent_for_anomaly_recipient_pairs():
 
         assert snapshot_validation(session, rule, anomaly, now=NOW) == ["user-1"]
         session.commit()
+        session.add(NotificationDelivery(
+            anomaly_id=anomaly.id, receive_id_type="user_id", recipient="user-1",
+        ))
+        session.commit()
         assert snapshot_validation(session, rule, anomaly, now=NOW) == ["user-1"]
         session.commit()
 
         assert len(list(session.scalars(select(AnomalyValidationRequest)))) == 1
         assert len(list(session.scalars(select(AnomalyEvent)))) == 1
+        assert list(session.scalars(select(NotificationDelivery))) == []
     finally:
         session.close()
         engine.dispose()
@@ -269,6 +274,119 @@ def test_delivery_retries_real_feishu_gateway_and_persists_success(monkeypatch):
         engine.dispose()
 
 
+def test_delivery_retry_uses_stable_remote_idempotency_key(monkeypatch):
+    """A lost first response must not create a second physical Feishu card."""
+    from app.validation_service import deliver_validation_requests
+
+    engine, _, session, rule = build_session()
+    physical_messages = {}
+    send_attempts = []
+    try:
+        anomaly = make_anomaly(rule)
+        session.add(anomaly)
+        session.flush()
+        validation_request = AnomalyValidationRequest(anomaly_id=anomaly.id, recipient_user_id="user-1")
+        session.add(validation_request)
+        session.commit()
+
+        def handler(request: httpx.Request):
+            if request.url.path.endswith("tenant_access_token/internal/"):
+                return httpx.Response(200, json={"code": 0, "tenant_access_token": "token", "expire": 7200})
+            payload = json.loads(request.content)
+            key = payload.get("uuid")
+            send_attempts.append(key)
+            physical_key = key if key is not None else f"unkeyed-attempt-{len(send_attempts)}"
+            if physical_key not in physical_messages:
+                physical_messages[physical_key] = f"om_{len(physical_messages) + 1}"
+            if len(send_attempts) == 1:
+                raise httpx.ReadTimeout("response lost", request=request)
+            return httpx.Response(200, json={"code": 0, "data": {"message_id": physical_messages[physical_key]}})
+
+        monkeypatch.setattr("app.validation_service.time.sleep", lambda _: None)
+        client = FeishuClient("cli", "secret", transport=httpx.MockTransport(handler))
+        assert deliver_validation_requests(
+            session, Settings(feishu_app_id="cli", feishu_app_secret="secret"), client=client,
+        ) == 0
+
+        assert send_attempts == [validation_request.id, validation_request.id]
+        assert physical_messages == {validation_request.id: "om_1"}
+        assert validation_request.message_id == "om_1"
+        assert validation_request.delivery_attempts == 2
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_two_delivery_workers_send_only_one_card_for_a_request(tmp_path):
+    """Two workers selecting the same pending request must produce one outbound card."""
+    from app.validation_service import deliver_validation_requests
+
+    database_path = tmp_path / "delivery.sqlite"
+    engine, factory, setup_session, rule = build_session(
+        f"sqlite+pysqlite:///{database_path}", testing=False,
+    )
+    anomaly = make_anomaly(rule)
+    setup_session.add(anomaly)
+    setup_session.flush()
+    request = AnomalyValidationRequest(anomaly_id=anomaly.id, recipient_user_id="user-1")
+    setup_session.add(request)
+    setup_session.commit()
+    request_id = request.id
+    setup_session.close()
+
+    first_entered = threading.Event()
+    second_entered = threading.Event()
+    release_first = threading.Event()
+    send_count = 0
+    errors = []
+    send_lock = threading.Lock()
+
+    def handler(request: httpx.Request):
+        nonlocal send_count
+        if request.url.path.endswith("tenant_access_token/internal/"):
+            return httpx.Response(200, json={"code": 0, "tenant_access_token": "token", "expire": 7200})
+        with send_lock:
+            send_count += 1
+            call_number = send_count
+        if call_number == 1:
+            first_entered.set()
+            assert release_first.wait(5)
+        else:
+            second_entered.set()
+        return httpx.Response(200, json={"code": 0, "data": {"message_id": f"om_{call_number}"}})
+
+    def worker():
+        with factory() as worker_session:
+            client = FeishuClient("cli", "secret", transport=httpx.MockTransport(handler))
+            try:
+                deliver_validation_requests(
+                    worker_session, Settings(feishu_app_id="cli", feishu_app_secret="secret"), client=client,
+                )
+            except Exception as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+            finally:
+                client.close()
+
+    first = threading.Thread(target=worker)
+    first.start()
+    assert first_entered.wait(5)
+    second = threading.Thread(target=worker)
+    second.start()
+    duplicate_started = second_entered.wait(0.5)
+    release_first.set()
+    first.join()
+    second.join()
+
+    with factory() as verify_session:
+        persisted = verify_session.get(AnomalyValidationRequest, request_id)
+        assert errors == []
+        assert duplicate_started is False
+        assert send_count == 1
+        assert persisted.delivery_status == "sent"
+        assert persisted.message_id == "om_1"
+    engine.dispose()
+
+
 def test_timeout_is_idempotent_and_late_submission_resolves():
     """Repeated scans, rejected late replies, or incomplete resolution state must fail."""
     from app.validation_service import expire_due_anomalies, submit_validation
@@ -303,6 +421,80 @@ def test_timeout_is_idempotent_and_late_submission_resolves():
     finally:
         session.close()
         engine.dispose()
+
+
+def test_expiration_cannot_overwrite_a_concurrent_resolution(tmp_path):
+    """A due-row snapshot becoming stale must not overwrite a callback resolution."""
+    from app.validation_service import expire_due_anomalies, submit_validation
+
+    database_path = tmp_path / "expiration.sqlite"
+    engine, factory, setup_session, rule = build_session(
+        f"sqlite+pysqlite:///{database_path}", testing=False,
+    )
+    with engine.begin() as connection:
+        connection.exec_driver_sql("PRAGMA journal_mode=WAL")
+    anomaly = make_anomaly(rule)
+    anomaly.validation_deadline = NOW
+    setup_session.add(anomaly)
+    setup_session.flush()
+    setup_session.add(AnomalyValidationRequest(anomaly_id=anomaly.id, recipient_user_id="user-1"))
+    setup_session.commit()
+    anomaly_id = anomaly.id
+    setup_session.close()
+
+    expiry_paused = threading.Event()
+    callback_done = threading.Event()
+    pause_guard = threading.Lock()
+    did_pause = False
+    results = []
+    errors = []
+
+    def pause_once():
+        nonlocal did_pause
+        with pause_guard:
+            if did_pause:
+                return
+            did_pause = True
+        expiry_paused.set()
+        assert callback_done.wait(5)
+
+    def before_cursor_execute(_conn, _cursor, statement, _parameters, _context, _executemany):
+        if threading.current_thread().name == "expiry-worker" and statement.lstrip().upper().startswith("UPDATE ANOMALY_RECORDS"):
+            pause_once()
+
+    event.listen(engine, "before_cursor_execute", before_cursor_execute)
+
+    def expire_worker():
+        with factory() as expiry_session:
+            def on_load(_session, instance):
+                if isinstance(instance, AnomalyRecord) and instance.id == anomaly_id:
+                    pause_once()
+
+            event.listen(expiry_session, "loaded_as_persistent", on_load)
+            try:
+                results.append(expire_due_anomalies(expiry_session, now=NOW))
+            except Exception as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+
+    worker = threading.Thread(target=expire_worker, name="expiry-worker")
+    worker.start()
+    assert expiry_paused.wait(5)
+    with factory() as callback_session:
+        assert submit_validation(callback_session, anomaly_id, "user-1", "resolved first", now=NOW).outcome == "accepted"
+    callback_done.set()
+    worker.join()
+
+    with factory() as verify_session:
+        persisted = verify_session.get(AnomalyRecord, anomaly_id)
+        assert errors == []
+        assert results == [0]
+        assert persisted.status == "resolved"
+        assert persisted.resolution_source == "validation"
+        assert len(list(verify_session.scalars(select(AnomalyValidationSubmission)))) == 1
+        assert len(list(verify_session.scalars(select(AnomalyEvent).where(
+            AnomalyEvent.event_type == "validation_timed_out"
+        )))) == 0
+    engine.dispose()
 
 
 @pytest.mark.parametrize("text", ["   ", "x" * 1001])
@@ -373,6 +565,49 @@ def test_timed_out_record_cannot_return_to_an_active_state():
             with pytest.raises(InvalidValidationTransition):
                 transition_anomaly(session, anomaly, target_status, now=NOW)
         assert anomaly.status == "timed_out"
+    finally:
+        session.close()
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("source", "user_id"),
+    [(None, None), ("other", "admin-1"), ("manual", None), ("validation", "user-1")],
+)
+def test_resolution_transition_rejects_missing_or_untrusted_provenance(source, user_id):
+    """Only a named administrator may use the public manual resolution transition."""
+    from app.validation_service import InvalidValidationTransition, transition_anomaly
+
+    engine, _, session, rule = build_session()
+    try:
+        anomaly = make_anomaly(rule)
+        session.add(anomaly)
+        session.commit()
+
+        with pytest.raises(InvalidValidationTransition):
+            transition_anomaly(session, anomaly, "resolved", now=NOW, source=source, user_id=user_id)
+        assert anomaly.status == "pending"
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_named_admin_can_manually_resolve():
+    """Rejecting a valid identified administrator resolution must fail."""
+    from app.validation_service import transition_anomaly
+
+    engine, _, session, rule = build_session()
+    try:
+        anomaly = make_anomaly(rule)
+        session.add(anomaly)
+        session.commit()
+
+        assert transition_anomaly(
+            session, anomaly, "resolved", now=NOW, source="manual", user_id="admin-1",
+        ) is True
+        assert anomaly.status == "resolved"
+        assert anomaly.resolution_source == "manual"
+        assert anomaly.resolved_by_user_id == "admin-1"
     finally:
         session.close()
         engine.dispose()
@@ -455,6 +690,47 @@ def test_card_patch_failure_is_retryable_and_does_not_rollback_resolution(monkey
         assert reconcile_validation_cards(session, Settings(feishu_app_id="cli", feishu_app_secret="secret"), client=successful_client) == 0
         assert request.delivery_status == "resolved"
         assert request.last_error is None
+
+        patched_requests = []
+        no_repeat_client = FeishuClient("cli", "secret", transport=httpx.MockTransport(lambda request: (
+            patched_requests.append(request) or httpx.Response(500, json={"code": 1, "msg": "must not patch"})
+        )))
+        assert reconcile_validation_cards(
+            session, Settings(feishu_app_id="cli", feishu_app_secret="secret"), client=no_repeat_client,
+        ) == 0
+        assert patched_requests == []
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_timed_out_card_reconciliation_converges_after_one_success():
+    """A successfully synchronized timed-out card must not be patched on every scan."""
+    from app.validation_service import reconcile_validation_cards
+
+    engine, _, session, rule = build_session()
+    patch_requests = []
+    try:
+        anomaly = make_anomaly(rule, status="timed_out")
+        session.add(anomaly)
+        session.flush()
+        request = AnomalyValidationRequest(
+            anomaly_id=anomaly.id, recipient_user_id="user-1", delivery_status="sent", message_id="om_card",
+        )
+        session.add(request)
+        session.commit()
+
+        client = FeishuClient("cli", "secret", transport=httpx.MockTransport(lambda request: (
+            httpx.Response(200, json={"code": 0, "tenant_access_token": "token", "expire": 7200})
+            if request.url.path.endswith("tenant_access_token/internal/")
+            else (patch_requests.append(request) or httpx.Response(200, json={"code": 0}))
+        )))
+        settings = Settings(feishu_app_id="cli", feishu_app_secret="secret")
+
+        assert reconcile_validation_cards(session, settings, client=client) == 0
+        assert request.delivery_status == "timed_out"
+        assert reconcile_validation_cards(session, settings, client=client) == 0
+        assert len(patch_requests) == 1
     finally:
         session.close()
         engine.dispose()
