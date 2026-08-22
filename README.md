@@ -47,6 +47,11 @@ Pop-Location
 & 'D:\PythonVEnv\FirstVEnv\Scripts\python.exe' .\飞书长连接启动\飞书长连接启动.py
 ```
 
+飞书开放平台必须使用长连接订阅 `p2.card.action.trigger`。卡片详情链接使用
+`SENTINEL_PUBLIC_BASE_URL`，真实验收时该地址必须能从接收者设备访问，不能使用仅服务端可见的
+`localhost`。完整迁移、启动、安全诊断和以 `user_id=753f6bdf` 为目标的人工 smoke 步骤见
+[异常实时校验部署与验收](docs/anomaly-validation-acceptance.md)。真实消息发送必须在执行当时再次获得明确授权。
+
 本地默认 `AUTO_LOGIN=true`，打开 <http://localhost:8000> 后自动登录超级管理员。默认账号为 `admin`；密码由 `.env` 中的 `SUPERADMIN_PASSWORD` 控制。
 
 FastAPI 启动时会幂等核对全部启用规则。也可以单独执行：

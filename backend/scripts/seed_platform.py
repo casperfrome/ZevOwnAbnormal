@@ -59,14 +59,15 @@ GROUP BY DATE(ordered_at), store_id ORDER BY store_id, metric_date""",
             ads_daily = Dataset(
                 name="门店综合经营日报", description="StarRocks 门店级 ADS 指标，用于异常检测",
                 datasource=starrocks,
-                sql="""SELECT metric_date, store_id, store_name, province, manager_open_id, gmv,
+                sql="""SELECT metric_date, store_id, store_name, province, manager_open_id, manager_user_id, gmv,
 order_count, avg_order_value, refund_rate, avg_delivery_minutes, member_ratio, gmv_growth_rate
 FROM ads_store_daily_operation WHERE metric_date >= CURRENT_DATE() - INTERVAL 30 DAY
 ORDER BY store_id, metric_date""",
                 fields=[
                     {"name": "metric_date", "type": "DATE"}, {"name": "store_id", "type": "VARCHAR"},
                     {"name": "store_name", "type": "VARCHAR"}, {"name": "province", "type": "VARCHAR"},
-                    {"name": "manager_open_id", "type": "VARCHAR"}, {"name": "gmv", "type": "DECIMAL"},
+                    {"name": "manager_open_id", "type": "VARCHAR"}, {"name": "manager_user_id", "type": "VARCHAR"},
+                    {"name": "gmv", "type": "DECIMAL"},
                     {"name": "order_count", "type": "INT"}, {"name": "avg_order_value", "type": "DECIMAL"},
                     {"name": "refund_rate", "type": "DOUBLE"}, {"name": "avg_delivery_minutes", "type": "DOUBLE"},
                     {"name": "member_ratio", "type": "DOUBLE"}, {"name": "gmv_growth_rate", "type": "DOUBLE"},
@@ -82,6 +83,9 @@ ORDER BY store_id, metric_date""",
                 anomaly_key_fields=["store_id", "metric_date"],
                 schedule={"frequency": "day", "interval": 1, "time": "09:00", "start_date": date.today().isoformat(), "end_date": None},
                 notification_targets=[{"receive_id_type": "open_id", "source": "field", "value": None, "field": "manager_open_id"}],
+                validation_enabled=False,
+                validation_targets=[{"source": "field", "field": "manager_user_id"}],
+                validation_timeout_minutes=1440,
                 enabled=False, sync_status="pending",
             ))
         session.commit()

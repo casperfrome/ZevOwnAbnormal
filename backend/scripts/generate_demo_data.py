@@ -16,6 +16,11 @@ def is_injected_anomaly(store_index: int, day_offset: int) -> bool:
     return day_offset == 0 and (store_index == 1 or store_index % 997 == 0)
 
 
+def demo_manager_user_id(store_index: int) -> str:
+    """Return a deterministic, non-production Feishu user_id placeholder."""
+    return f"demo_user_{store_index:05d}"
+
+
 def mysql_connection(database=None, root=True):
     return pymysql.connect(
         host="127.0.0.1", port=3306, user="root" if root else "app",
@@ -117,7 +122,8 @@ def seed_starrocks(args, rng: random.Random):
     conn = starrocks_connection("tastien_ads")
     with conn.cursor() as cur:
         cur.execute("""CREATE TABLE IF NOT EXISTS ads_store_daily_operation (
-            metric_date DATE, store_id VARCHAR(20), store_name VARCHAR(100), province VARCHAR(30), manager_open_id VARCHAR(100),
+            metric_date DATE, store_id VARCHAR(20), store_name VARCHAR(100), province VARCHAR(30),
+            manager_open_id VARCHAR(100), manager_user_id VARCHAR(100),
             gmv DECIMAL(14,2), order_count INT, avg_order_value DECIMAL(10,2), refund_rate DOUBLE,
             avg_delivery_minutes DOUBLE, member_ratio DOUBLE, gmv_growth_rate DOUBLE
         ) ENGINE=OLAP DUPLICATE KEY(metric_date, store_id) DISTRIBUTED BY HASH(store_id) BUCKETS 8 PROPERTIES ('replication_num'='1')""")
@@ -146,7 +152,12 @@ def seed_starrocks(args, rng: random.Random):
                 if is_injected_anomaly(index, offset):
                     gmv = round(gmv * 4.5, 2)
                     refund_rate = 0.22
-                batch.append((metric_date, f"TS{index:05d}", f"塔斯汀{province}{index:05d}店", province, f"ou_demo_{index:05d}", gmv, order_count, round(aov, 2), refund_rate, round(rng.uniform(12, 38), 2), round(rng.uniform(0.35, 0.85), 4), round(rng.uniform(-0.2, 0.35), 4)))
+                batch.append((
+                    metric_date, f"TS{index:05d}", f"塔斯汀{province}{index:05d}店", province,
+                    f"ou_demo_{index:05d}", demo_manager_user_id(index), gmv, order_count,
+                    round(aov, 2), refund_rate, round(rng.uniform(12, 38), 2),
+                    round(rng.uniform(0.35, 0.85), 4), round(rng.uniform(-0.2, 0.35), 4),
+                ))
                 rkey = (metric_date, province)
                 current = region_totals.setdefault(rkey, [0.0, 0, 0, 0.0])
                 current[0] += gmv
@@ -158,10 +169,10 @@ def seed_starrocks(args, rng: random.Random):
                 brand[1] += order_count
                 brand[2] += refund_rate
                 if len(batch) >= args.batch_size:
-                    cur.executemany("INSERT INTO ads_store_daily_operation VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", batch)
+                    cur.executemany("INSERT INTO ads_store_daily_operation VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", batch)
                     batch.clear()
         if batch:
-            cur.executemany("INSERT INTO ads_store_daily_operation VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", batch)
+            cur.executemany("INSERT INTO ads_store_daily_operation VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", batch)
         region_rows = [(day, province, round(v[0], 2), v[1], v[2], round(v[3] / v[2], 4)) for (day, province), v in region_totals.items()]
         brand_rows = [(day, round(v[0], 2), v[1], args.stores, round(v[0] / v[1], 2), round(v[2] / args.stores, 4)) for day, v in brand_totals.items()]
         cur.executemany("INSERT INTO ads_region_daily_operation VALUES (%s,%s,%s,%s,%s,%s)", region_rows)
