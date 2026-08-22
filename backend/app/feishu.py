@@ -85,14 +85,31 @@ class FeishuClient:
         self._token_expires_at = time.monotonic() + max(expire - 300, 60)
         return self._token
 
-    def send_text(self, receive_id_type: str, recipient: str, text: str) -> str:
+    def send_text(
+        self,
+        receive_id_type: str,
+        recipient: str,
+        text: str,
+        *,
+        idempotency_key: str | None = None,
+    ) -> str:
         token = self._tenant_token()
-        response = self._client.post(
-            "/open-apis/im/v1/messages",
-            params={"receive_id_type": receive_id_type},
-            headers={"Authorization": f"Bearer {token}"},
-            json={"receive_id": recipient, "msg_type": "text", "content": json.dumps({"text": text}, ensure_ascii=False)},
-        )
+        payload = {
+            "receive_id": recipient,
+            "msg_type": "text",
+            "content": json.dumps({"text": text}, ensure_ascii=False),
+        }
+        if idempotency_key:
+            payload["uuid"] = idempotency_key
+        try:
+            response = self._client.post(
+                "/open-apis/im/v1/messages",
+                params={"receive_id_type": receive_id_type},
+                headers={"Authorization": f"Bearer {token}"},
+                json=payload,
+            )
+        except httpx.TransportError as exc:
+            raise FeishuDeliveryUncertainError("发送飞书消息结果未知: 网络响应丢失") from exc
         self._ensure_success(response, "发送飞书消息失败")
         body = self._response_body(response, "发送飞书消息失败")
         if body.get("code") != 0:
@@ -172,6 +189,7 @@ def send_configured_text(
     text: str,
     *,
     client: FeishuClient | None = None,
+    idempotency_key: str | None = None,
 ) -> str:
     if not app_id or not app_secret:
         raise FeishuConfigurationError("未配置飞书 App ID/App Secret")
@@ -179,7 +197,9 @@ def send_configured_text(
     owns_client = client is None
     active_client = client or FeishuClient(app_id, app_secret)
     try:
-        return active_client.send_text(receive_id_type, recipient, text)
+        if idempotency_key is None:
+            return active_client.send_text(receive_id_type, recipient, text)
+        return active_client.send_text(receive_id_type, recipient, text, idempotency_key=idempotency_key)
     finally:
         if owns_client:
             active_client.close()

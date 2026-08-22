@@ -146,6 +146,51 @@ def test_feishu_callback_returns_200_toasts_for_empty_and_repeat_submissions():
         assert repeated.json()["card"]["header"]["template"] == "green"
 
 
+def test_sql_card_action_dispatches_without_text_and_returns_retryable_failure(monkeypatch):
+    """Sending SQL actions through pseudo validation or closing a failed card must fail this test."""
+    from app.validation_service import SubmissionResult
+
+    with TestClient(create_app(testing=True)) as client:
+        anomaly_id = seed_validation_anomaly(client)
+        with client.app.state.session_factory() as session:
+            anomaly = session.get(AnomalyRecord, anomaly_id)
+            anomaly.validation_method_snapshot = "sql"
+            anomaly.validation_config_snapshot = {
+                "query_template": "SELECT status FROM repair_state WHERE id='{目标ID}'",
+                "parameters": [{"name": "目标ID", "field": "gmv"}],
+                "true_condition": {"field": "status", "operator": "eq", "value": "normal"},
+            }
+            session.commit()
+
+        monkeypatch.setattr(
+            "app.api.submit_sql_validation",
+            lambda *_args, **_kwargs: SubmissionResult(
+                "failed", None, reason="condition_failed",
+                result_detail={
+                    "field": "status", "operator": "eq", "value": "normal",
+                    "upper_value": None, "actual": "repairing",
+                },
+            ),
+        )
+        payload = callback_payload(
+            anomaly_id,
+            action="run_sql_validation",
+        )
+        payload.pop("validation_text")
+        response = client.post(
+            "/api/internal/feishu/card-actions",
+            headers={"X-Internal-Token": "change-this-internal-token"},
+            json=payload,
+        )
+
+        assert response.status_code == 200
+        assert response.json()["toast"]["type"] == "warning"
+        assert "repairing" in response.json()["toast"]["content"]
+        assert response.json()["card"]["header"]["template"] == "orange"
+        assert "已处理" in response.text
+        assert "validation_text" not in response.text
+
+
 def test_feishu_callback_hides_unexpected_internal_failures(monkeypatch):
     app = create_app(testing=True)
     with TestClient(app, raise_server_exceptions=False) as client:

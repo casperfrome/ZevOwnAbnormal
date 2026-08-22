@@ -1,11 +1,13 @@
 import csv
 import io
+import secrets
 from typing import Literal
 
 import httpx
 import jwt
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
-from sqlalchemy import case, exists, func, or_, select
+from fastapi.responses import JSONResponse
+from sqlalchemy import and_, case, exists, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -14,6 +16,8 @@ from .config import SESSION_COOKIE, Settings
 from .execution_service import RuleExecutionConflict, execute_rule
 from .models import (
     AnomalyEvent,
+    AnomalyPushJob,
+    AnomalyPushPipelineState,
     AnomalyRecord,
     AnomalyValidationRequest,
     AnomalyValidationSubmission,
@@ -26,6 +30,7 @@ from .models import (
     utcnow,
 )
 from .query_service import connect_to_datasource, execute_readonly_query
+from .push_pipeline import abort_pending_pushes, execute_push_job
 from .schemas import (
     AnomalyStatusUpdate,
     BulkAnomalyStatusUpdate,
@@ -40,11 +45,14 @@ from .schemas import (
 from .security import CredentialCipher
 from .scheduler_service import sync_rule_record
 from .sql_guard import SqlValidationError, validate_readonly_sql
+from .sql_validation import SqlValidationConfigurationError, validate_sql_validation_config
 from .validation_service import (
     InvalidValidationTransition,
+    SqlValidationExecutionError,
     ValidationRecipientError,
     ValidationTextError,
     build_validation_card,
+    submit_sql_validation,
     submit_validation,
     transition_anomaly,
 )
@@ -105,6 +113,46 @@ def get_current_reader(user: User = Depends(get_current_user)) -> User:
     return user
 
 
+@internal_router.post("/anomaly-pushes/{job_id}/execute")
+def internal_execute_anomaly_push(
+    job_id: str,
+    x_internal_token: str = Header(default=""),
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_app_settings),
+):
+    if not secrets.compare_digest(x_internal_token, settings.internal_execution_token):
+        raise HTTPException(401, "内部令牌无效")
+    try:
+        outcome = execute_push_job(session, settings, job_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(502, str(exc)) from exc
+    if outcome == "failed":
+        raise HTTPException(502, "异常推送失败")
+    return {"job_id": job_id, "outcome": outcome}
+
+
+@router.post("/anomaly-pushes/abort")
+def abort_anomaly_pushes(
+    request: Request,
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_app_settings),
+    _admin_username: str = Depends(get_current_admin),
+):
+    kafka = getattr(request.app.state, "kafka_gateway", None)
+    scheduler = getattr(request.app.state, "push_scheduler", None)
+    if kafka is None or scheduler is None:
+        raise HTTPException(503, "异常推送管线尚未就绪")
+    try:
+        summary = abort_pending_pushes(session, settings, kafka, scheduler)
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if summary["status"] != "completed":
+        return JSONResponse(status_code=502, content=summary)
+    return summary
+
+
 @router.post("/tests/feishu-message")
 def test_feishu_message(
     payload: FeishuMessageTestRequest,
@@ -155,12 +203,13 @@ def feishu_card_action(
 ):
     if x_internal_token != settings.internal_execution_token:
         raise HTTPException(401, "内部令牌无效")
-    if payload.action != "submit_validation":
+    if payload.action not in {"submit_validation", "run_sql_validation"}:
         raise HTTPException(400, "不支持的飞书卡片操作")
 
-    anomaly_id = session.scalar(select(AnomalyRecord.id).where(AnomalyRecord.id == payload.anomaly_id))
-    if anomaly_id is None:
+    anomaly = session.get(AnomalyRecord, payload.anomaly_id)
+    if anomaly is None:
         raise HTTPException(404, "异常记录不存在")
+    anomaly_id = anomaly.id
     request = session.scalar(select(AnomalyValidationRequest).where(
         AnomalyValidationRequest.anomaly_id == anomaly_id,
         AnomalyValidationRequest.message_id == payload.message_id,
@@ -172,13 +221,26 @@ def feishu_card_action(
             "error", "当前用户无权提交该异常验证", anomaly_id, session, settings,
         )
 
+    validation_method = anomaly.validation_method_snapshot or "pseudo"
+    expected_action = "run_sql_validation" if validation_method == "sql" else "submit_validation"
+    if payload.action != expected_action:
+        raise HTTPException(400, "卡片操作与异常校验方式不匹配")
+
     try:
-        result = submit_validation(
-            session,
-            anomaly_id,
-            payload.operator_user_id,
-            payload.validation_text,
-        )
+        if validation_method == "sql":
+            result = submit_sql_validation(
+                session,
+                settings,
+                anomaly_id,
+                payload.operator_user_id,
+            )
+        else:
+            result = submit_validation(
+                session,
+                anomaly_id,
+                payload.operator_user_id,
+                payload.validation_text,
+            )
     except ValidationTextError as exc:
         return _card_action_result("error", str(exc), anomaly_id, session, settings)
     except ValidationRecipientError:
@@ -190,12 +252,30 @@ def feishu_card_action(
         return _card_action_result(
             "error", "当前异常状态不允许实时验证", anomaly_id, session, settings,
         )
+    except SqlValidationExecutionError as exc:
+        return _card_action_result("error", str(exc), anomaly_id, session, settings)
     except Exception as exc:
         session.rollback()
         raise HTTPException(500, "处理飞书回调失败") from exc
 
     if result.outcome == "accepted":
-        return _card_action_result("success", "验证已提交，异常已解决", anomaly_id, session, settings)
+        content = "SQL 校验通过，异常已解决" if validation_method == "sql" else "验证已提交，异常已解决"
+        return _card_action_result("success", content, anomaly_id, session, settings)
+    if result.outcome == "failed":
+        reason_messages = {
+            "no_rows": "SQL 校验未通过：查询未返回数据",
+            "multiple_rows": "SQL 校验未通过：查询返回多行",
+            "missing_field": "SQL 校验未通过：结果缺少配置字段",
+        }
+        if result.reason in reason_messages:
+            content = reason_messages[result.reason]
+        else:
+            detail = result.result_detail or {}
+            content = (
+                f"SQL 校验未通过：{detail.get('field', '-')} 实际值 "
+                f"{detail.get('actual')}，期望 {detail.get('operator', '-')} {detail.get('value')}"
+            )
+        return _card_action_result("warning", content, anomaly_id, session, settings)
     if result.outcome == "duplicate":
         return _card_action_result("warning", "该验证已提交，无需重复操作", anomaly_id, session, settings)
     return _card_action_result("warning", "该异常已由其他验证人解决", anomaly_id, session, settings)
@@ -258,6 +338,8 @@ def rule_dict(item: Rule) -> dict:
         "validation_enabled": item.validation_enabled,
         "validation_targets": item.validation_targets,
         "validation_timeout_minutes": item.validation_timeout_minutes,
+        "validation_method": item.validation_method,
+        "sql_validation_config": item.sql_validation_config,
         "enabled": item.enabled,
         "sync_status": item.sync_status,
         "sync_error": item.sync_error,
@@ -270,6 +352,23 @@ def rule_dict(item: Rule) -> dict:
 
 def _sync_rule(item: Rule, settings: Settings, session: Session) -> None:
     sync_rule_record(item, settings, session)
+
+
+def _validate_rule_sql_configuration(payload: RuleCreate, dataset: Dataset) -> None:
+    if payload.validation_method != "sql" or payload.sql_validation_config is None:
+        return
+    fields = {
+        str(field.get("name"))
+        for field in (dataset.fields or [])
+        if field.get("name") is not None
+    }
+    try:
+        validate_sql_validation_config(
+            payload.sql_validation_config.model_dump(mode="json"),
+            fields,
+        )
+    except SqlValidationConfigurationError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 def run_dict(item: RuleRun) -> dict:
@@ -294,6 +393,7 @@ def anomaly_dict(item: AnomalyRecord, delivery_status: str | None = None) -> dic
         "timed_out_at": item.timed_out_at,
         "resolution_source": item.resolution_source,
         "resolved_by_user_id": item.resolved_by_user_id,
+        "validation_method": item.validation_method_snapshot,
         "delivery_status": delivery_status or "none",
     }
 
@@ -518,6 +618,7 @@ def create_rule(payload: RuleCreate, session: Session = Depends(get_session), se
     dataset = session.get(Dataset, payload.dataset_id)
     if not dataset:
         raise HTTPException(404, "数据集不存在")
+    _validate_rule_sql_configuration(payload, dataset)
     item = Rule(**payload.model_dump(mode="json", exclude={"enabled"}), sync_status="pending", enabled=False)
     session.add(item)
     try:
@@ -548,6 +649,10 @@ def update_rule(rule_id: str, payload: RuleCreate, session: Session = Depends(ge
     item = session.get(Rule, rule_id)
     if not item or item.deleted_at:
         raise HTTPException(404, "规则不存在")
+    dataset = session.get(Dataset, payload.dataset_id)
+    if not dataset:
+        raise HTTPException(404, "数据集不存在")
+    _validate_rule_sql_configuration(payload, dataset)
     for key, value in payload.model_dump(mode="json", exclude={"enabled"}).items():
         setattr(item, key, value)
     item.sync_status = "pending"
@@ -680,6 +785,44 @@ def _anomaly_ordering(sort_key: str, sort_order: str):
     return sort_column.asc() if sort_order == "asc" else sort_column.desc()
 
 
+def _in_transit_anomaly_ids(session: Session):
+    pipeline = session.get(AnomalyPushPipelineState, 1)
+    query = (
+        select(AnomalyPushJob.anomaly_id)
+        .outerjoin(
+            NotificationDelivery,
+            and_(
+                AnomalyPushJob.kind == "notification",
+                NotificationDelivery.id == AnomalyPushJob.delivery_id,
+            ),
+        )
+        .outerjoin(
+            AnomalyValidationRequest,
+            and_(
+                AnomalyPushJob.kind == "validation",
+                AnomalyValidationRequest.id == AnomalyPushJob.delivery_id,
+            ),
+        )
+    )
+    if pipeline is None:
+        return query.where(AnomalyPushJob.id.is_(None))
+    return query.where(
+        AnomalyPushJob.generation == pipeline.generation,
+        AnomalyPushJob.cancel_requested.is_(False),
+        AnomalyPushJob.status.not_in(["sent", "aborted"]),
+        or_(
+            and_(
+                AnomalyPushJob.kind == "notification",
+                NotificationDelivery.status.in_(["pending", "failed", "sending", "uncertain"]),
+            ),
+            and_(
+                AnomalyPushJob.kind == "validation",
+                AnomalyValidationRequest.delivery_status.in_(["pending", "failed", "sending", "uncertain"]),
+            ),
+        ),
+    ).distinct()
+
+
 @router.get("/anomalies")
 def list_anomalies(
     page: int = 1,
@@ -688,6 +831,7 @@ def list_anomalies(
     severity: str | None = None,
     rule_id: str | None = None,
     search: str | None = None,
+    push_status: Literal["in_transit"] | None = None,
     sort_key: Literal["occurredAt", "severity"] = "occurredAt",
     sort_order: Literal["asc", "desc"] = "desc",
     session: Session = Depends(get_session),
@@ -711,6 +855,10 @@ def list_anomalies(
         search=search,
         dialect_name=dialect_name,
     )
+    if push_status == "in_transit":
+        in_transit_ids = _in_transit_anomaly_ids(session)
+        query = query.where(AnomalyRecord.id.in_(in_transit_ids))
+        count_query = count_query.where(AnomalyRecord.id.in_(in_transit_ids))
     start = max(page - 1, 0) * min(max(page_size, 1), 100)
     size = min(max(page_size, 1), 100)
     total = session.scalar(select(func.count()).select_from(count_query.subquery())) or 0
@@ -732,7 +880,12 @@ def list_anomalies(
     items = []
     for item in page_items:
         statuses = statuses_by_anomaly.get(item.id, [])
-        delivery = "failed" if "failed" in statuses else "sent" if statuses and all(s == "sent" for s in statuses) else "pending" if statuses else "none"
+        delivery = (
+            "failed" if "failed" in statuses
+            else "sent" if statuses and all(s in {"sent", "aborted"} for s in statuses) and "sent" in statuses
+            else "aborted" if statuses and all(s == "aborted" for s in statuses)
+            else "pending" if statuses else "none"
+        )
         items.append(anomaly_dict(item, delivery))
     return {"items": items, "total": total, "page": page, "page_size": size}
 
@@ -740,6 +893,7 @@ def list_anomalies(
 @router.get("/anomalies/export")
 def export_anomalies(
     status_filter: str | None = None,
+    push_status: Literal["in_transit"] | None = None,
     severity: str | None = None,
     rule_id: str | None = None,
     search: str | None = None,
@@ -759,6 +913,8 @@ def export_anomalies(
         search=search,
         dialect_name=session.get_bind().dialect.name,
     )
+    if push_status == "in_transit":
+        query = query.where(AnomalyRecord.id.in_(_in_transit_anomaly_ids(session)))
     for item in session.scalars(query.order_by(
         _anomaly_ordering(sort_key, sort_order), AnomalyRecord.id.asc()
     )):
@@ -805,6 +961,7 @@ def get_anomaly(
         "submitted_text": submission.submitted_text,
         "validator_type": submission.validator_type,
         "result": submission.result,
+        "result_detail": submission.result_detail,
         "submitted_at": submission.submitted_at,
     }
     return body
@@ -883,6 +1040,9 @@ def overview(
     rules = list(session.scalars(select(Rule).where(Rule.deleted_at.is_(None))))
     datasources = list(session.scalars(select(Datasource)))
     datasets = list(session.scalars(select(Dataset)))
+    push_in_transit_anomalies = session.scalar(
+        select(func.count()).select_from(_in_transit_anomaly_ids(session).subquery())
+    ) or 0
     return {
         "stats": {
             "pending_records": sum(a.status == "pending" for a in anomalies),
@@ -890,6 +1050,7 @@ def overview(
             "timed_out_records": sum(a.status == "timed_out" for a in anomalies),
             "resolved_records": sum(a.status == "resolved" for a in anomalies),
             "critical_anomalies": sum(a.severity == "critical" and a.status != "resolved" for a in anomalies),
+            "push_in_transit_anomalies": push_in_transit_anomalies,
             "active_rules": sum(r.enabled for r in rules), "total_rules": len(rules),
             "online_datasources": sum(d.status == "online" for d in datasources), "total_datasources": len(datasources),
             "total_datasets": len(datasets),

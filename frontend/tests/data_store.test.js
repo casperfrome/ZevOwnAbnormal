@@ -33,6 +33,30 @@ test('sendFeishuTestMessage posts the selected target to the system test endpoin
   });
 });
 
+test('abortAnomalyPushes posts to the administrative abort endpoint', async () => {
+  const requests = [];
+  const summary = {
+    status: 'completed', aborted_jobs: 3, stopped_ds_instances: 2,
+    deleted_ds_instances: 2, cleared_kafka_partitions: 1, errors: [],
+  };
+  const context = {
+    window: {},
+    fetch: async (url, options) => {
+      requests.push({ url, options });
+      return { ok: true, status: 200, json: async () => summary };
+    },
+  };
+  vm.runInNewContext(
+    fs.readFileSync(path.join(__dirname, '..', 'scripts', 'data.js'), 'utf8'), context,
+  );
+
+  const result = await context.window.Store.abortAnomalyPushes();
+
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), summary);
+  assert.equal(requests[0].url, '/api/v1/anomaly-pushes/abort');
+  assert.equal(requests[0].options.method, 'POST');
+});
+
 test('validation rule fields and anomaly audit details map between API and UI contracts', async () => {
   const requests = [];
   const responses = {
@@ -52,6 +76,12 @@ test('validation rule fields and anomaly audit details map between API and UI co
       validation_enabled: true,
       validation_targets: [{ source: 'literal', value: 'u_1' }, { source: 'field', field: 'owner_id' }],
       validation_timeout_minutes: 30,
+      validation_method: 'sql',
+      sql_validation_config: {
+        query_template: "SELECT status FROM repair_state WHERE owner_id='{目标ID}'",
+        parameters: [{ name: '目标ID', field: 'owner_id' }],
+        true_condition: { field: 'status', operator: 'eq', value: 'normal', upper_value: null },
+      },
       enabled: true, sync_status: 'synced', sync_error: null, last_run: null, next_run: null,
       anomaly_count: 1, created_at: '2026-08-22T08:00:00',
     }],
@@ -64,13 +94,14 @@ test('validation rule fields and anomaly audit details map between API and UI co
         resolved_at: null, assignee: null, description: 'GMV anomaly',
         validation_deadline: '2026-08-22T09:30:00', timed_out_at: '2026-08-22T09:30:01',
         resolution_source: null, resolved_by_user_id: null, delivery_status: 'sent',
+        validation_method: 'sql',
       }], total: 1, page: 1, page_size: 100,
     },
     '/api/v1/overview': {
       stats: {
         pending_records: 2, processing_records: 3, timed_out_records: 4, resolved_records: 5,
         critical_anomalies: 1, active_rules: 1, total_rules: 1, online_datasources: 0,
-        total_datasources: 0, total_datasets: 1,
+        total_datasources: 0, total_datasets: 1, push_in_transit_anomalies: 6,
       }, recent_anomalies: [], top_rules: [],
     },
     '/api/v1/anomalies/record-1': {
@@ -80,6 +111,7 @@ test('validation rule fields and anomaly audit details map between API and UI co
       first_seen_at: '2026-08-22T09:00:00', last_seen_at: '2026-08-22T09:10:00', resolved_at: '2026-08-22T09:20:00',
       assignee: null, description: 'GMV anomaly', validation_deadline: '2026-08-22T09:30:00',
       timed_out_at: null, resolution_source: 'validation', resolved_by_user_id: 'u_1', delivery_status: 'sent',
+      validation_method: 'sql',
       timeline: [], deliveries: [],
       validation_requests: [{
         recipient_user_id: 'u_1', delivery_status: 'resolved', delivery_attempts: 2,
@@ -88,6 +120,7 @@ test('validation rule fields and anomaly audit details map between API and UI co
       validation_submission: {
         submitted_by_user_id: 'u_1', submitted_text: 'confirmed', validator_type: 'pseudo',
         result: 'passed', submitted_at: '2026-08-22T09:20:00',
+        result_detail: { field: 'status', operator: 'eq', value: 'normal', upper_value: null, actual: 'normal' },
       },
     },
   };
@@ -105,6 +138,8 @@ test('validation rule fields and anomaly audit details map between API and UI co
             validation_enabled: body.validation_enabled,
             validation_targets: body.validation_targets,
             validation_timeout_minutes: body.validation_timeout_minutes,
+            validation_method: body.validation_method,
+            sql_validation_config: body.sql_validation_config,
           }),
         };
       }
@@ -120,6 +155,8 @@ test('validation rule fields and anomaly audit details map between API and UI co
   const rule = store.getRule('rule-1');
   assert.equal(rule.validationEnabled, true);
   assert.equal(rule.validationTimeoutMinutes, 30);
+  assert.equal(rule.validationMethod, 'sql');
+  assert.equal(rule.sqlValidationConfig.queryTemplate, "SELECT status FROM repair_state WHERE owner_id='{目标ID}'");
   assert.deepEqual(JSON.parse(JSON.stringify(rule.validationTargets)), [
     { source: 'literal', value: 'u_1' }, { source: 'field', field: 'owner_id' },
   ]);
@@ -129,10 +166,12 @@ test('validation rule fields and anomaly audit details map between API and UI co
   assert.equal(listed.timedOutAt, '2026-08-22T09:30:01');
   assert.equal(store.getStats().timedOutRecords, 4);
   assert.equal(store.getStats().unresolvedRecords, 9);
+  assert.equal(store.getStats().pushInTransitAnomalies, 6);
 
   const detail = await store.loadRecord('record-1');
   assert.equal(detail.resolutionSource, 'validation');
   assert.equal(detail.resolvedByUserId, 'u_1');
+  assert.equal(detail.validationMethod, 'sql');
   assert.deepEqual(JSON.parse(JSON.stringify(detail.validationRequests)), [{
     recipientUserId: 'u_1', deliveryStatus: 'resolved', deliveryAttempts: 2,
     messageId: 'om_1', lastError: null, deliveredAt: '2026-08-22T09:01:00',
@@ -140,6 +179,7 @@ test('validation rule fields and anomaly audit details map between API and UI co
   assert.deepEqual(JSON.parse(JSON.stringify(detail.validationSubmission)), {
     submittedByUserId: 'u_1', submittedText: 'confirmed', validatorType: 'pseudo',
     result: 'passed', submittedAt: '2026-08-22T09:20:00',
+    resultDetail: { field: 'status', operator: 'eq', value: 'normal', upperValue: null, actual: 'normal' },
   });
 
   await store.addRule({
@@ -150,15 +190,71 @@ test('validation rule fields and anomaly audit details map between API and UI co
     validationEnabled: false,
     validationTargets: [{ source: 'literal', value: 'u_2' }, { source: 'field', field: 'owner_id' }],
     validationTimeoutMinutes: 43200,
+    validationMethod: 'sql',
+    sqlValidationConfig: {
+      queryTemplate: "SELECT status FROM repair_state WHERE owner_id='{目标ID}'",
+      parameters: [{ name: '目标ID', field: 'owner_id' }],
+      trueCondition: { field: 'status', operator: 'eq', value: 'normal', upperValue: null },
+    },
     enabled: true,
   });
   const createRequest = requests.find(item => item.url === '/api/v1/rules' && item.options.method === 'POST');
   const body = JSON.parse(createRequest.options.body);
   assert.equal(body.validation_enabled, false);
   assert.equal(body.validation_timeout_minutes, 43200);
+  assert.equal(body.validation_method, 'sql');
+  assert.deepEqual(body.sql_validation_config, {
+    query_template: "SELECT status FROM repair_state WHERE owner_id='{目标ID}'",
+    parameters: [{ name: '目标ID', field: 'owner_id' }],
+    true_condition: { field: 'status', operator: 'eq', value: 'normal', upper_value: null },
+  });
   assert.deepEqual(body.validation_targets, [
     { source: 'literal', value: 'u_2' }, { source: 'field', field: 'owner_id' },
   ]);
+});
+
+test('updating an existing condition sends the edited operator instead of the stale API operator', async () => {
+  const requests = [];
+  const apiRule = {
+    id: 'rule-1', name: 'Temperature check', description: '', dataset_id: 'dataset-1',
+    dataset_name: 'Vehicle temperatures', severity: 'medium', logic: 'AND',
+    conditions: [{ field: 'refrigerated_temperature', operator: 'gte', value: -12 }],
+    anomaly_key_fields: ['data_date', 'license_plate'],
+    schedule: { frequency: 'day', interval: 1, time: '09:00', start_date: '2026-08-09', end_date: null },
+    notification_targets: [{ receive_id_type: 'user_id', source: 'literal', value: 'validator-1' }],
+    validation_enabled: false, validation_targets: [], validation_timeout_minutes: 1440,
+    enabled: true, sync_status: 'synced', sync_error: null, created_at: '2026-08-22T08:00:00',
+  };
+  const context = {
+    window: {},
+    fetch: async (url, options = {}) => {
+      requests.push({ url, options });
+      if (url === '/api/v1/auth/me') return { ok: true, status: 200, json: async () => ({ username: 'admin' }) };
+      if (url === '/api/v1/datasources' || url === '/api/v1/datasets') return { ok: true, status: 200, json: async () => [] };
+      if (url === '/api/v1/rules') return { ok: true, status: 200, json: async () => [apiRule] };
+      if (url === '/api/v1/anomalies?page=1&page_size=10') {
+        return { ok: true, status: 200, json: async () => ({ items: [], total: 0, page: 1, page_size: 10 }) };
+      }
+      if (url === '/api/v1/overview') return { ok: true, status: 200, json: async () => ({ stats: {} }) };
+      if (url === '/api/v1/rules/rule-1' && options.method === 'PUT') {
+        return { ok: true, status: 200, json: async () => ({ ...apiRule, ...JSON.parse(options.body) }) };
+      }
+      throw new Error(`unexpected request ${url}`);
+    },
+  };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'scripts', 'data.js'), 'utf8'), context);
+  const store = context.window.Store;
+  await store.init();
+
+  const condition = store.getRule('rule-1').conditions[0];
+  await store.updateRule('rule-1', {
+    conditions: [{ ...condition, field: 'license_plate', op: 'eq', value: 'q皖H0BCB7' }],
+  });
+
+  const request = requests.find(item => item.url === '/api/v1/rules/rule-1' && item.options.method === 'PUT');
+  assert.deepEqual(JSON.parse(request.options.body).conditions, [{
+    field: 'license_plate', operator: 'eq', value: 'q皖H0BCB7', upper_value: null, baseline: null,
+  }]);
 });
 
 test('updating one record refreshes authoritative overview counts immediately', async () => {
@@ -286,11 +382,12 @@ test('record pages are loaded from the backend with status and pagination filter
   assert.equal(typeof store.loadRecordsPage, 'function');
 
   const result = await store.loadRecordsPage({
-    page: 3, pageSize: 10, status: 'timed_out', severity: 'high', ruleId: 'rule-1', search: 'GMV',
+    page: 3, pageSize: 10, status: 'timed_out', pushStatus: 'in_transit',
+    severity: 'high', ruleId: 'rule-1', search: 'GMV',
     sortKey: 'severity', sortOrder: 'asc',
   });
 
-  assert.equal(requests[0].url, '/api/v1/anomalies?page=3&page_size=10&status_filter=timed_out&severity=high&rule_id=rule-1&search=GMV&sort_key=severity&sort_order=asc');
+  assert.equal(requests[0].url, '/api/v1/anomalies?page=3&page_size=10&status_filter=timed_out&push_status=in_transit&severity=high&rule_id=rule-1&search=GMV&sort_key=severity&sort_order=asc');
   assert.equal(result.total, 27);
   assert.equal(result.page, 3);
   assert.equal(result.pageSize, 10);
@@ -298,10 +395,10 @@ test('record pages are loaded from the backend with status and pagination filter
   assert.equal(store.getRecords()[0].id, 'record-21');
   assert.equal(
     store.exportUrl({
-      status: 'timed_out', severity: 'high', ruleId: 'rule-1', search: 'GMV',
+      status: 'timed_out', pushStatus: 'in_transit', severity: 'high', ruleId: 'rule-1', search: 'GMV',
       sortKey: 'severity', sortOrder: 'asc',
     }),
-    '/api/v1/anomalies/export?status_filter=timed_out&severity=high&rule_id=rule-1&search=GMV&sort_key=severity&sort_order=asc',
+    '/api/v1/anomalies/export?status_filter=timed_out&push_status=in_transit&severity=high&rule_id=rule-1&search=GMV&sort_key=severity&sort_order=asc',
   );
 });
 

@@ -56,7 +56,7 @@ test('rule field selectors preserve hostile names and types as inert option text
   await page.click('#r-add');
   await page.selectOption('#f-dataset', dataset.id);
   const selectors = [
-    '#f-field', '#f-field-source', '#f-validation-fields', '#f-key-fields',
+    '#f-field-source', '#f-validation-fields',
     '.condition-row [data-c="field"]',
   ];
   for (const selector of selectors) {
@@ -70,6 +70,13 @@ test('rule field selectors preserve hostile names and types as inert option text
     assert.equal(matching[0].text, `${fieldName} · ${fieldType}`);
     assert.equal(matching[0].pwned, null);
   }
+  await page.click('#f-key-fields');
+  const keyFieldOption = page.locator('#f-key-fields-listbox [role="option"]');
+  assert.equal(await keyFieldOption.count(), 1);
+  assert.equal(await keyFieldOption.getAttribute('data-key-field'), fieldName);
+  assert.equal(await keyFieldOption.locator('strong').textContent(), fieldName);
+  assert.equal(await keyFieldOption.locator('small').textContent(), fieldType);
+  assert.equal(await keyFieldOption.getAttribute('data-pwned'), null);
   assert.equal(await page.locator('#field-type-xss').count(), 0);
   assert.equal(await page.evaluate(() => window.ruleXss), 0);
   assert.deepEqual(pageErrors, []);
@@ -97,8 +104,8 @@ test('rule form saves real-time validation targets and reports an inline error w
   assert.equal(await page.getByText('飞书通知', { exact: true }).count(), 1, 'normal notifications remain a distinct section');
   await page.fill('#f-name', 'Validation rule');
   await page.selectOption('#f-dataset', 'dataset-1');
-  await page.selectOption('#f-field', 'amount');
-  await page.selectOption('#f-key-fields', 'order_id');
+  await page.click('#f-key-fields');
+  await page.locator('#f-key-fields-listbox [data-key-field="order_id"]').click();
   await page.selectOption('.condition-row [data-c="field"]', 'amount');
   await page.fill('#f-openids-input', 'ou_notify');
   await page.check('#f-validation-enabled');
@@ -131,7 +138,7 @@ test('disabled real-time validation preserves configured targets when editing', 
     const dataset = datasetFixture();
     const rule = {
       id: 'rule-1', name: 'Validation rule', description: 'Review issue', datasetId: dataset.id,
-      datasetName: dataset.name, field: 'amount', severity: 'medium', enabled: true, anomalyCount: 0,
+      datasetName: dataset.name, severity: 'medium', enabled: true, anomalyCount: 0,
       lastRun: null, logic: 'AND', conditions: [{ field: 'amount', op: 'gt', value: '100' }],
       anomalyKeyFields: ['order_id'], schedule: { frequency: 'day', interval: 1, time: '09:00', start: '2026-08-22', end: '' },
       notify: { mode: 'manual', openIds: ['ou_notify'], userIds: [], fieldSource: null },
@@ -188,15 +195,23 @@ test('records expose timed-out filtering and render escaped validation audit det
     const detail = {
       ...records[1], description: '<img src=x onerror="window.auditInjected=true">',
       validationDeadline: '2026-08-22T09:30:00', timedOutAt: null, resolutionSource: 'validation',
+      validationMethod: 'sql',
       resolvedByUserId: 'u_1', businessKey: { owner_id: 'u_1' }, details: { gmv: 999 }, hitCount: 1,
-      lastSeenAt: '2026-08-22T09:10:00', deliveries: [], timeline: [],
+      lastSeenAt: '2026-08-22T09:10:00', deliveries: [{
+        receive_id_type: 'open_id', recipient: 'ou_aborted', status: 'aborted', attempts: 0,
+        message_id: null, last_error: '推送已由管理员中止',
+      }], timeline: [],
       validationRequests: [{
         recipientUserId: 'u_1', deliveryStatus: 'resolved', deliveryAttempts: 2,
         messageId: 'om_1', lastError: null, deliveredAt: '2026-08-22T09:01:00',
+      }, {
+        recipientUserId: 'u_aborted', deliveryStatus: 'aborted', deliveryAttempts: 0,
+        messageId: null, lastError: '推送已由管理员中止', deliveredAt: null,
       }],
       validationSubmission: {
-        submittedByUserId: 'u_1', submittedText: '<script>window.auditInjected=true</script>approved',
-        validatorType: 'pseudo', result: 'passed', submittedAt: '2026-08-22T09:20:00',
+        submittedByUserId: 'u_1', submittedText: '',
+        validatorType: 'sql', result: 'passed', submittedAt: '2026-08-22T09:20:00',
+        resultDetail: { field: 'status', operator: 'eq', value: 'normal', upperValue: null, actual: 'normal' },
       },
     };
     const timedOutDetail = {
@@ -238,8 +253,11 @@ test('records expose timed-out filtering and render escaped validation audit det
   assert.match(drawerText, /校验截止时间/);
   assert.match(drawerText, /解决来源/);
   assert.match(drawerText, /u_1/);
-  assert.match(drawerText, /approved/);
+  assert.match(drawerText, /SQL 校验/);
+  assert.match(drawerText, /status/);
+  assert.match(drawerText, /normal/);
   assert.match(drawerText, /resolved/);
+  assert.equal(await page.getByText('已中止', { exact: true }).count(), 2);
   assert.equal(await page.evaluate(() => window.auditInjected), false);
   assert.equal(await page.locator('.drawer script, .drawer img').count(), 0);
   assert.equal(await page.locator('#d-mark-processing, #d-resolve').count(), 0);
@@ -252,6 +270,57 @@ test('records expose timed-out filtering and render escaped validation audit det
     0,
     'bulk controls must not offer a reopen path when a resolved record is selected',
   );
+  assert.deepEqual(pageErrors, []);
+});
+
+test('record list and SQL validation detail translate internal operators for ordinary users', async t => {
+  const record = {
+    id: 'record-operator', ruleId: 'rule-1', ruleName: 'Temperature check',
+    datasetName: 'Cold chain', severity: 'high', status: 'pending',
+    occurredAt: '2026-08-23T09:00:00', lastSeenAt: '2026-08-23T09:00:00',
+    field: 'temperature', value: -10, expected: 'gte', assignee: null,
+    description: '', businessKey: {}, details: { temperature: -10 }, hitCount: 1,
+    validationDeadline: null, timedOutAt: null, resolutionSource: null,
+    resolvedByUserId: null, validationMethod: 'sql', timeline: [], deliveries: [],
+    validationRequests: [],
+    validationSubmission: {
+      submittedByUserId: 'validator', submittedText: '', validatorType: 'sql',
+      result: 'failed', submittedAt: '2026-08-23T09:05:00',
+      resultDetail: {
+        field: 'status', operator: 'eq', value: 'normal', upperValue: null, actual: 'abnormal',
+      },
+    },
+  };
+  const { page, pageErrors } = await withPage(t, async page => {
+    await page.evaluate(record => {
+      window.Store = {
+        isSuperuser: () => false,
+        getStats: () => ({
+          pendingRecords: 1, processingRecords: 0, timedOutRecords: 0,
+          resolvedToday: 0, criticalAnomalies: 0,
+        }),
+        getRecords: () => [record], getRules: () => [], getRecord: () => record,
+        getRule: () => ({ id: 'rule-1', name: 'Temperature check' }),
+        loadRecordsPage: async () => ({ items: [record], total: 1, page: 1, pageSize: 10 }),
+        loadRecord: async () => record,
+        refresh: async () => {}, exportUrl: () => '/export',
+      };
+    }, record);
+    await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'records.js') });
+    await page.evaluate(() => RecordsModule.render(document.getElementById('content'), {
+      actionsEl: document.getElementById('actions'), navigate: () => {},
+    }));
+  });
+
+  await page.locator('#rec-table tbody tr').waitFor();
+  const listText = await page.locator('#rec-table').innerText();
+  assert.match(listText, /大于等于（≥）/);
+  assert.doesNotMatch(listText, /\bgte\b/);
+
+  await page.evaluate(() => RecordsModule.openDetail('record-operator'));
+  const detailText = await page.locator('.drawer').innerText();
+  assert.match(detailText, /等于（=） normal/);
+  assert.doesNotMatch(detailText, /\beq\b|\bgte\b/);
   assert.deepEqual(pageErrors, []);
 });
 
@@ -372,7 +441,7 @@ test('record tabs use overview totals and request status-filtered backend pages'
       window.Store = {
         getStats: () => ({
           pendingRecords: 12, processingRecords: 8, timedOutRecords: 27,
-          resolvedToday: 23, criticalAnomalies: 4,
+          resolvedToday: 23, criticalAnomalies: 4, pushInTransitAnomalies: 5,
         }),
         getRecords: () => window.currentPageRecords,
         getRules: () => [],
@@ -399,7 +468,7 @@ test('record tabs use overview totals and request status-filtered backend pages'
   await page.waitForTimeout(50);
   assert.equal(await page.evaluate(() => window.recordQueries.length), 1);
   assert.deepEqual(await page.evaluate(() => window.recordQueries[0]), {
-    page: 1, pageSize: 10, status: null, severity: null, ruleId: null, search: '',
+    page: 1, pageSize: 10, status: null, pushStatus: null, severity: null, ruleId: null, search: '',
     sortKey: 'occurredAt', sortOrder: 'desc',
   });
   assert.equal(await page.locator('#cnt-all').textContent(), '70');
@@ -420,7 +489,7 @@ test('record tabs use overview totals and request status-filtered backend pages'
   await page.click('.page-btn[data-page="2"]');
   await page.waitForFunction(() => window.recordQueries.length === 3);
   assert.deepEqual(await page.evaluate(() => window.recordQueries[2]), {
-    page: 2, pageSize: 10, status: 'timed_out', severity: null, ruleId: null, search: '',
+    page: 2, pageSize: 10, status: 'timed_out', pushStatus: null, severity: null, ruleId: null, search: '',
     sortKey: 'occurredAt', sortOrder: 'desc',
   });
   assert.equal(await timedOutTab.getAttribute('aria-controls'), 'rec-table');
@@ -448,13 +517,18 @@ test('record KPI cards apply their corresponding status and severity filters', a
       window.Store = {
         getStats: () => ({
           pendingRecords: 12, processingRecords: 8, timedOutRecords: 2,
-          resolvedToday: 23, criticalAnomalies: 4,
+          resolvedToday: 23, criticalAnomalies: 4, pushInTransitAnomalies: 5,
         }),
         getRecords: () => [record],
         getRules: () => [{ id: 'rule-1', name: 'GMV check' }],
         loadRecordsPage: async query => {
           window.recordQueries.push({ ...query });
-          return { items: [record], total: 1, page: 1, pageSize: 10 };
+          return {
+            items: query.pushStatus ? [] : [record],
+            total: query.pushStatus ? 0 : 1,
+            page: 1,
+            pageSize: 10,
+          };
         },
         peekRecordsPage: async query => {
           window.criticalCountQueries.push({ ...query });
@@ -469,10 +543,22 @@ test('record KPI cards apply their corresponding status and severity filters', a
     }));
   });
 
+  const inTransitCard = page.getByRole('button', { name: /筛选推送途中异常.*5/ });
+  await inTransitCard.click();
+  await page.waitForTimeout(20);
+  assert.equal(await inTransitCard.getAttribute('aria-pressed'), 'true');
+  assert.equal(await page.locator('#rec-stats').evaluate(node => node.classList.contains('six-up')), true);
+  assert.equal(await page.evaluate(() => window.recordQueries.at(-1).pushStatus), 'in_transit');
+  assert.equal(await page.evaluate(() => window.recordQueries.at(-1).status), null);
+  assert.equal(await page.evaluate(() => window.recordQueries.at(-1).severity), null);
+  assert.match(await page.locator('#rec-table').innerText(), /当前没有推送途中的异常/);
+
   await page.getByRole('button', { name: /筛选未处理异常.*12/ }).click();
   await page.waitForTimeout(20);
   assert.equal(await page.getByRole('tab', { name: /^未处理/ }).getAttribute('aria-selected'), 'true');
   assert.equal(await page.evaluate(() => window.recordQueries.at(-1).status), 'pending');
+  assert.equal(await page.evaluate(() => window.recordQueries.at(-1).pushStatus), null);
+  assert.equal(await inTransitCard.getAttribute('aria-pressed'), 'false');
 
   await page.getByRole('button', { name: /筛选严重异常.*7/ }).click();
   await page.waitForTimeout(20);
@@ -678,7 +764,7 @@ test('record export sends current server filters and reports the server total', 
   await page.waitForFunction(() => window.exportFilters !== null);
 
   assert.deepEqual(await page.evaluate(() => window.exportFilters), {
-    status: null, severity: null, ruleId: null, search: 'new',
+    status: null, pushStatus: null, severity: null, ruleId: null, search: 'new',
     sortKey: 'occurredAt', sortOrder: 'desc',
   });
   assert.match(await page.locator('#toast-container').textContent(), /3 条记录/);
@@ -943,5 +1029,122 @@ test('quick status resolution refreshes list classifications and the navigation 
   assert.equal(await page.locator('#cnt-timed-out').textContent(), '0');
   assert.equal(await page.locator('#nav-anomaly-count').textContent(), '0');
   assert.equal(await page.locator('[data-id="record-timeout"][data-action="status"]').count(), 0);
+  assert.deepEqual(pageErrors, []);
+});
+
+test('abort push action is left of export, confirms danger, and prevents duplicate requests', async t => {
+  const { page, pageErrors } = await withPage(t, async page => {
+    await page.evaluate(() => {
+      window.abortCalls = 0;
+      window.resolveAbort = null;
+      window.Store = {
+        isSuperuser: () => true,
+        getStats: () => ({ pendingRecords: 0, processingRecords: 0, timedOutRecords: 0, resolvedToday: 0, criticalAnomalies: 0 }),
+        getRecords: () => [], getRules: () => [],
+        loadRecordsPage: async () => ({ items: [], total: 0, page: 1, pageSize: 10 }),
+        abortAnomalyPushes: () => {
+          window.abortCalls += 1;
+          return new Promise(resolve => { window.resolveAbort = resolve; });
+        },
+        refresh: async () => {}, exportUrl: '/export',
+      };
+    });
+    await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'records.js') });
+    await page.evaluate(() => RecordsModule.render(document.getElementById('content'), {
+      actionsEl: document.getElementById('actions'), navigate: () => {},
+    }));
+  });
+
+  assert.deepEqual(await page.locator('#actions button').evaluateAll(items => items.map(item => item.id)), [
+    'rec-abort-push', 'rec-export', 'rec-refresh',
+  ]);
+  await page.click('#rec-abort-push');
+  assert.match(await page.locator('[role="dialog"]').innerText(), /已发送消息无法撤回/);
+  await page.locator('[role="dialog"] [data-action="cancel"]').click();
+  assert.equal(await page.evaluate(() => window.abortCalls), 0);
+  await page.click('#rec-abort-push');
+  await page.locator('[role="dialog"] [data-action="confirm"]').click();
+  await page.waitForFunction(() => window.abortCalls === 1);
+  assert.equal(await page.locator('#rec-abort-push').isDisabled(), true);
+  await page.evaluate(() => window.resolveAbort({
+    status: 'completed', aborted_jobs: 3, stopped_ds_instances: 2,
+    deleted_ds_instances: 2, cleared_kafka_partitions: 1, errors: [],
+  }));
+  await page.getByText('推送积压已中止', { exact: true }).waitFor();
+  assert.equal(await page.locator('#rec-abort-push').isDisabled(), false);
+  assert.equal(await page.evaluate(() => window.abortCalls), 1);
+  assert.deepEqual(pageErrors, []);
+});
+
+test('rule form configures one SQL validation method with mapped anomaly fields', async t => {
+  const { page, pageErrors } = await withPage(t, async page => {
+    await page.evaluate(dataset => {
+      window.createdRule = null;
+      window.Store = {
+        getRules: () => [], getDatasets: () => [dataset],
+        getDataset: id => id === dataset.id ? dataset : null,
+        addRule: async payload => { window.createdRule = payload; },
+      };
+    }, datasetFixture());
+    await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'rules.js') });
+    await page.evaluate(() => RulesModule.render(document.getElementById('content'), {
+      actionsEl: document.getElementById('actions'), navigate: () => {},
+    }));
+  });
+
+  await page.click('#r-add');
+  await page.fill('#f-name', 'SQL validation rule');
+  await page.selectOption('#f-dataset', 'dataset-1');
+  await page.click('#f-key-fields');
+  await page.locator('#f-key-fields-listbox [data-key-field="order_id"]').click();
+  await page.selectOption('.condition-row [data-c="field"]', 'amount');
+  await page.fill('#f-openids-input', 'ou_notify');
+  await page.check('#f-validation-enabled');
+  await page.fill('#f-validation-userids-input', 'validator-1');
+  await page.click('[data-validation-method="sql"]');
+  assert.equal(await page.locator('#f-sql-validation-panel').isVisible(), true);
+  await page.fill('#f-validation-sql', "SELECT current_amount FROM repair_state WHERE order_id='{订单ID}'");
+  await page.click('#f-add-sql-parameter');
+  const mapping = page.locator('.sql-parameter-row').last();
+  await mapping.locator('[data-sql-param="name"]').fill('订单ID');
+  await mapping.locator('[data-sql-param="field"]').selectOption('order_id');
+  await page.fill('#f-sql-result-field', 'current_amount');
+  await page.selectOption('#f-sql-operator', 'lt');
+  await page.fill('#f-sql-value', '100');
+  await page.click('#f-save');
+  await page.waitForTimeout(25);
+
+  const created = await page.evaluate(() => window.createdRule);
+  assert.equal(created.validationMethod, 'sql');
+  assert.deepEqual(created.sqlValidationConfig, {
+    queryTemplate: "SELECT current_amount FROM repair_state WHERE order_id='{订单ID}'",
+    parameters: [{ name: '订单ID', field: 'order_id' }],
+    trueCondition: { field: 'current_amount', operator: 'lt', value: 100, upperValue: null },
+  });
+  assert.deepEqual(created.validationTargets, [{ source: 'literal', value: 'validator-1' }]);
+  assert.deepEqual(pageErrors, []);
+});
+
+test('abort push action is hidden from non-superadmin readers', async t => {
+  const { page, pageErrors } = await withPage(t, async page => {
+    await page.evaluate(() => {
+      window.Store = {
+        isSuperuser: () => false,
+        getStats: () => ({ pendingRecords: 0, processingRecords: 0, timedOutRecords: 0, resolvedToday: 0, criticalAnomalies: 0 }),
+        getRecords: () => [], getRules: () => [],
+        loadRecordsPage: async () => ({ items: [], total: 0, page: 1, pageSize: 10 }),
+        refresh: async () => {}, exportUrl: '/export',
+      };
+    });
+    await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'records.js') });
+    await page.evaluate(() => RecordsModule.render(document.getElementById('content'), {
+      actionsEl: document.getElementById('actions'), navigate: () => {},
+    }));
+  });
+
+  assert.equal(await page.locator('#rec-abort-push').count(), 0);
+  assert.deepEqual(await page.locator('#actions button').evaluateAll(items => items.map(item => item.id)), [
+    'rec-export', 'rec-refresh',
+  ]);
   assert.deepEqual(pageErrors, []);
 });

@@ -12,7 +12,16 @@ window.RulesModule = (function () {
       <button class="btn btn-accent" id="r-add">${Icon.plus({ size: 16 })}<span>新建规则</span></button>
     `;
     actionsEl.querySelector('#r-add').addEventListener('click', () => openForm());
-    actionsEl.querySelector('#r-refresh').addEventListener('click', () => { UI.toast({ type: 'info', title: '已刷新' }); renderList(); });
+    actionsEl.querySelector('#r-refresh').addEventListener('click', async () => {
+      try {
+        await Store.refresh();
+        renderStats();
+        renderList();
+        UI.toast({ type: 'info', title: '已刷新' });
+      } catch (error) {
+        UI.toast({ type: 'error', title: '刷新失败', desc: error.message });
+      }
+    });
   }
 
   function render(contentEl, opts) {
@@ -34,7 +43,12 @@ window.RulesModule = (function () {
     const active = all.filter(r => r.enabled).length;
     const totalAnomalies = all.reduce((s, r) => s + (r.anomalyCount || 0), 0);
     const recentTriggered = all.filter(r => r.anomalyCount > 0).length;
-    document.getElementById('r-stats').innerHTML = `
+    const pushInTransit = typeof Store.getStats === 'function'
+      ? (Store.getStats().pushInTransitAnomalies ?? 0)
+      : 0;
+    const statsEl = document.getElementById('r-stats');
+    statsEl.classList.add('five-up');
+    statsEl.innerHTML = `
       <div class="stat-card animate-rise" style="animation-delay:60ms;">
         <div class="stat-card-header"><span class="stat-card-label">规则总数</span><div class="stat-card-icon" style="background:var(--color-primary-soft);color:var(--color-primary);">${Icon.shield({ size: 16 })}</div></div>
         <div class="stat-card-value">${all.length}</div>
@@ -54,6 +68,11 @@ window.RulesModule = (function () {
         <div class="stat-card-header"><span class="stat-card-label">已停用</span><div class="stat-card-icon" style="background:var(--color-surface-alt);color:var(--color-ink-muted);">${Icon.pause({ size: 16 })}</div></div>
         <div class="stat-card-value">${all.length - active}</div>
         <div class="stat-card-delta neutral">暂停监控</div>
+      </div>
+      <div class="stat-card animate-rise" style="animation-delay:300ms;${pushInTransit > 0 ? 'border-left:3px solid var(--color-warning);' : ''}">
+        <div class="stat-card-header"><span class="stat-card-label">推送途中</span><div class="stat-card-icon" style="background:var(--color-warning-soft);color:var(--color-warning);">${Icon.send({ size: 16 })}</div></div>
+        <div class="stat-card-value">${pushInTransit}</div>
+        <div class="stat-card-delta ${pushInTransit > 0 ? 'down' : 'neutral'}">${pushInTransit > 0 ? '等待送达飞书' : '均已送达'}</div>
       </div>
     `;
   }
@@ -236,7 +255,7 @@ window.RulesModule = (function () {
   function openForm(id) {
     const editing = id ? Store.getRule(id) : null;
     const data = editing || {
-      name: '', description: '', datasetId: '', field: '', severity: 'medium',
+      name: '', description: '', datasetId: '', severity: 'medium',
       conditions: [{ field: '', op: 'gt', value: '', baseline: null }],
       logic: 'AND',
       schedule: { frequency: 'day', interval: 1, time: '09:00', start: '2026-08-09', end: '' },
@@ -245,14 +264,18 @@ window.RulesModule = (function () {
       validationEnabled: false,
       validationTargets: [],
       validationTimeoutMinutes: 1440,
+      validationMethod: 'pseudo',
+      sqlValidationConfig: null,
     };
 
     const datasets = Store.getDatasets();
 
+    let cleanupKeyFieldPicker = () => {};
     const m = UI.modal({
       title: editing ? '编辑异常规则' : '新建异常规则',
       subtitle: editing ? `修改 ${data.name}` : '配置检测条件、调度策略与通知方式',
       size: 'xl',
+      onClose: () => cleanupKeyFieldPicker(),
       body: `
         <div class="form-section">
           <div class="form-section-title">${Icon.info({ size: 14 })}基本信息</div>
@@ -283,10 +306,45 @@ window.RulesModule = (function () {
               <span class="switch-slider"></span>
             </label>
           </div>
+          <div class="field validation-method-field">
+            <label class="field-label"><span>校验方式<span class="field-required">*</span></span></label>
+            <div class="segmented validation-method-segmented" id="f-validation-method" role="group" aria-label="校验方式">
+              <button type="button" data-validation-method="pseudo" class="${(data.validationMethod || 'pseudo') === 'pseudo' ? 'active' : ''}">伪校验</button>
+              <button type="button" data-validation-method="sql" class="${data.validationMethod === 'sql' ? 'active' : ''}">SQL 校验</button>
+            </div>
+          </div>
           <div class="form-grid validation-fields-grid">
             ${UI.field('超时时间（分钟）', `<input class="input mono" id="f-validation-timeout" type="number" min="1" max="43200" value="${data.validationTimeoutMinutes ?? 1440}" />`, { required: true, help: '1–43200 分钟；到期未提交将标记为已超时' })}
-            ${UI.field('固定验证人 user_id', `<div class="tag-input" id="f-validation-userids"><input type="text" placeholder="输入 user_id 后回车" id="f-validation-userids-input" /></div>`, { optional: true, help: '可配置多个；保存时会自动收录尚未回车的内容' })}
-            ${UI.field('数据集字段目标', `<select class="select" id="f-validation-fields" multiple size="4"><option value="">请先选择数据集…</option></select>`, { optional: true, span2: true, help: '可多选；每行从所选字段读取 user_id' })}
+            ${UI.field('固定处理人 user_id', `<div class="tag-input" id="f-validation-userids"><input type="text" placeholder="输入 user_id 后回车" id="f-validation-userids-input" /></div>`, { optional: true, help: '可配置多个；保存时会自动收录尚未回车的内容' })}
+            ${UI.field('数据集字段处理人', `<select class="select" id="f-validation-fields" multiple size="4"><option value="">请先选择数据集…</option></select>`, { optional: true, span2: true, help: '可多选；每行从所选字段读取 user_id' })}
+          </div>
+          <div id="f-pseudo-validation-panel" class="validation-method-panel validation-pseudo-note" ${data.validationMethod === 'sql' ? 'hidden' : ''}>
+            ${Icon.info({ size: 14 })}<span>处理人在飞书卡片填写说明并提交后，异常即视为校验通过。</span>
+          </div>
+          <div id="f-sql-validation-panel" class="validation-method-panel sql-validation-panel" ${data.validationMethod === 'sql' ? '' : 'hidden'}>
+            <div class="field">
+              <label class="field-label" for="f-validation-sql"><span>查询 SQL<span class="field-required">*</span></span></label>
+              <textarea class="input mono sql-validation-editor" id="f-validation-sql" rows="6" placeholder="SELECT status FROM test_table WHERE id='{目标ID}'">${escapeHtml(data.sqlValidationConfig?.queryTemplate || '')}</textarea>
+              <div class="field-help">仅允许一条只读 SELECT / WITH；支持完整的 <code>{参数名}</code> 或 <code>'{参数名}'</code>。</div>
+            </div>
+            <div class="sql-parameter-header">
+              <div><div class="cell-strong">SQL 参数映射</div><div class="cell-muted">把每个占位符映射到异常数据集字段</div></div>
+              <button type="button" class="btn btn-secondary btn-sm" id="f-add-sql-parameter">${Icon.plus({ size: 14 })}添加参数</button>
+            </div>
+            <div id="f-sql-parameters" class="sql-parameter-list"></div>
+            <div class="field-label sql-condition-label"><span>True 条件<span class="field-required">*</span></span></div>
+            <div class="sql-true-condition">
+              <input class="input mono" id="f-sql-result-field" placeholder="结果字段，如 status" value="${escapeHtml(data.sqlValidationConfig?.trueCondition?.field || '')}" aria-label="SQL 结果字段" />
+              <select class="select" id="f-sql-operator" aria-label="SQL True 条件运算符">
+                ${[
+                  ['eq', '等于 ='], ['neq', '不等于 ≠'], ['gt', '大于 >'], ['gte', '大于等于 ≥'],
+                  ['lt', '小于 <'], ['lte', '小于等于 ≤'], ['between', '介于'],
+                  ['is_null', '为空'], ['is_not_null', '不为空'],
+                ].map(([value, label]) => `<option value="${value}" ${data.sqlValidationConfig?.trueCondition?.operator === value ? 'selected' : ''}>${label}</option>`).join('')}
+              </select>
+              <input class="input mono" id="f-sql-value" placeholder="期望值" value="${escapeHtml(data.sqlValidationConfig?.trueCondition?.value ?? '')}" aria-label="SQL True 条件期望值" />
+              <input class="input mono" id="f-sql-upper-value" placeholder="范围上界（between）" value="${escapeHtml(data.sqlValidationConfig?.trueCondition?.upperValue ?? '')}" aria-label="SQL True 条件范围上界" />
+            </div>
           </div>
           <div class="field-error" id="f-validation-target-error" style="display:none;">${Icon.alert({ size: 12 })}<span></span></div>
         </div>
@@ -301,12 +359,18 @@ window.RulesModule = (function () {
                 ${datasets.map(d => `<option value="${d.id}" ${data.datasetId === d.id ? 'selected' : ''}>${escapeHtml(d.name)}</option>`).join('')}
               </select>
             `, { required: true })}
-            ${UI.field('监控字段', `
-              <select class="select" id="f-field">
-                <option value="">请先选择数据集…</option>
-              </select>
-            `, { required: true })}
-            ${UI.field('异常主键字段', `<select class="select" id="f-key-fields" multiple size="4"><option value="">请先选择数据集…</option></select>`, { required: true, help: '按 Ctrl 可多选；建议包含门店 ID 与日期字段' })}
+            ${UI.field('异常主键字段', `
+              <div class="key-field-picker">
+                <button type="button" class="key-field-picker-trigger" id="f-key-fields" role="combobox"
+                  aria-label="异常主键字段" aria-required="true" aria-haspopup="listbox"
+                  aria-expanded="false" aria-controls="f-key-fields-listbox" disabled>
+                  <span class="key-field-picker-summary"><span class="key-field-picker-placeholder">请先选择数据集…</span></span>
+                  <span class="key-field-picker-chevron" aria-hidden="true">${Icon.chevronDown({ size: 14 })}</span>
+                </button>
+                <div class="key-field-picker-listbox" id="f-key-fields-listbox" role="listbox"
+                  aria-label="异常主键字段" aria-multiselectable="true" hidden></div>
+              </div>
+            `, { required: true, help: '可选择多个字段；建议包含门店 ID 与日期字段' })}
           </div>
           <div id="dataset-fields-preview"></div>
         </div>
@@ -383,7 +447,10 @@ window.RulesModule = (function () {
     });
 
     // ---------- State within form ----------
-    let conditions = data.conditions.map(c => ({ ...c }));
+    let conditions = data.conditions.map(({ operator, op, ...condition }) => ({
+      ...condition,
+      op: op || operator,
+    }));
     let logic = data.logic;
     let notifyMode = data.notify.mode || 'manual';
     let openIds = [...(data.notify.openIds || [])];
@@ -393,6 +460,64 @@ window.RulesModule = (function () {
     let chatIds = (data.notificationTargets || []).filter(t => t.source === 'literal' && t.receive_id_type === 'chat_id').map(t => t.value);
     let validationUserIds = (data.validationTargets || []).filter(t => t.source === 'literal').map(t => t.value);
     let validationFields = (data.validationTargets || []).filter(t => t.source === 'field').map(t => t.field);
+    let validationMethod = data.validationMethod || 'pseudo';
+    let sqlParameters = (data.sqlValidationConfig?.parameters || []).map(item => ({ ...item }));
+
+    const sqlPanel = m.dialog.querySelector('#f-sql-validation-panel');
+    const pseudoPanel = m.dialog.querySelector('#f-pseudo-validation-panel');
+    const sqlParameterList = m.dialog.querySelector('#f-sql-parameters');
+
+    function captureSqlParameters() {
+      sqlParameters = [...sqlParameterList.querySelectorAll('.sql-parameter-row')].map(row => ({
+        name: row.querySelector('[data-sql-param="name"]').value.trim(),
+        field: row.querySelector('[data-sql-param="field"]').value,
+      }));
+      return sqlParameters;
+    }
+
+    function renderSqlParameters() {
+      const ds = Store.getDataset(m.dialog.querySelector('#f-dataset').value);
+      const fields = ds?.fields || [];
+      sqlParameterList.innerHTML = sqlParameters.length ? sqlParameters.map((parameter, index) => `
+        <div class="sql-parameter-row" data-sql-parameter-index="${index}">
+          <input class="input mono" data-sql-param="name" value="${escapeHtml(parameter.name || '')}" placeholder="参数名，如 目标ID" aria-label="SQL 参数名" />
+          <span class="sql-parameter-arrow" aria-hidden="true">→</span>
+          <select class="select" data-sql-param="field" aria-label="SQL 参数数据集字段">
+            <option value="">请选择异常字段…</option>
+            ${fields.map(field => `<option value="${escapeHtml(field.name)}" ${parameter.field === field.name ? 'selected' : ''}>${escapeHtml(field.name)} · ${escapeHtml(field.type || '')}</option>`).join('')}
+          </select>
+          <button type="button" class="sql-parameter-remove" data-remove-sql-parameter="${index}" aria-label="删除 SQL 参数">${Icon.x({ size: 14 })}</button>
+        </div>
+      `).join('') : '<div class="sql-parameter-empty">尚未配置参数；无占位符 SQL 可保持为空。</div>';
+    }
+
+    function setValidationMethod(method) {
+      validationMethod = method;
+      m.dialog.querySelectorAll('[data-validation-method]').forEach(button => {
+        button.classList.toggle('active', button.dataset.validationMethod === method);
+      });
+      sqlPanel.hidden = method !== 'sql';
+      pseudoPanel.hidden = method === 'sql';
+    }
+
+    m.dialog.querySelectorAll('[data-validation-method]').forEach(button => {
+      button.addEventListener('click', () => setValidationMethod(button.dataset.validationMethod));
+    });
+    m.dialog.querySelector('#f-add-sql-parameter').addEventListener('click', () => {
+      captureSqlParameters();
+      sqlParameters.push({ name: '', field: '' });
+      renderSqlParameters();
+      sqlParameterList.querySelector('.sql-parameter-row:last-child [data-sql-param="name"]')?.focus();
+    });
+    sqlParameterList.addEventListener('click', event => {
+      const remove = event.target.closest('[data-remove-sql-parameter]');
+      if (!remove) return;
+      captureSqlParameters();
+      sqlParameters.splice(Number(remove.dataset.removeSqlParameter), 1);
+      renderSqlParameters();
+    });
+    renderSqlParameters();
+    setValidationMethod(validationMethod);
 
     // ---------- Logic segmented ----------
     m.dialog.querySelectorAll('#f-logic button').forEach(b => {
@@ -406,12 +531,117 @@ window.RulesModule = (function () {
 
     // ---------- Dataset change → update fields ----------
     const datasetSel = m.dialog.querySelector('#f-dataset');
-    const fieldSel = m.dialog.querySelector('#f-field');
     const fieldSourceSel = m.dialog.querySelector('#f-field-source');
     const validationFieldsSel = m.dialog.querySelector('#f-validation-fields');
-    const keyFieldsSel = m.dialog.querySelector('#f-key-fields');
+    const keyFieldsTrigger = m.dialog.querySelector('#f-key-fields');
+    const keyFieldsListbox = m.dialog.querySelector('#f-key-fields-listbox');
+    const keyFieldsPicker = keyFieldsTrigger.closest('.key-field-picker');
+    const keyFieldsSummary = keyFieldsTrigger.querySelector('.key-field-picker-summary');
     const fieldsPreview = m.dialog.querySelector('#dataset-fields-preview');
+    let keyFieldOptions = [];
+    let selectedKeyFields = [...new Set((data.anomalyKeyFields || []).map(String))];
+    let activeKeyFieldIndex = -1;
 
+    function renderKeyFieldPicker() {
+      const selected = new Set(selectedKeyFields);
+      const visibleTags = selectedKeyFields.slice(0, 2);
+      keyFieldsSummary.innerHTML = visibleTags.length
+        ? `${visibleTags.map(value => `<span class="key-field-picker-tag">${escapeHtml(value)}</span>`).join('')}${selectedKeyFields.length > 2 ? `<span class="key-field-picker-count">+${selectedKeyFields.length - 2}</span>` : ''}`
+        : `<span class="key-field-picker-placeholder">${keyFieldOptions.length ? '请选择字段…' : '请先选择数据集…'}</span>`;
+      keyFieldsTrigger.disabled = keyFieldOptions.length === 0;
+      keyFieldsListbox.innerHTML = keyFieldOptions.map((field, index) => `
+        <button type="button" class="key-field-picker-option${index === activeKeyFieldIndex ? ' active' : ''}"
+          id="f-key-field-option-${index}" role="option" aria-selected="${selected.has(field.name)}"
+          data-key-field="${escapeHtml(field.name)}">
+          <span><strong>${escapeHtml(field.name)}</strong><small>${escapeHtml(field.type)}</small></span>
+          <span class="key-field-picker-check" aria-hidden="true">${Icon.check({ size: 14 })}</span>
+        </button>
+      `).join('');
+      if (activeKeyFieldIndex >= 0) {
+        keyFieldsTrigger.setAttribute('aria-activedescendant', `f-key-field-option-${activeKeyFieldIndex}`);
+      } else {
+        keyFieldsTrigger.removeAttribute('aria-activedescendant');
+      }
+    }
+
+    function setKeyFieldOptions(fields, selectedValues = []) {
+      keyFieldOptions = (fields || []).map(field => ({
+        name: String(field.name ?? ''),
+        type: String(field.type ?? ''),
+      }));
+      const allowed = new Set(keyFieldOptions.map(field => field.name));
+      selectedKeyFields = [...new Set(selectedValues.map(String).filter(value => allowed.has(value)))];
+      activeKeyFieldIndex = -1;
+      closeKeyFieldPicker();
+      renderKeyFieldPicker();
+    }
+
+    function openKeyFieldPicker() {
+      if (keyFieldsTrigger.disabled) return;
+      document.removeEventListener('click', closeKeyFieldsOnOutsideClick);
+      document.addEventListener('click', closeKeyFieldsOnOutsideClick);
+      keyFieldsListbox.hidden = false;
+      keyFieldsPicker.classList.add('open');
+      keyFieldsTrigger.setAttribute('aria-expanded', 'true');
+      activeKeyFieldIndex = Math.max(0, keyFieldOptions.findIndex(field => selectedKeyFields.includes(field.name)));
+      renderKeyFieldPicker();
+    }
+
+    function closeKeyFieldPicker() {
+      document.removeEventListener('click', closeKeyFieldsOnOutsideClick);
+      keyFieldsListbox.hidden = true;
+      keyFieldsPicker.classList.remove('open');
+      keyFieldsTrigger.setAttribute('aria-expanded', 'false');
+      activeKeyFieldIndex = -1;
+      keyFieldsTrigger.removeAttribute('aria-activedescendant');
+    }
+
+    function closeKeyFieldsOnOutsideClick(event) {
+      if (!event.composedPath().includes(keyFieldsPicker)) closeKeyFieldPicker();
+    }
+
+    cleanupKeyFieldPicker = closeKeyFieldPicker;
+
+    function toggleKeyField(value) {
+      if (selectedKeyFields.includes(value)) {
+        selectedKeyFields = selectedKeyFields.filter(field => field !== value);
+      } else {
+        selectedKeyFields.push(value);
+      }
+      renderKeyFieldPicker();
+    }
+
+    keyFieldsTrigger.addEventListener('click', () => {
+      if (keyFieldsListbox.hidden) openKeyFieldPicker(); else closeKeyFieldPicker();
+    });
+    keyFieldsTrigger.addEventListener('keydown', event => {
+      if (event.key === 'Escape') {
+        if (!keyFieldsListbox.hidden) {
+          event.preventDefault();
+          event.stopPropagation();
+          closeKeyFieldPicker();
+        }
+        return;
+      }
+      if (event.key === 'Tab') { closeKeyFieldPicker(); return; }
+      if (!['ArrowDown', 'ArrowUp', 'Enter', ' '].includes(event.key)) return;
+      event.preventDefault();
+      if (keyFieldsListbox.hidden) { openKeyFieldPicker(); return; }
+      if (event.key === 'ArrowDown') activeKeyFieldIndex = (activeKeyFieldIndex + 1) % keyFieldOptions.length;
+      if (event.key === 'ArrowUp') activeKeyFieldIndex = (activeKeyFieldIndex - 1 + keyFieldOptions.length) % keyFieldOptions.length;
+      if ((event.key === 'Enter' || event.key === ' ') && activeKeyFieldIndex >= 0) {
+        toggleKeyField(keyFieldOptions[activeKeyFieldIndex].name);
+      } else {
+        renderKeyFieldPicker();
+      }
+    });
+    keyFieldsListbox.addEventListener('click', event => {
+      const option = event.target.closest('[data-key-field]');
+      if (!option) return;
+      activeKeyFieldIndex = keyFieldOptions.findIndex(field => field.name === option.dataset.keyField);
+      toggleKeyField(option.dataset.keyField);
+      keyFieldsTrigger.focus();
+    });
     function replaceFieldOptions(select, fields, selectedValues = [], placeholder = null) {
       const selected = new Set(selectedValues.filter(value => value !== null && value !== undefined).map(String));
       select.replaceChildren();
@@ -432,21 +662,27 @@ window.RulesModule = (function () {
       });
     }
 
-    function updateFieldsForDataset(datasetId) {
+    function updateFieldsForDataset(datasetId, initialKeyFields = []) {
       if (!datasetId) {
-        replaceFieldOptions(fieldSel, [], [], '请先选择数据集…');
         replaceFieldOptions(fieldSourceSel, [], [], '请选择字段…');
         replaceFieldOptions(validationFieldsSel, [], [], '请先选择数据集…');
-        replaceFieldOptions(keyFieldsSel, [], [], '请选择字段…');
+        setKeyFieldOptions([], []);
+        sqlParameters = sqlParameters.map(parameter => ({ ...parameter, field: '' }));
+        renderSqlParameters();
         fieldsPreview.innerHTML = '';
         return;
       }
       const ds = Store.getDataset(datasetId);
       if (!ds) return;
-      replaceFieldOptions(fieldSel, ds.fields, [data.field], '请选择字段…');
+      const sqlFieldNames = new Set(ds.fields.map(field => String(field.name)));
+      sqlParameters = sqlParameters.map(parameter => ({
+        ...parameter,
+        field: sqlFieldNames.has(parameter.field) ? parameter.field : '',
+      }));
+      renderSqlParameters();
       replaceFieldOptions(fieldSourceSel, ds.fields, [data.notify.fieldSource], '请选择字段…');
       replaceFieldOptions(validationFieldsSel, ds.fields, validationFields);
-      replaceFieldOptions(keyFieldsSel, ds.fields, data.anomalyKeyFields || []);
+      setKeyFieldOptions(ds.fields, initialKeyFields);
       fieldsPreview.innerHTML = `
         <div class="schedule-preview" style="background:var(--color-info-soft);border-color:var(--color-info-line);color:#0369A1;margin-top:var(--space-3);">
           ${Icon.info({ size: 14 })}
@@ -455,7 +691,10 @@ window.RulesModule = (function () {
       `;
       renderConditions();
     }
-    datasetSel.addEventListener('change', () => updateFieldsForDataset(datasetSel.value));
+    datasetSel.addEventListener('change', () => {
+      captureSqlParameters();
+      updateFieldsForDataset(datasetSel.value, []);
+    });
 
     // ---------- Conditions ----------
     const OP_LABELS = {
@@ -508,7 +747,10 @@ window.RulesModule = (function () {
         row.querySelectorAll('[data-c]').forEach(el => {
           el.addEventListener('change', () => {
             conditions[idx][el.dataset.c] = el.value;
-            if (el.dataset.c === 'op') renderConditions();
+            if (el.dataset.c === 'op') {
+              delete conditions[idx].operator;
+              renderConditions();
+            }
           });
           if (el.tagName === 'INPUT') {
             el.addEventListener('input', () => { conditions[idx][el.dataset.c] = el.value; });
@@ -636,15 +878,13 @@ window.RulesModule = (function () {
     m.dialog.querySelector('#f-save').addEventListener('click', async () => {
       const name = m.dialog.querySelector('#f-name').value.trim();
       const datasetId = m.dialog.querySelector('#f-dataset').value;
-      const field = m.dialog.querySelector('#f-field').value;
       if (!name) { UI.toast({ type: 'warning', title: '请填写规则名称' }); return; }
       if (!datasetId) { UI.toast({ type: 'warning', title: '请选择关联数据集' }); return; }
-      if (!field) { UI.toast({ type: 'warning', title: '请选择监控字段' }); return; }
 
       const ds = Store.getDataset(datasetId);
       const validConditions = conditions.filter(c => c.field && c.op);
       if (validConditions.length === 0) { UI.toast({ type: 'warning', title: '请至少配置一个有效条件' }); return; }
-      const anomalyKeyFields = [...keyFieldsSel.selectedOptions].map(option => option.value).filter(Boolean);
+      const anomalyKeyFields = [...selectedKeyFields];
       if (!anomalyKeyFields.length) { UI.toast({ type: 'warning', title: '请至少选择一个异常主键字段' }); return; }
 
       commitPendingTargets.forEach(commit => commit());
@@ -666,12 +906,41 @@ window.RulesModule = (function () {
       ];
       const validationEnabled = m.dialog.querySelector('#f-validation-enabled').checked;
       const validationTimeoutMinutes = Number(m.dialog.querySelector('#f-validation-timeout').value);
+      const parseSqlOperand = raw => {
+        const value = raw.trim();
+        if (!value) return null;
+        return /^-?(?:\d+\.?\d*|\.\d+)$/.test(value) ? Number(value) : value;
+      };
+      const sqlTrueOperator = m.dialog.querySelector('#f-sql-operator').value;
+      const sqlValidationConfig = validationMethod === 'sql' ? {
+        queryTemplate: m.dialog.querySelector('#f-validation-sql').value.trim(),
+        parameters: captureSqlParameters(),
+        trueCondition: {
+          field: m.dialog.querySelector('#f-sql-result-field').value.trim(),
+          operator: sqlTrueOperator,
+          value: ['is_null', 'is_not_null'].includes(sqlTrueOperator) ? null : parseSqlOperand(m.dialog.querySelector('#f-sql-value').value),
+          upperValue: sqlTrueOperator === 'between' ? parseSqlOperand(m.dialog.querySelector('#f-sql-upper-value').value) : null,
+        },
+      } : null;
       const validationError = m.dialog.querySelector('#f-validation-target-error');
       let validationMessage = '';
       if (!Number.isInteger(validationTimeoutMinutes) || validationTimeoutMinutes < 1 || validationTimeoutMinutes > 43200) {
         validationMessage = '超时时间必须是 1–43200 之间的整数分钟';
       } else if (validationEnabled && !validationTargets.length) {
         validationMessage = '启用实时校验时，请至少配置一个验证目标';
+      } else if (validationMethod === 'sql') {
+        const parameterNames = sqlValidationConfig.parameters.map(item => item.name);
+        const placeholders = [...sqlValidationConfig.queryTemplate.matchAll(/\{([^{}]+)\}/g)].map(match => match[1].trim());
+        const missingMappings = [...new Set(placeholders)].filter(name => !parameterNames.includes(name));
+        const unusedMappings = [...new Set(parameterNames)].filter(name => !placeholders.includes(name));
+        if (!sqlValidationConfig.queryTemplate) validationMessage = 'SQL 校验必须填写查询 SQL';
+        else if (sqlValidationConfig.parameters.some(item => !item.name || !item.field)) validationMessage = '每个 SQL 参数都必须填写参数名并选择异常字段';
+        else if (new Set(parameterNames).size !== parameterNames.length) validationMessage = 'SQL 参数名不能重复';
+        else if (missingMappings.length) validationMessage = `SQL 占位符缺少参数映射：${missingMappings.join('、')}`;
+        else if (unusedMappings.length) validationMessage = `SQL 参数未在查询中使用：${unusedMappings.join('、')}`;
+        else if (!sqlValidationConfig.trueCondition.field) validationMessage = 'True 条件必须填写结果字段';
+        else if (!['is_null', 'is_not_null'].includes(sqlTrueOperator) && sqlValidationConfig.trueCondition.value === null) validationMessage = '当前 True 条件必须填写期望值';
+        else if (sqlTrueOperator === 'between' && sqlValidationConfig.trueCondition.upperValue === null) validationMessage = 'between 条件必须填写范围上界';
       }
       validationError.querySelector('span').textContent = validationMessage;
       validationError.style.display = validationMessage ? 'flex' : 'none';
@@ -685,7 +954,6 @@ window.RulesModule = (function () {
         description: m.dialog.querySelector('#f-desc').value.trim(),
         datasetId,
         datasetName: ds ? ds.name : '',
-        field,
         severity: m.dialog.querySelector('#f-severity').value,
         enabled: editing ? editing.enabled : true,
         conditions: validConditions,
@@ -694,6 +962,8 @@ window.RulesModule = (function () {
         validationEnabled,
         validationTargets,
         validationTimeoutMinutes,
+        validationMethod,
+        sqlValidationConfig,
         logic,
         schedule: {
           frequency: freqSel.value,
@@ -718,7 +988,7 @@ window.RulesModule = (function () {
       } catch (error) { UI.toast({ type: 'error', title: '保存失败', desc: error.message }); }
     });
 
-    if (data.datasetId) updateFieldsForDataset(data.datasetId);
+    if (data.datasetId) updateFieldsForDataset(data.datasetId, data.anomalyKeyFields || []);
     else renderConditions();
   }
 

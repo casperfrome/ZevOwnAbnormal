@@ -60,6 +60,9 @@ class Settings(BaseSettings):
     validation_timeout_scan_interval_seconds: int = Field(default=60, ge=1)
     validation_maintenance_batch_size: int = Field(default=50, ge=1, le=500)
     feishu_http_timeout_seconds: float = Field(default=10, ge=1, le=60)
+    kafka_bootstrap_servers: str = "localhost:9092"
+    kafka_anomaly_push_topic: str = "sentinel-anomaly-push"
+    kafka_anomaly_push_group: str = "sentinel-anomaly-push-dispatcher"
     dolphinscheduler_url: str = "http://localhost:12345/dolphinscheduler"
     dolphinscheduler_username: str = "admin"
     dolphinscheduler_password: str = "dolphinscheduler123"

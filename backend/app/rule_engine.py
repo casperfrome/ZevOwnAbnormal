@@ -26,7 +26,7 @@ def _operand_for(actual: Any, operand: Any) -> Any:
     return operand
 
 
-def _static_match(actual: Any, condition: dict[str, Any]) -> bool:
+def evaluate_static_condition(actual: Any, condition: dict[str, Any]) -> bool:
     operator = condition["operator"]
     actual = _comparable(actual)
     value = _operand_for(actual, _comparable(condition.get("value")))
@@ -49,6 +49,9 @@ def _static_match(actual: Any, condition: dict[str, Any]) -> bool:
     if operator not in operations:
         raise ValueError(f"不支持的操作符: {operator}")
     return operations[operator]()
+
+
+_static_match = evaluate_static_condition
 
 
 def _date_value(value: Any) -> date | None:

@@ -333,6 +333,66 @@
   background: var(--color-accent-soft);
 }
 
+.validation-method-field { margin-bottom: var(--space-4); }
+.validation-method-segmented { max-width: 360px; }
+.validation-method-panel {
+  margin-top: var(--space-4);
+  padding: var(--space-4);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-alt);
+}
+.validation-pseudo-note {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-ink-muted);
+  font-size: var(--text-sm);
+}
+.sql-validation-panel { background: linear-gradient(145deg, var(--color-surface-alt), var(--color-surface)); }
+.sql-validation-editor { min-height: 132px; resize: vertical; line-height: 1.55; }
+.sql-parameter-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin: var(--space-4) 0 var(--space-2);
+}
+.sql-parameter-list { display: grid; gap: var(--space-2); }
+.sql-parameter-row {
+  display: grid;
+  grid-template-columns: minmax(140px, .8fr) auto minmax(190px, 1fr) auto;
+  align-items: center;
+  gap: var(--space-2);
+}
+.sql-parameter-arrow { color: var(--color-ink-muted); font-family: var(--font-mono); }
+.sql-parameter-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-sm);
+  color: var(--color-ink-muted);
+  background: var(--color-surface);
+}
+.sql-parameter-remove:hover { color: var(--color-danger); border-color: var(--color-danger-line); }
+.sql-parameter-empty {
+  padding: var(--space-3);
+  border: 1px dashed var(--color-line);
+  border-radius: var(--radius-sm);
+  color: var(--color-ink-muted);
+  font-size: var(--text-xs);
+  text-align: center;
+}
+.sql-condition-label { margin-top: var(--space-4); }
+.sql-true-condition {
+  display: grid;
+  grid-template-columns: 1.2fr .8fr 1fr 1fr;
+  gap: var(--space-2);
+}
+
 .timeout-icon {
   background: var(--color-surface-alt);
   color: var(--color-ink-muted);
@@ -675,6 +735,12 @@
 @media (max-width: 640px) {
   .validation-toggle-row { align-items: flex-start; }
   .validation-fields-grid { grid-template-columns: 1fr; }
+  .validation-method-segmented { max-width: none; }
+  .sql-parameter-row { grid-template-columns: 1fr auto; }
+  .sql-parameter-row .sql-parameter-arrow { display: none; }
+  .sql-parameter-row [data-sql-param="field"] { grid-column: 1; }
+  .sql-parameter-row .sql-parameter-remove { grid-column: 2; grid-row: 1 / span 2; }
+  .sql-true-condition { grid-template-columns: 1fr; }
   .validation-request-table { overflow-x: auto; }
   .test-form-footer {
     align-items: stretch;

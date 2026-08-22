@@ -16,6 +16,7 @@ _MUTATING_NODES = (
     exp.Command,
     exp.Merge,
     exp.TruncateTable,
+    exp.Lock,
 )
 
 

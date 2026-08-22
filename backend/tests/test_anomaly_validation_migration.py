@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 import importlib.util
 import io
 import json
@@ -24,6 +25,13 @@ MIGRATION_PATH = (
 INITIAL_MIGRATION_PATH = MIGRATION_PATH.with_name("20260809_0001_initial.py")
 INDEX_MIGRATION_PATH = MIGRATION_PATH.with_name("20260822_0004_validation_query_indexes.py")
 RETRY_MIGRATION_PATH = MIGRATION_PATH.with_name("20260822_0005_validation_delivery_retry_schedule.py")
+PUSH_MIGRATION_PATH = MIGRATION_PATH.with_name("20260822_0006_anomaly_push_pipeline.py")
+PUSH_REPAIR_MIGRATION_PATH = MIGRATION_PATH.with_name(
+    "20260822_0007_repair_anomaly_push_job_columns.py"
+)
+SQL_VALIDATION_MIGRATION_PATH = MIGRATION_PATH.with_name(
+    "20260822_0008_sql_validation.py"
+)
 
 
 def load_migration():
@@ -52,6 +60,34 @@ def load_index_migration():
 
 def load_retry_migration():
     spec = importlib.util.spec_from_file_location("anomaly_validation_0005", RETRY_MIGRATION_PATH)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_push_migration():
+    spec = importlib.util.spec_from_file_location("anomaly_push_0006", PUSH_MIGRATION_PATH)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_push_repair_migration():
+    spec = importlib.util.spec_from_file_location(
+        "anomaly_push_0007", PUSH_REPAIR_MIGRATION_PATH,
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_sql_validation_migration():
+    spec = importlib.util.spec_from_file_location(
+        "sql_validation_0008", SQL_VALIDATION_MIGRATION_PATH,
+    )
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
@@ -283,3 +319,141 @@ def test_retry_schedule_columns_and_eligible_index_compile_for_mysql_84():
         "CREATE INDEX ix_validation_requests_eligible_retry "
         "ON anomaly_validation_requests (delivery_status, next_attempt_at, updated_at)"
     ) == index_ddl
+
+
+def test_push_pipeline_migration_creates_state_job_constraints_and_indexes():
+    migration = load_push_migration()
+    engine = sa.create_engine("sqlite+pysqlite:///:memory:")
+    metadata = sa.MetaData()
+    sa.Table("anomaly_records", metadata, sa.Column("id", sa.String(36), primary_key=True))
+    metadata.create_all(engine)
+
+    with engine.begin() as connection:
+        migration.op = Operations(MigrationContext.configure(connection))
+        migration.upgrade()
+        inspector = sa.inspect(connection)
+        state = connection.execute(sa.text(
+            "SELECT generation, abort_in_progress FROM anomaly_push_pipeline_state WHERE id = 1"
+        )).one()
+        columns = {item["name"] for item in inspector.get_columns("anomaly_push_jobs")}
+        indexes = {item["name"] for item in inspector.get_indexes("anomaly_push_jobs")}
+        unique = {item["name"] for item in inspector.get_unique_constraints("anomaly_push_jobs")}
+
+    assert state == (1, 0)
+    assert {"generation", "status", "cancel_requested", "kafka_partition", "kafka_offset", "next_attempt_at"} <= columns
+    assert indexes == {"ix_anomaly_push_jobs_generation_status", "ix_anomaly_push_jobs_publish"}
+    assert unique == {"uq_anomaly_push_job_delivery"}
+    engine.dispose()
+
+
+def test_push_pipeline_repair_migration_adds_missing_columns_idempotently():
+    migration = load_push_repair_migration()
+    engine = sa.create_engine("sqlite+pysqlite:///:memory:")
+    metadata = sa.MetaData()
+    anomalies = sa.Table(
+        "anomaly_records",
+        metadata,
+        sa.Column("id", sa.String(36), primary_key=True),
+    )
+    jobs = sa.Table(
+        "anomaly_push_jobs",
+        metadata,
+        sa.Column("id", sa.String(36), primary_key=True),
+        sa.Column("anomaly_id", sa.String(36), sa.ForeignKey(anomalies.c.id), nullable=False),
+        sa.Column("kind", sa.String(20), nullable=False),
+        sa.Column("delivery_id", sa.String(36), nullable=False),
+        sa.Column("generation", sa.Integer(), nullable=False),
+        sa.Column("status", sa.String(30), nullable=False),
+        sa.Column("publish_attempts", sa.Integer(), nullable=False),
+        sa.Column("dispatch_attempts", sa.Integer(), nullable=False),
+        sa.Column("kafka_partition", sa.Integer(), nullable=True),
+        sa.Column("kafka_offset", sa.Integer(), nullable=True),
+        sa.Column("last_error", sa.Text(), nullable=True),
+        sa.Column("created_at", sa.DateTime(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(), nullable=False),
+    )
+    metadata.create_all(engine)
+
+    with engine.begin() as connection:
+        connection.execute(anomalies.insert(), {"id": "anomaly-1"})
+        connection.execute(jobs.insert(), {
+            "id": "job-1",
+            "anomaly_id": "anomaly-1",
+            "kind": "notification",
+            "delivery_id": "delivery-1",
+            "generation": 1,
+            "status": "pending_publish",
+            "publish_attempts": 0,
+            "dispatch_attempts": 0,
+            "created_at": datetime(2026, 8, 22, 14, 0),
+            "updated_at": datetime(2026, 8, 22, 14, 0),
+        })
+        migration.op = Operations(MigrationContext.configure(connection))
+        migration.upgrade()
+        migration.upgrade()
+
+        columns = {
+            item["name"]: item
+            for item in sa.inspect(connection).get_columns("anomaly_push_jobs")
+        }
+        repaired_row = connection.execute(sa.text(
+            "SELECT cancel_requested, next_attempt_at "
+            "FROM anomaly_push_jobs WHERE id = 'job-1'"
+        )).one()
+
+    assert columns["cancel_requested"]["nullable"] is False
+    assert columns["next_attempt_at"]["nullable"] is True
+    assert repaired_row == (0, None)
+    engine.dispose()
+
+
+def test_sql_validation_migration_adds_snapshots_and_backfills_existing_pseudo_rows():
+    migration = load_sql_validation_migration()
+    engine = sa.create_engine("sqlite+pysqlite:///:memory:")
+    metadata = sa.MetaData()
+    rules = sa.Table(
+        "rules", metadata,
+        sa.Column("id", sa.String(36), primary_key=True),
+        sa.Column("validation_enabled", sa.Boolean(), nullable=False),
+    )
+    anomalies = sa.Table(
+        "anomaly_records", metadata,
+        sa.Column("id", sa.String(36), primary_key=True),
+        sa.Column("validation_deadline", sa.DateTime(), nullable=True),
+    )
+    submissions = sa.Table(
+        "anomaly_validation_submissions", metadata,
+        sa.Column("id", sa.String(36), primary_key=True),
+    )
+    metadata.create_all(engine)
+
+    with engine.begin() as connection:
+        connection.execute(rules.insert(), {"id": "rule-1", "validation_enabled": True})
+        connection.execute(anomalies.insert(), [
+            {"id": "active", "validation_deadline": datetime(2026, 8, 22, 10, 0)},
+            {"id": "legacy", "validation_deadline": None},
+        ])
+        connection.execute(submissions.insert(), {"id": "submission-1"})
+        migration.op = Operations(MigrationContext.configure(connection))
+        migration.upgrade()
+
+        inspector = sa.inspect(connection)
+        assert {"validation_method", "sql_validation_config"} <= {
+            item["name"] for item in inspector.get_columns("rules")
+        }
+        assert {"validation_method_snapshot", "validation_config_snapshot"} <= {
+            item["name"] for item in inspector.get_columns("anomaly_records")
+        }
+        assert "result_detail" in {
+            item["name"] for item in inspector.get_columns("anomaly_validation_submissions")
+        }
+        assert connection.execute(sa.text(
+            "SELECT validation_method FROM rules WHERE id='rule-1'"
+        )).scalar_one() == "pseudo"
+        assert connection.execute(sa.text(
+            "SELECT validation_method_snapshot FROM anomaly_records WHERE id='active'"
+        )).scalar_one() == "pseudo"
+        assert connection.execute(sa.text(
+            "SELECT validation_method_snapshot FROM anomaly_records WHERE id='legacy'"
+        )).scalar_one() is None
+    engine.dispose()

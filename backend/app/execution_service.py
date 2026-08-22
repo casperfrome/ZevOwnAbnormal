@@ -13,7 +13,6 @@ from .models import AnomalyRecord, NotificationDelivery, Rule, RuleRun, utcnow
 from .query_service import connect_to_datasource, fetch_rule_rows
 from .rule_engine import evaluate_rows
 from .security import CredentialCipher
-from .validation_service import deliver_validation_requests
 
 
 class RuleExecutionConflict(ValueError):
@@ -83,7 +82,11 @@ def deliver_notifications(session: Session, settings: Settings, delivery_ids: li
     deliveries = list(session.execute(query))
     if not deliveries:
         return 0
-    client = FeishuClient(settings.feishu_app_id, settings.feishu_app_secret)
+    client = FeishuClient(
+        settings.feishu_app_id,
+        settings.feishu_app_secret,
+        timeout=settings.feishu_http_timeout_seconds,
+    )
     failures = 0
     try:
         for delivery, record in deliveries:
@@ -97,6 +100,7 @@ def deliver_notifications(session: Session, settings: Settings, delivery_ids: li
                         delivery.recipient,
                         _message(record),
                         client=client,
+                        idempotency_key=delivery.id,
                     )
                     delivery.status = "sent"
                     delivery.last_error = None
@@ -132,14 +136,10 @@ def execute_rule(session: Session, settings: Settings, rule_id: str, trigger_sou
             field_types = {field["name"]: field["type"] for field in fields}
             matches = evaluate_rows(rows, rule.conditions, rule.logic, rule.anomaly_key_fields, field_types)
             persisted = persist_matches(session, rule, matches)
-            failures = deliver_notifications(session, settings, rule_id=rule.id)
-            failures += deliver_validation_requests(session, settings, rule_id=rule.id)
-            run.status = "partial_failed" if failures else "success"
+            run.status = "success"
             run.scanned_rows = len(rows)
             run.matched_rows = len(matches)
             run.new_anomalies = persisted.new_count
-            if failures:
-                run.error_message = f"{failures} 条飞书消息发送失败"
         except Exception as exc:
             session.rollback()
             run = session.get(RuleRun, run.id)

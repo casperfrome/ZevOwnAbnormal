@@ -2,6 +2,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from contextlib import suppress
 import logging
+import secrets
 from pathlib import Path
 import threading
 
@@ -14,9 +15,19 @@ from sqlalchemy import select
 from .api import get_current_user, internal_router, router
 from .config import SESSION_COOKIE, Settings, get_settings
 from .database import Base, make_session_factory
-from .models import User
+from .models import AnomalyPushPipelineState, User
+from .push_pipeline import (
+    ConfluentKafkaGateway,
+    DolphinPushScheduler,
+    consume_one,
+    publish_pending_jobs,
+    queue_due_notification_push_jobs,
+    queue_due_validation_push_jobs,
+    reconcile_completed_push_jobs,
+    requeue_stale_push_jobs,
+)
 from .scheduler_service import reconcile_enabled_rules
-from .validation_service import deliver_validation_requests, expire_due_anomalies, reconcile_validation_cards
+from .validation_service import expire_due_anomalies, reconcile_validation_cards
 
 
 TEST_SESSION_SECRET = "test-session-secret-that-is-long-enough"
@@ -38,11 +49,9 @@ def run_validation_maintenance_cycle(
         if should_stop is not None and should_stop():
             logger.warning("异常验证维护已取消，初始投递与卡片收敛留待下一轮")
             return
-        deliver_validation_requests(
+        queue_due_validation_push_jobs(
             session,
-            settings,
             limit=settings.validation_maintenance_batch_size,
-            should_stop=should_stop,
         )
         if should_stop is not None and should_stop():
             logger.warning("异常验证维护已取消，终态卡片收敛留待下一轮")
@@ -78,6 +87,56 @@ async def validation_maintenance_loop(session_factory, settings: Settings) -> No
         await asyncio.sleep(settings.validation_timeout_scan_interval_seconds)
 
 
+def run_push_pipeline_cycle(session_factory, settings: Settings, app_state) -> None:
+    if app_state.kafka_gateway is None:
+        gateway = ConfluentKafkaGateway(settings)
+        gateway.ensure_topic()
+        app_state.kafka_gateway = gateway
+    if app_state.push_scheduler is None:
+        scheduler = DolphinPushScheduler(settings)
+        scheduler.initialize()
+        app_state.push_scheduler = scheduler
+    with session_factory() as session:
+        reconcile_completed_push_jobs(
+            session, limit=settings.validation_maintenance_batch_size,
+        )
+        requeue_stale_push_jobs(
+            session, settings, limit=settings.validation_maintenance_batch_size,
+        )
+        queue_due_validation_push_jobs(
+            session, limit=settings.validation_maintenance_batch_size,
+        )
+        queue_due_notification_push_jobs(
+            session, limit=settings.validation_maintenance_batch_size,
+        )
+        publish_pending_jobs(
+            session, settings, app_state.kafka_gateway,
+            limit=settings.validation_maintenance_batch_size,
+        )
+        consume_one(
+            session, settings, app_state.kafka_gateway, app_state.push_scheduler,
+            timeout=0.2,
+        )
+
+
+async def push_pipeline_loop(session_factory, settings: Settings, app_state) -> None:
+    while True:
+        cycle = asyncio.create_task(asyncio.to_thread(
+            run_push_pipeline_cycle, session_factory, settings, app_state,
+        ))
+        try:
+            await asyncio.shield(cycle)
+        except asyncio.CancelledError as cancelled:
+            try:
+                await cycle
+            except Exception:
+                logger.exception("异常推送周期在关闭期间执行失败")
+            raise cancelled
+        except Exception:
+            logger.exception("Kafka → DolphinScheduler 异常推送周期执行失败")
+        await asyncio.sleep(1)
+
+
 def create_app(testing: bool = False) -> FastAPI:
     settings = Settings(
         database_url="sqlite+pysqlite:///:memory:",
@@ -102,15 +161,24 @@ def create_app(testing: bool = False) -> FastAPI:
                     )
                 )
                 session.commit()
+            if session.get(AnomalyPushPipelineState, 1) is None:
+                session.add(AnomalyPushPipelineState(id=1, generation=1))
+                session.commit()
             if not testing and settings.reconcile_on_startup:
                 reconcile_enabled_rules(session, settings)
         maintenance_task = None
+        push_pipeline_task = None
         if not testing:
             maintenance_task = asyncio.create_task(
                 validation_maintenance_loop(session_factory, settings),
                 name="validation-maintenance",
             )
+            push_pipeline_task = asyncio.create_task(
+                push_pipeline_loop(session_factory, settings, app_instance.state),
+                name="anomaly-push-pipeline",
+            )
         app_instance.state.validation_maintenance_task = maintenance_task
+        app_instance.state.push_pipeline_task = push_pipeline_task
         try:
             yield
         finally:
@@ -118,12 +186,25 @@ def create_app(testing: bool = False) -> FastAPI:
                 maintenance_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await maintenance_task
+            if push_pipeline_task is not None:
+                push_pipeline_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await push_pipeline_task
+            kafka_close = getattr(app_instance.state.kafka_gateway, "close", None)
+            if callable(kafka_close):
+                kafka_close()
+            scheduler_close = getattr(app_instance.state.push_scheduler, "close", None)
+            if callable(scheduler_close):
+                scheduler_close()
             engine.dispose()
 
     app = FastAPI(title="Sentinel 数据异常监控平台", version="0.1.0", lifespan=lifespan)
     app.state.settings = settings
     app.state.session_factory = session_factory
     app.state.validation_maintenance_task = None
+    app.state.push_pipeline_task = None
+    app.state.kafka_gateway = None
+    app.state.push_scheduler = None
     app.include_router(router)
     app.include_router(internal_router)
 
@@ -161,7 +242,7 @@ def create_app(testing: bool = False) -> FastAPI:
 
     @app.post("/api/internal/rules/{rule_id}/execute")
     def internal_execute(rule_id: str, x_internal_token: str = Header(default="")):
-        if x_internal_token != settings.internal_execution_token:
+        if not secrets.compare_digest(x_internal_token, settings.internal_execution_token):
             raise HTTPException(401, "内部令牌无效")
         from .execution_service import RuleExecutionConflict, execute_rule
         with session_factory() as session:

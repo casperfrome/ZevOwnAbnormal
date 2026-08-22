@@ -1,6 +1,6 @@
 /* API-backed state store. Keeps the existing synchronous read API for views. */
 window.Store = (function () {
-  const state = { datasources: [], datasets: [], rules: [], records: [], overview: null };
+  const state = { datasources: [], datasets: [], rules: [], records: [], overview: null, currentUser: null };
   let recordsPageSequence = 0;
 
   async function request(path, options = {}) {
@@ -11,8 +11,11 @@ window.Store = (function () {
     });
     if (!response.ok) {
       let detail = `${response.status} ${response.statusText}`;
-      try { const body = await response.json(); detail = body.detail || detail; } catch (_) {}
-      throw new Error(detail);
+      let payload = null;
+      try { payload = await response.json(); detail = payload.detail || detail; } catch (_) {}
+      const error = new Error(detail);
+      error.payload = payload;
+      throw error;
     }
     if (response.status === 204) return null;
     return response.json();
@@ -41,9 +44,20 @@ window.Store = (function () {
       targets,
     };
   };
+  const mapSqlValidationConfig = config => config ? ({
+    queryTemplate: config.query_template || '',
+    parameters: (config.parameters || []).map(item => ({ name: item.name, field: item.field })),
+    trueCondition: {
+      field: config.true_condition?.field || '',
+      operator: config.true_condition?.operator || 'eq',
+      value: config.true_condition?.value ?? null,
+      upperValue: config.true_condition?.upper_value ?? null,
+    },
+  }) : null;
   const mapRule = r => ({
     id: r.id, name: r.name, description: r.description || '', datasetId: r.dataset_id,
-    datasetName: r.dataset_name, severity: r.severity, logic: r.logic, conditions: (r.conditions || []).map(c => ({ ...c, op: c.operator })),
+    datasetName: r.dataset_name, severity: r.severity, logic: r.logic,
+    conditions: (r.conditions || []).map(({ operator, ...condition }) => ({ ...condition, op: operator })),
     anomalyKeyFields: r.anomaly_key_fields || [], schedule: {
       frequency: r.schedule.frequency, interval: r.schedule.interval, time: r.schedule.time,
       start: r.schedule.start_date, end: r.schedule.end_date,
@@ -52,6 +66,8 @@ window.Store = (function () {
     validationEnabled: !!r.validation_enabled,
     validationTargets: r.validation_targets || [],
     validationTimeoutMinutes: r.validation_timeout_minutes ?? 1440,
+    validationMethod: r.validation_method || 'pseudo',
+    sqlValidationConfig: mapSqlValidationConfig(r.sql_validation_config),
     enabled: r.enabled, syncStatus: r.sync_status, syncError: r.sync_error,
     lastRun: r.last_run || null, nextRun: r.next_run || null, anomalyCount: r.anomaly_count || 0,
     createdAt: r.created_at,
@@ -69,6 +85,13 @@ window.Store = (function () {
     submittedText: item.submitted_text,
     validatorType: item.validator_type,
     result: item.result,
+    resultDetail: item.result_detail ? {
+      field: item.result_detail.field,
+      operator: item.result_detail.operator,
+      value: item.result_detail.value ?? null,
+      upperValue: item.result_detail.upper_value ?? null,
+      actual: item.result_detail.actual ?? null,
+    } : null,
     submittedAt: item.submitted_at,
   }) : null;
   const mapRecord = r => {
@@ -83,6 +106,7 @@ window.Store = (function () {
       description: r.description || '', validationDeadline: r.validation_deadline || null,
       timedOutAt: r.timed_out_at || null, resolvedAt: r.resolved_at || null,
       resolutionSource: r.resolution_source || null, resolvedByUserId: r.resolved_by_user_id || null,
+      validationMethod: r.validation_method || null,
       timeline: (r.timeline || []).map(e => ({ time: e.created_at, type: e.type, title: e.description, desc: '' })),
       deliveries: r.deliveries || [],
       validationRequests: (r.validation_requests || []).map(mapValidationRequest),
@@ -97,6 +121,7 @@ window.Store = (function () {
         ['page_size', filters.pageSize || 10],
       ] : []),
       ['status_filter', filters.status],
+      ['push_status', filters.pushStatus],
       ['severity', filters.severity],
       ['rule_id', filters.ruleId],
       ['search', filters.search],
@@ -163,7 +188,7 @@ window.Store = (function () {
   }
 
   async function init() {
-    await request('/auth/me');
+    state.currentUser = await request('/auth/me');
     await refresh();
   }
 
@@ -186,7 +211,7 @@ window.Store = (function () {
     return {
       name: data.name, description: data.description || '', dataset_id: data.datasetId,
       severity: data.severity || 'medium', logic: data.logic || 'AND',
-      conditions: (data.conditions || []).map(c => ({ field: c.field, operator: c.operator || c.op, value: c.value === '' ? null : c.value,
+      conditions: (data.conditions || []).map(c => ({ field: c.field, operator: c.op || c.operator, value: c.value === '' ? null : c.value,
         upper_value: c.upper_value ?? c.upperValue ?? null, baseline: c.baseline || null })),
       anomaly_key_fields: data.anomalyKeyFields || [],
       schedule: { frequency: data.schedule.frequency, interval: Number(data.schedule.interval || 1), time: data.schedule.time || null,
@@ -195,11 +220,23 @@ window.Store = (function () {
       validation_enabled: !!data.validationEnabled,
       validation_targets: data.validationTargets || [],
       validation_timeout_minutes: Number(data.validationTimeoutMinutes ?? 1440),
+      validation_method: data.validationMethod || 'pseudo',
+      sql_validation_config: data.validationMethod === 'sql' && data.sqlValidationConfig ? {
+        query_template: data.sqlValidationConfig.queryTemplate,
+        parameters: (data.sqlValidationConfig.parameters || []).map(item => ({ name: item.name, field: item.field })),
+        true_condition: {
+          field: data.sqlValidationConfig.trueCondition.field,
+          operator: data.sqlValidationConfig.trueCondition.operator,
+          value: data.sqlValidationConfig.trueCondition.value ?? null,
+          upper_value: data.sqlValidationConfig.trueCondition.upperValue ?? null,
+        },
+      } : null,
     };
   }
 
   return {
     init, refresh, request, loadRecordsPage, peekRecordsPage,
+    isSuperuser: () => state.currentUser?.is_superuser === true,
     getDatasources: () => [...state.datasources],
     getDatasource: id => state.datasources.find(item => item.id === id),
     addDatasource: async data => { const item = mapDatasource(await request('/datasources', { method: 'POST', body: JSON.stringify(dsPayload(data)) })); state.datasources.unshift(item); return item; },
@@ -211,6 +248,7 @@ window.Store = (function () {
       method: 'POST',
       body: JSON.stringify({ receive_id_type: receiveIdType, receive_id: receiveId }),
     }),
+    abortAnomalyPushes: () => request('/anomaly-pushes/abort', { method: 'POST' }),
 
     getDatasets: () => [...state.datasets],
     getDataset: id => state.datasets.find(item => item.id === id),
@@ -262,6 +300,7 @@ window.Store = (function () {
         onlineDatasources: server.online_datasources ?? state.datasources.filter(d => d.status === 'online').length,
         totalDatasources: server.total_datasources ?? state.datasources.length,
         totalDatasets: server.total_datasets ?? state.datasets.length,
+        pushInTransitAnomalies: server.push_in_transit_anomalies ?? 0,
         criticalAnomalies: server.critical_anomalies ?? state.records.filter(r => r.severity === 'critical' && r.status !== 'resolved').length,
         resolvedToday: server.resolved_records ?? state.records.filter(r => r.status === 'resolved').length,
       };

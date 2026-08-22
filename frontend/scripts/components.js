@@ -14,6 +14,22 @@ window.UI = (function () {
     return s;
   };
 
+  const OPERATOR_LABELS = {
+    eq: '等于（=）',
+    neq: '不等于（≠）',
+    gt: '大于（>）',
+    gte: '大于等于（≥）',
+    lt: '小于（<）',
+    lte: '小于等于（≤）',
+    between: '介于',
+    is_null: '为空',
+    is_not_null: '不为空',
+    gt_threshold_ratio: '高于基线倍数',
+    lt_threshold_ratio: '低于基线倍数',
+  };
+
+  const operatorLabel = operator => OPERATOR_LABELS[operator] || '未知条件';
+
   // ---------- Toast ----------
   const toastContainer = () => document.getElementById('toast-container');
 
@@ -88,6 +104,7 @@ window.UI = (function () {
   // ---------- Confirm dialog ----------
   function confirm(opts) {
     return new Promise((resolve) => {
+      let decided = false;
       const { title = '确认操作', desc, confirmText = '确认', cancelText = '取消', danger = false } = opts;
       const m = modal({
         title,
@@ -99,10 +116,14 @@ window.UI = (function () {
           <button class="btn ${danger ? 'btn-danger' : 'btn-accent'}" data-action="confirm">${confirmText}</button>
         `,
         closeOnBackdrop: true,
-        onClose: () => resolve(false),
+        onClose: () => { if (!decided) resolve(false); },
       });
-      m.dialog.querySelector('[data-action="cancel"]').addEventListener('click', () => { m.close(); resolve(false); });
-      m.dialog.querySelector('[data-action="confirm"]').addEventListener('click', () => { m.close(); resolve(true); });
+      m.dialog.querySelector('[data-action="cancel"]').addEventListener('click', () => {
+        decided = true; resolve(false); m.close();
+      });
+      m.dialog.querySelector('[data-action="confirm"]').addEventListener('click', () => {
+        decided = true; resolve(true); m.close();
+      });
     });
   }
 
@@ -281,7 +302,7 @@ window.UI = (function () {
   };
 
   return {
-    escapeHtml, formatNumber, formatTime,
+    escapeHtml, formatNumber, formatTime, operatorLabel,
     toast, modal, confirm, drawer,
     statusBadge, recordStatusBadge, severityBadge, severityMeter, dsTypeBadge,
     emptyState, loadingState, renderPagination,

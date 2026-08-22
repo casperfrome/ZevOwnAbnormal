@@ -90,8 +90,8 @@ def test_failed_delivery_is_retried_on_later_rule_run(monkeypatch):
     session.commit()
 
     class SuccessfulClient:
-        def __init__(self, *_): pass
-        def send_text(self, *_): return "om_retry"
+        def __init__(self, *_, **__): pass
+        def send_text(self, *_, **__): return "om_retry"
         def close(self): pass
 
     monkeypatch.setattr("app.execution_service.FeishuClient", SuccessfulClient)
@@ -110,12 +110,12 @@ def test_rule_delivery_uses_shared_configured_sender(monkeypatch):
     calls = []
 
     class DirectClient:
-        def __init__(self, *_): pass
-        def send_text(self, *_): return "om_direct"
+        def __init__(self, *_, **__): pass
+        def send_text(self, *_, **__): return "om_direct"
         def close(self): pass
 
-    def shared_sender(app_id, app_secret, receive_id_type, recipient, text, *, client=None):
-        calls.append((app_id, app_secret, receive_id_type, recipient, text, client))
+    def shared_sender(app_id, app_secret, receive_id_type, recipient, text, *, client=None, idempotency_key=None):
+        calls.append((app_id, app_secret, receive_id_type, recipient, text, client, idempotency_key))
         return "om_shared"
 
     monkeypatch.setattr("app.execution_service.FeishuClient", DirectClient)
@@ -128,3 +128,4 @@ def test_rule_delivery_uses_shared_configured_sender(monkeypatch):
     assert len(calls) == 1
     assert calls[0][:4] == ("cli", "secret", "open_id", "ou_owner")
     assert calls[0][5].__class__ is DirectClient
+    assert calls[0][6] == delivery.id

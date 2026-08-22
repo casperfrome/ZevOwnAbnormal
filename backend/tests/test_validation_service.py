@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import threading
 from datetime import datetime, timedelta
+from decimal import Decimal
 
 import httpx
 import pytest
@@ -26,6 +27,35 @@ from app.rule_engine import EvaluationMatch
 
 
 NOW = datetime(2026, 8, 22, 4, 0, 0)
+
+
+class FakeSqlCursor:
+    def __init__(self, rows):
+        self.rows = list(rows)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def execute(self, _sql, _values):
+        return None
+
+    def fetchmany(self, size):
+        return self.rows[:size]
+
+
+class FakeConnection:
+    def __init__(self, rows):
+        self.rows = rows
+        self.closed = False
+
+    def cursor(self):
+        return FakeSqlCursor(self.rows)
+
+    def close(self):
+        self.closed = True
 
 
 def build_session(database_url="sqlite+pysqlite:///:memory:", *, testing=True):
@@ -87,6 +117,8 @@ def test_snapshot_creates_ordered_unique_requests_and_suppresses_matching_legacy
         assert recipients == ["user-1", "user-2"]
         assert anomaly.description == "GMV exceeded the expected range"
         assert anomaly.validation_deadline == NOW + timedelta(minutes=30)
+        assert anomaly.validation_method_snapshot == "pseudo"
+        assert anomaly.validation_config_snapshot == {}
         assert [request.recipient_user_id for request in session.scalars(
             select(AnomalyValidationRequest).order_by(AnomalyValidationRequest.created_at)
         )] == ["user-1", "user-2"]
@@ -254,6 +286,119 @@ def test_cards_show_active_controls_timeout_and_read_only_resolution():
         assert "2026-08-22 04:10:00" in resolved_text
         assert "validation_text" not in resolved_text
         assert "form_action_type" not in resolved_text
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_sql_snapshot_is_immutable_and_card_only_exposes_processed_action():
+    """Reading edited rule SQL or retaining the pseudo text input must fail this test."""
+    from app.validation_service import build_validation_card, snapshot_validation
+
+    engine, _, session, rule = build_session()
+    try:
+        rule.validation_enabled = True
+        rule.validation_targets = [{"source": "literal", "value": "user-1"}]
+        rule.validation_method = "sql"
+        rule.sql_validation_config = {
+            "query_template": "SELECT status FROM repair_state WHERE store_id='{门店ID}'",
+            "parameters": [{"name": "门店ID", "field": "store_id"}],
+            "true_condition": {"field": "status", "operator": "eq", "value": "normal"},
+        }
+        anomaly = make_anomaly(rule)
+        anomaly.row_details["store_id"] = "S1"
+        session.add(anomaly)
+        session.flush()
+
+        snapshot_validation(session, rule, anomaly, now=NOW)
+        original_query = anomaly.validation_config_snapshot["query_template"]
+        rule.sql_validation_config["query_template"] = "SELECT changed FROM elsewhere"
+
+        card = build_validation_card(anomaly, "https://sentinel.example")
+        card_text = json.dumps(card, ensure_ascii=False)
+        button = next(
+            element
+            for element in card["body"]["elements"]
+            if element["tag"] == "button"
+        )
+        assert anomaly.validation_method_snapshot == "sql"
+        assert original_query.startswith("SELECT status")
+        assert anomaly.validation_config_snapshot["query_template"] == original_query
+        assert anomaly.validation_config_snapshot["datasource_id"] == rule.dataset.datasource_id
+        assert anomaly.validation_config_snapshot["dataset_fields"] == []
+        assert "validation_text" not in card_text
+        assert button["text"]["content"] == "已处理"
+        assert button["behaviors"] == [{
+            "type": "callback",
+            "value": {"action": "run_sql_validation", "anomaly_id": anomaly.id},
+        }]
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_sql_validation_failure_keeps_anomaly_retryable_and_success_records_details():
+    """Resolving on a false condition or failing to persist a passing comparison must fail this test."""
+    from app.validation_service import snapshot_validation, submit_sql_validation
+
+    engine, _, session, rule = build_session()
+    try:
+        rule.validation_enabled = True
+        rule.validation_targets = [{"source": "literal", "value": "user-1"}]
+        rule.validation_method = "sql"
+        rule.dataset.fields = [{"name": "store_id", "type": "VARCHAR"}]
+        rule.sql_validation_config = {
+            "query_template": "SELECT current_temperature FROM repair_state WHERE store_id='{门店ID}'",
+            "parameters": [{"name": "门店ID", "field": "store_id"}],
+            "true_condition": {"field": "current_temperature", "operator": "lt", "value": -12},
+        }
+        anomaly = make_anomaly(rule)
+        anomaly.row_details["store_id"] = "S1"
+        session.add(anomaly)
+        session.flush()
+        snapshot_validation(session, rule, anomaly, now=NOW)
+        session.commit()
+
+        failed_connection = FakeConnection([{"current_temperature": Decimal("2.39")}])
+        failed = submit_sql_validation(
+            session,
+            Settings(),
+            anomaly.id,
+            "user-1",
+            connection_factory=lambda *_args: failed_connection,
+            now=NOW,
+        )
+        session.refresh(anomaly)
+        assert failed.outcome == "failed"
+        assert failed.reason == "condition_failed"
+        assert anomaly.status == "pending"
+        assert session.scalar(select(AnomalyValidationSubmission)) is None
+
+        passed_connection = FakeConnection([{"current_temperature": Decimal("-18.5")}])
+        passed = submit_sql_validation(
+            session,
+            Settings(),
+            anomaly.id,
+            "user-1",
+            connection_factory=lambda *_args: passed_connection,
+            now=NOW + timedelta(minutes=1),
+        )
+        session.refresh(anomaly)
+        submission = session.scalar(select(AnomalyValidationSubmission))
+        assert passed.outcome == "accepted"
+        assert anomaly.status == "resolved"
+        assert submission.validator_type == "sql"
+        assert submission.submitted_text == ""
+        assert submission.result_detail == {
+            "field": "current_temperature",
+            "operator": "lt",
+            "value": -12,
+            "upper_value": None,
+            "actual": -18.5,
+        }
+        assert [event.event_type for event in session.scalars(
+            select(AnomalyEvent).order_by(AnomalyEvent.created_at)
+        )][-2:] == ["sql_validation_failed", "validation_resolved"]
     finally:
         session.close()
         engine.dispose()

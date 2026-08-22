@@ -10,7 +10,16 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .models import AnomalyEvent, AnomalyRecord, NotificationDelivery, Rule, utcnow
+from .models import (
+    AnomalyEvent,
+    AnomalyPushJob,
+    AnomalyPushPipelineState,
+    AnomalyRecord,
+    AnomalyValidationRequest,
+    NotificationDelivery,
+    Rule,
+    utcnow,
+)
 from .rule_engine import EvaluationMatch
 from .validation_service import snapshot_validation
 
@@ -57,6 +66,18 @@ def resolve_targets(targets: list[dict], row: dict[str, Any]) -> list[tuple[str,
 
 def persist_matches(session: Session, rule: Rule, matches: list[EvaluationMatch]) -> PersistResult:
     now = utcnow()
+    # Serialize generation assignment with the abort transaction. If an abort
+    # already owns the singleton row this waits and observes the new generation;
+    # if we own it first, abort waits until the anomaly and its jobs commit.
+    pipeline = session.scalar(
+        select(AnomalyPushPipelineState)
+        .where(AnomalyPushPipelineState.id == 1)
+        .with_for_update()
+    )
+    if pipeline is None:
+        pipeline = AnomalyPushPipelineState(id=1, generation=1)
+        session.add(pipeline)
+        session.flush()
     new_count = 0
     delivery_ids: list[str] = []
     affected: list[AnomalyRecord] = []
@@ -92,6 +113,16 @@ def persist_matches(session: Session, rule: Rule, matches: list[EvaluationMatch]
         session.flush()
         session.add(AnomalyEvent(anomaly_id=record.id, event_type="detected", description="规则首次检出异常"))
         validation_recipients = set(snapshot_validation(session, rule, record, now=now))
+        validation_requests = list(session.scalars(select(AnomalyValidationRequest).where(
+            AnomalyValidationRequest.anomaly_id == record.id,
+        )))
+        for request in validation_requests:
+            session.add(AnomalyPushJob(
+                anomaly_id=record.id,
+                kind="validation",
+                delivery_id=request.id,
+                generation=pipeline.generation,
+            ))
         for receive_id_type, recipient in resolve_targets(rule.notification_targets, match.row):
             if receive_id_type == "user_id" and recipient in validation_recipients:
                 continue
@@ -102,6 +133,12 @@ def persist_matches(session: Session, rule: Rule, matches: list[EvaluationMatch]
             )
             session.add(delivery)
             session.flush()
+            session.add(AnomalyPushJob(
+                anomaly_id=record.id,
+                kind="notification",
+                delivery_id=delivery.id,
+                generation=pipeline.generation,
+            ))
             delivery_ids.append(delivery.id)
         new_count += 1
         affected.append(record)

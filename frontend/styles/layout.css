@@ -536,6 +536,7 @@
 }
 
 .stat-strip.five-up { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.stat-strip.six-up { grid-template-columns: repeat(6, minmax(0, 1fr)); }
 
 #rec-stats {
   gap: var(--space-3);
@@ -724,6 +725,7 @@
   :root { --content-pad: 24px; }
   .stat-strip { grid-template-columns: repeat(2, 1fr); }
   .stat-strip.five-up { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .stat-strip.six-up { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 
 @media (max-width: 860px) {
@@ -757,6 +759,7 @@
   :root { --content-pad: 16px; --header-height: 64px; }
   .stat-strip { grid-template-columns: 1fr; }
   .stat-strip.five-up { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .stat-strip.six-up { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .stat-strip.five-up .stat-card:last-child { grid-column: 1 / -1; }
   .page-header { flex-direction: column; align-items: stretch; }
   .page-actions { width: 100%; }

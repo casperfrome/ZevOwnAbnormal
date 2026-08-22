@@ -82,6 +82,10 @@ class Rule(Base, TimestampMixin):
         server_default=text("('[]')"),
     )
     validation_timeout_minutes: Mapped[int] = mapped_column(Integer, default=1440, nullable=False)
+    validation_method: Mapped[str] = mapped_column(
+        String(20), default="pseudo", server_default=text("'pseudo'"), nullable=False,
+    )
+    sql_validation_config: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     sync_status: Mapped[str] = mapped_column(String(30), default="pending", nullable=False)
     sync_error: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -132,6 +136,13 @@ class AnomalyRecord(Base):
     timed_out_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     resolution_source: Mapped[str | None] = mapped_column(String(30), nullable=True)
     resolved_by_user_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    validation_method_snapshot: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    validation_config_snapshot: Mapped[dict] = mapped_column(
+        JSON,
+        default=dict,
+        nullable=False,
+        server_default=text("('{}')"),
+    )
     assignee: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
 
@@ -201,4 +212,44 @@ class AnomalyValidationSubmission(Base):
     submitted_text: Mapped[str] = mapped_column(Text, nullable=False)
     validator_type: Mapped[str] = mapped_column(String(30), default="pseudo", nullable=False)
     result: Mapped[str] = mapped_column(String(30), default="passed", nullable=False)
+    result_detail: Mapped[dict] = mapped_column(
+        JSON,
+        default=dict,
+        nullable=False,
+        server_default=text("('{}')"),
+    )
     submitted_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+
+class AnomalyPushPipelineState(Base):
+    __tablename__ = "anomaly_push_pipeline_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    generation: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    abort_in_progress: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=False,
+    )
+
+
+class AnomalyPushJob(Base, TimestampMixin):
+    __tablename__ = "anomaly_push_jobs"
+    __table_args__ = (
+        UniqueConstraint("kind", "delivery_id", name="uq_anomaly_push_job_delivery"),
+        Index("ix_anomaly_push_jobs_publish", "status", "created_at"),
+        Index("ix_anomaly_push_jobs_generation_status", "generation", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    anomaly_id: Mapped[str] = mapped_column(ForeignKey("anomaly_records.id"), nullable=False)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    delivery_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="pending_publish", nullable=False)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    publish_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    dispatch_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    kafka_partition: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    kafka_offset: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)

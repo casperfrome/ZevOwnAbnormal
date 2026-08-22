@@ -114,15 +114,69 @@ class ValidationTarget(BaseModel):
         return self
 
 
+class SqlValidationParameter(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+    field: str = Field(min_length=1, max_length=255)
+
+    @field_validator("name", "field", mode="before")
+    @classmethod
+    def normalize_parameter_text(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+
+class SqlTrueCondition(BaseModel):
+    field: str = Field(min_length=1, max_length=255)
+    operator: Literal["gt", "gte", "lt", "lte", "eq", "neq", "between", "is_null", "is_not_null"]
+    value: float | int | str | None = None
+    upper_value: float | int | str | None = None
+
+    @field_validator("field", mode="before")
+    @classmethod
+    def normalize_result_field(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+    @model_validator(mode="after")
+    def validate_operands(self):
+        if self.operator == "between" and (self.value is None or self.upper_value is None):
+            raise ValueError("between 需要上下界")
+        if self.operator not in {"is_null", "is_not_null"} and self.value is None:
+            raise ValueError("该 True 条件需要期望值")
+        return self
+
+
+class SqlValidationConfig(BaseModel):
+    query_template: str = Field(min_length=1, max_length=20000)
+    parameters: list[SqlValidationParameter] = Field(default_factory=list)
+    true_condition: SqlTrueCondition
+
+    @field_validator("query_template", mode="before")
+    @classmethod
+    def normalize_query_template(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+    @model_validator(mode="after")
+    def validate_unique_parameters(self):
+        names = [parameter.name for parameter in self.parameters]
+        if len(names) != len(set(names)):
+            raise ValueError("SQL 参数名不能重复")
+        return self
+
+
 class RuleValidationConfig(BaseModel):
     validation_enabled: bool = False
     validation_targets: list[ValidationTarget] = Field(default_factory=list)
     validation_timeout_minutes: int = Field(default=1440, ge=1, le=43200)
+    validation_method: Literal["pseudo", "sql"] = "pseudo"
+    sql_validation_config: SqlValidationConfig | None = None
 
     @model_validator(mode="after")
     def validate_enabled_targets(self):
         if self.validation_enabled and not self.validation_targets:
             raise ValueError("启用实时验证时至少需要一个验证目标")
+        if self.validation_method == "pseudo" and self.sql_validation_config is not None:
+            raise ValueError("伪校验不能同时配置 SQL 校验")
+        if self.validation_method == "sql" and self.sql_validation_config is None:
+            raise ValueError("SQL 校验需要完整的 SQL 配置")
         return self
 
 

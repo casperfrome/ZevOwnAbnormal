@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import time
 import logging
+from copy import deepcopy
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -19,9 +20,17 @@ from .models import (
     AnomalyRecord,
     AnomalyValidationRequest,
     AnomalyValidationSubmission,
+    Datasource,
     NotificationDelivery,
     Rule,
     utcnow,
+)
+from .query_service import connect_to_datasource
+from .security import CredentialCipher
+from .sql_validation import (
+    SqlValidationConfigurationError,
+    SqlValidationResult,
+    execute_sql_validation,
 )
 
 
@@ -37,10 +46,16 @@ class InvalidValidationTransition(ValueError):
     pass
 
 
+class SqlValidationExecutionError(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class SubmissionResult:
     outcome: str
     submission: AnomalyValidationSubmission | None
+    reason: str | None = None
+    result_detail: dict[str, Any] | None = None
 
 
 _SQLITE_LOCK_STRIPES = tuple(threading.Lock() for _ in range(64))
@@ -84,6 +99,16 @@ def snapshot_validation(
     if anomaly.validation_deadline is None:
         anomaly.description = rule.description
         anomaly.validation_deadline = snapshot_time + timedelta(minutes=rule.validation_timeout_minutes)
+        anomaly.validation_method_snapshot = rule.validation_method
+        config_snapshot = deepcopy(rule.sql_validation_config or {})
+        if rule.validation_method == "sql":
+            config_snapshot["datasource_id"] = rule.dataset.datasource_id
+            config_snapshot["dataset_fields"] = [
+                str(field.get("name"))
+                for field in (rule.dataset.fields or [])
+                if field.get("name") is not None
+            ]
+        anomaly.validation_config_snapshot = config_snapshot
     existing_recipients = set(session.scalars(select(AnomalyValidationRequest.recipient_user_id).where(
         AnomalyValidationRequest.anomaly_id == anomaly.id
     )))
@@ -139,6 +164,17 @@ def build_validation_card(anomaly: AnomalyRecord, public_base_url: str) -> dict:
                 f"**验证人：** {anomaly.resolved_by_user_id or '-'}\n"
                 f"**解决时间：** {_format_time(anomaly.resolved_at)}"
             ),
+        })
+    elif anomaly.validation_method_snapshot == "sql":
+        elements.append({
+            "tag": "button",
+            "name": "run_sql_validation",
+            "text": {"tag": "plain_text", "content": "已处理"},
+            "type": "primary",
+            "behaviors": [{
+                "type": "callback",
+                "value": {"action": "run_sql_validation", "anomaly_id": anomaly.id},
+            }],
         })
     else:
         elements.append({
@@ -826,6 +862,172 @@ def submit_validation(
                 raise
             return _existing_result(winner, operator_user_id)
         return SubmissionResult("accepted", submission)
+
+
+def _json_safe_validation_value(value: Any) -> Any:
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    if hasattr(value, "as_tuple"):
+        return float(value)
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value).decode("utf-8", errors="replace")
+    return value
+
+
+def _safe_sql_result_detail(detail: dict[str, Any]) -> dict[str, Any]:
+    return {key: _json_safe_validation_value(value) for key, value in detail.items()}
+
+
+def _sql_failure_description(result: SqlValidationResult) -> str:
+    if result.reason == "no_rows":
+        return "SQL 校验未通过：查询未返回数据"
+    if result.reason == "multiple_rows":
+        return "SQL 校验未通过：查询返回多行"
+    if result.reason == "missing_field":
+        return f"SQL 校验未通过：结果缺少字段 {result.result_detail.get('field', '-')}"
+    detail = result.result_detail
+    return (
+        f"SQL 校验未通过：{detail.get('field', '-')} 实际值 "
+        f"{_json_safe_validation_value(detail.get('actual'))}，期望 "
+        f"{detail.get('operator', '-')} {detail.get('value')}"
+    )
+
+
+def submit_sql_validation(
+    session: Session,
+    settings: Settings,
+    anomaly_id: str,
+    operator_user_id: str,
+    *,
+    connection_factory=connect_to_datasource,
+    now: datetime | None = None,
+) -> SubmissionResult:
+    submitted_at = now or utcnow()
+    anomaly = session.get(AnomalyRecord, anomaly_id)
+    if anomaly is None:
+        raise ValueError("异常不存在")
+    request = session.scalar(select(AnomalyValidationRequest).where(
+        AnomalyValidationRequest.anomaly_id == anomaly_id,
+        AnomalyValidationRequest.recipient_user_id == operator_user_id,
+    ))
+    if request is None:
+        raise ValidationRecipientError("当前用户不是该异常的验证人")
+    if anomaly.validation_method_snapshot != "sql":
+        raise InvalidValidationTransition("当前异常不是 SQL 校验")
+    if anomaly.status == "resolved":
+        existing = session.scalar(select(AnomalyValidationSubmission).where(
+            AnomalyValidationSubmission.anomaly_id == anomaly_id
+        ))
+        return _existing_result(existing, operator_user_id) if existing else SubmissionResult("already_resolved", None)
+    if anomaly.status not in {"pending", "processing", "timed_out"}:
+        raise InvalidValidationTransition("当前异常状态不允许实时验证")
+
+    config = deepcopy(anomaly.validation_config_snapshot or {})
+    row_details = deepcopy(anomaly.row_details or {})
+    request_id = request.id
+    rule = session.get(Rule, anomaly.rule_id)
+    if rule is None or rule.deleted_at:
+        raise SqlValidationExecutionError("SQL 校验关联规则不存在")
+    datasource = session.get(Datasource, config.get("datasource_id"))
+    if datasource is None:
+        raise SqlValidationExecutionError("SQL 校验关联数据源不存在")
+    dataset_fields = set(config.get("dataset_fields") or [])
+    encrypted_password = datasource.password_encrypted
+    password = (
+        CredentialCipher(settings.datasource_encryption_key).decrypt(encrypted_password)
+        if encrypted_password else ""
+    )
+    session.commit()
+
+    connection = None
+    try:
+        connection = connection_factory(datasource, password)
+        execution = execute_sql_validation(
+            connection,
+            config,
+            row_details,
+            dataset_fields=dataset_fields,
+        )
+    except SqlValidationConfigurationError as exc:
+        session.add(AnomalyEvent(
+            anomaly_id=anomaly_id,
+            event_type="sql_validation_failed",
+            description="SQL 校验配置无效",
+            created_at=submitted_at,
+        ))
+        session.commit()
+        raise SqlValidationExecutionError("SQL 校验配置无效") from exc
+    except Exception as exc:
+        session.add(AnomalyEvent(
+            anomaly_id=anomaly_id,
+            event_type="sql_validation_failed",
+            description="SQL 校验执行失败，可稍后重试",
+            created_at=submitted_at,
+        ))
+        session.commit()
+        raise SqlValidationExecutionError("SQL 校验执行失败，请稍后重试") from exc
+    finally:
+        if connection is not None:
+            connection.close()
+
+    safe_detail = _safe_sql_result_detail(execution.result_detail)
+    if not execution.passed:
+        session.add(AnomalyEvent(
+            anomaly_id=anomaly_id,
+            event_type="sql_validation_failed",
+            description=_sql_failure_description(execution),
+            created_at=submitted_at,
+        ))
+        session.commit()
+        return SubmissionResult("failed", None, execution.reason, safe_detail)
+
+    with _serialize_sqlite(session, f"submission:{anomaly_id}"):
+        locked_anomaly = session.scalar(
+            select(AnomalyRecord).where(
+                AnomalyRecord.id == anomaly_id
+            ).execution_options(populate_existing=True).with_for_update()
+        )
+        existing = session.scalar(select(AnomalyValidationSubmission).where(
+            AnomalyValidationSubmission.anomaly_id == anomaly_id
+        ))
+        if existing is not None:
+            return _existing_result(existing, operator_user_id)
+        if locked_anomaly is None:
+            raise ValueError("异常不存在")
+        if locked_anomaly.status == "resolved":
+            return SubmissionResult("already_resolved", None)
+        if locked_anomaly.status not in {"pending", "processing", "timed_out"}:
+            raise InvalidValidationTransition("当前异常状态不允许实时验证")
+
+        submission = AnomalyValidationSubmission(
+            anomaly_id=anomaly_id,
+            request_id=request_id,
+            submitted_by_user_id=operator_user_id,
+            submitted_text="",
+            validator_type="sql",
+            result="passed",
+            result_detail=safe_detail,
+            submitted_at=submitted_at,
+        )
+        session.add(submission)
+        _apply_resolution(locked_anomaly, submitted_at, "validation", operator_user_id)
+        session.add(AnomalyEvent(
+            anomaly_id=anomaly_id,
+            event_type="validation_resolved",
+            description=f"处理人 {operator_user_id} 通过 SQL 校验并解决异常",
+            created_at=submitted_at,
+        ))
+        try:
+            session.commit()
+        except IntegrityError:
+            session.rollback()
+            winner = session.scalar(select(AnomalyValidationSubmission).where(
+                AnomalyValidationSubmission.anomaly_id == anomaly_id
+            ))
+            if winner is None:
+                raise
+            return _existing_result(winner, operator_user_id)
+        return SubmissionResult("accepted", submission, execution.reason, safe_detail)
 
 
 def reconcile_validation_cards(

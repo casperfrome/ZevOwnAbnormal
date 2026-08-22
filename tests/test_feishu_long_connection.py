@@ -262,6 +262,38 @@ def test_production_card_button_round_trips_official_flat_form_value_and_action_
     assert forwarded["validation_text"] == "production input"
 
 
+def test_sql_card_button_round_trips_without_a_validation_text_form():
+    """Requiring pseudo form input for the SQL-only card action must fail this test."""
+    from app.models import AnomalyRecord
+    from app.validation_service import build_validation_card
+
+    anomaly = AnomalyRecord(
+        id="anomaly-sql-9", rule_id="rule-9", rule_name="Repair rule",
+        dataset_name="Repair mart", severity="high", status="pending",
+        description="Repair must be verified", fingerprint="f" * 64,
+        active_fingerprint="f" * 64, business_key={"id": 9}, row_details={"id": 9},
+        matched_conditions=[], validation_method_snapshot="sql",
+        validation_config_snapshot={"query_template": "SELECT 1"},
+    )
+    card = build_validation_card(anomaly, "https://sentinel.example")
+    button = next(element for element in card["body"]["elements"] if element["tag"] == "button")
+    callback = button["behaviors"][0]
+    post = RecordingPost(FakeResponse(200, {
+        "toast": {"type": "warning", "content": "SQL 校验未通过"},
+        "card": VALID_CARD,
+    }))
+
+    configured_gateway(post).handle(complete_event(
+        action_name=button["name"],
+        action_value=callback["value"],
+        form_value={"unused": ""},
+    ))
+
+    forwarded = post.calls[0][1]["json"]
+    assert forwarded["action"] == "run_sql_validation"
+    assert forwarded["validation_text"] == ""
+
+
 def test_callback_uses_open_id_and_direct_form_value_when_user_id_is_unavailable():
     post = RecordingPost(FakeResponse(200, {
         "toast": {"type": "warning", "content": "已处理"},
@@ -290,6 +322,15 @@ def test_callback_forwards_an_empty_validation_text_for_the_internal_api_to_expl
 
     assert post.calls[0][1]["json"]["validation_text"] == ""
     assert response.toast.content == "验证说明长度必须为 1-1000 个字符"
+
+
+def test_callback_rejects_non_text_validation_content():
+    gateway = importlib.import_module("feishu_callback_gateway")
+
+    with pytest.raises(gateway.CallbackPayloadError):
+        gateway.normalize_card_action(complete_event(
+            form_value={"validation_text": 123},
+        ))
 
 
 def test_callback_accepts_every_successful_2xx_response():
@@ -409,8 +450,9 @@ def test_sdk_dispatcher_marshals_registered_card_callback_response():
     }
 
 
-def test_launcher_fails_before_connecting_when_callback_gateway_settings_are_missing(monkeypatch):
+def test_launcher_fails_before_connecting_when_callback_gateway_settings_are_missing(tmp_path, monkeypatch):
     launcher = importlib.import_module("飞书长连接启动")
+    monkeypatch.setattr(launcher, "ENV_FILE", tmp_path / ".missing.env", raising=False)
     monkeypatch.delenv("SENTINEL_API_BASE_URL", raising=False)
     monkeypatch.setenv("FEISHU_APP_ID", "app-id")
     monkeypatch.setenv("FEISHU_APP_SECRET", "app-secret")

@@ -47,7 +47,7 @@ def test_bootstrap_env_writes_all_runtime_settings_without_printing_secrets(tmp_
     assert values["SENTINEL_PUBLIC_BASE_URL"] == "http://localhost:8000"
     assert values["SENTINEL_API_BASE_URL"] == "http://127.0.0.1:8000"
     assert values["SENTINEL_INTERNAL_TOKEN"]
-    assert "INTERNAL_EXECUTION_TOKEN" not in values
+    assert values["INTERNAL_EXECUTION_TOKEN"] == values["SENTINEL_INTERNAL_TOKEN"]
     assert values["VALIDATION_TIMEOUT_SCAN_INTERVAL_SECONDS"] == "60"
     assert values["VALIDATION_MAINTENANCE_BATCH_SIZE"] == "50"
     assert values["FEISHU_HTTP_TIMEOUT_SECONDS"] == "10"

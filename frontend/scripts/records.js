@@ -3,21 +3,65 @@
    Features: list, detail drawer, filtering, sorting, status update, export
    ============================================================ */
 window.RecordsModule = (function () {
-  const { escapeHtml } = UI;
+  const { escapeHtml, operatorLabel } = UI;
   let state = {
-    search: '', statusFilter: 'all', severityFilter: 'all', ruleFilter: 'all',
+    search: '', statusFilter: 'all', pushStatusFilter: 'all', severityFilter: 'all', ruleFilter: 'all',
     sortKey: 'occurredAt', sortDir: 'desc', page: 1, pageSize: 10,
     selected: new Set(), requestSequence: 0, searchTimer: null, total: 0,
     criticalTotal: null, criticalCountSequence: 0, criticalCountFailed: false,
   };
 
   function renderActions(actionsEl) {
+    const canAbort = typeof Store.isSuperuser === 'function' && Store.isSuperuser();
     actionsEl.innerHTML = `
+      ${canAbort ? `<button class="btn btn-danger-ghost btn-sm" id="rec-abort-push">${Icon.pause({ size: 14 })}<span>中止推送</span></button>` : ''}
       <button class="btn btn-secondary btn-sm" id="rec-export">${Icon.download({ size: 14 })}<span>导出</span></button>
       <button class="btn btn-secondary btn-sm" id="rec-refresh">${Icon.refresh({ size: 14 })}<span>刷新</span></button>
     `;
+    actionsEl.querySelector('#rec-abort-push')?.addEventListener('click', abortPushes);
     actionsEl.querySelector('#rec-export').addEventListener('click', exportRecords);
     actionsEl.querySelector('#rec-refresh').addEventListener('click', async () => { try { await Store.refresh(); UI.toast({ type: 'info', title: '已刷新' }); renderList(); renderStats(); renderTabs(); } catch (error) { UI.toast({ type: 'error', title: '刷新失败', desc: error.message }); } });
+  }
+
+  async function abortPushes() {
+    const button = document.getElementById('rec-abort-push');
+    if (!button || button.disabled) return;
+    const confirmed = await UI.confirm({
+      title: '中止所有待推送异常？',
+      desc: '将清除 Kafka 与 DolphinScheduler 中尚未发送的积压；不会删除异常记录，已发送消息无法撤回。',
+      confirmText: '中止推送',
+      danger: true,
+    });
+    if (!confirmed) return;
+    const original = button.innerHTML;
+    button.disabled = true;
+    button.innerHTML = '<span class="btn-spinner"></span><span>正在中止…</span>';
+    try {
+      const result = await Store.abortAnomalyPushes();
+      UI.toast({
+        type: 'success',
+        title: '推送积压已中止',
+        desc: `${result.aborted_jobs} 条任务 · ${result.deleted_ds_instances} 个调度实例 · ${result.cleared_kafka_partitions} 个 Kafka 分区`,
+      });
+      await Store.refresh();
+      renderList();
+      renderStats();
+      renderTabs();
+    } catch (error) {
+      const stages = (error.payload?.errors || []).map(item => item.stage).join('、');
+      UI.toast({
+        type: 'error',
+        title: '中止推送未完全完成',
+        desc: stages ? `未完成阶段：${stages}，可重试` : error.message,
+      });
+    } finally {
+      button.disabled = false;
+      button.innerHTML = original;
+    }
+  }
+
+  function deliveryStatusLabel(status) {
+    return status === 'aborted' ? '已中止' : (status || '—');
   }
 
   function render(contentEl, opts) {
@@ -71,6 +115,7 @@ window.RecordsModule = (function () {
     const processing = counts.processingRecords;
     const timedOut = counts.timedOutRecords;
     const resolved = counts.resolvedToday;
+    const inTransit = counts.pushInTransitAnomalies ?? 0;
     const hasCriticalCountApi = typeof Store.peekRecordsPage === 'function';
     const critical = hasCriticalCountApi ? state.criticalTotal : counts.criticalAnomalies;
     const criticalKnown = Number.isFinite(critical);
@@ -79,7 +124,8 @@ window.RecordsModule = (function () {
       ? `筛选严重异常，共 ${critical} 条`
       : (state.criticalCountFailed ? '筛选严重异常，数量暂不可用' : '筛选严重异常，正在统计数量');
 
-    statsEl.classList.add('five-up');
+    statsEl.classList.remove('five-up');
+    statsEl.classList.add('six-up');
     statsEl.innerHTML = `
       <button type="button" class="stat-card stat-filter animate-rise" data-filter-status="pending" aria-label="筛选未处理异常，共 ${pending} 条" aria-pressed="false" style="animation-delay:60ms;${pending > 0 ? 'border-left:3px solid var(--color-accent);' : ''}">
         <div class="stat-card-header"><span class="stat-card-label">未处理</span><div class="stat-card-icon" style="background:var(--color-accent-soft);color:var(--color-accent);">${Icon.alert({ size: 16 })}</div></div>
@@ -106,12 +152,19 @@ window.RecordsModule = (function () {
         <div class="stat-card-value">${criticalLabel}</div>
         <div class="stat-card-delta ${criticalKnown && critical > 0 ? 'down' : 'neutral'}">${criticalKnown ? (critical > 0 ? '需紧急响应' : '无严重') : (state.criticalCountFailed ? '统计暂不可用' : '正在统计')}</div>
       </button>
+      <button type="button" class="stat-card stat-filter animate-rise" data-filter-push-status="in_transit" aria-label="筛选推送途中异常，共 ${inTransit} 条" aria-pressed="false" style="animation-delay:330ms;${inTransit > 0 ? 'border-left:3px solid var(--color-warning);' : ''}">
+        <div class="stat-card-header"><span class="stat-card-label">推送途中</span><div class="stat-card-icon" style="background:var(--color-warning-soft);color:var(--color-warning);">${Icon.send({ size: 16 })}</div></div>
+        <div class="stat-card-value">${inTransit}</div>
+        <div class="stat-card-delta ${inTransit > 0 ? 'down' : 'neutral'}">${inTransit > 0 ? '等待飞书送达' : '全部送达'}</div>
+      </button>
     `;
 
     document.querySelectorAll('#rec-stats .stat-filter').forEach(card => {
       card.addEventListener('click', () => {
-        state.statusFilter = card.dataset.filterStatus || 'all';
-        state.severityFilter = card.dataset.filterSeverity || 'all';
+        const isPushFilter = !!card.dataset.filterPushStatus;
+        state.pushStatusFilter = isPushFilter ? card.dataset.filterPushStatus : 'all';
+        state.statusFilter = isPushFilter ? 'all' : (card.dataset.filterStatus || 'all');
+        state.severityFilter = isPushFilter ? 'all' : (card.dataset.filterSeverity || 'all');
         state.page = 1;
         state.selected.clear();
         syncFilterUi();
@@ -166,9 +219,12 @@ window.RecordsModule = (function () {
     });
     document.querySelectorAll('#rec-stats .stat-filter').forEach(card => {
       const isSeverity = !!card.dataset.filterSeverity;
-      const active = isSeverity
-        ? state.statusFilter === 'all' && state.severityFilter === card.dataset.filterSeverity
-        : state.severityFilter === 'all' && state.statusFilter === card.dataset.filterStatus;
+      const isPush = !!card.dataset.filterPushStatus;
+      const active = isPush
+        ? state.pushStatusFilter === card.dataset.filterPushStatus
+        : state.pushStatusFilter === 'all' && (isSeverity
+          ? state.statusFilter === 'all' && state.severityFilter === card.dataset.filterSeverity
+          : state.severityFilter === 'all' && state.statusFilter === card.dataset.filterStatus);
       card.classList.toggle('active', active);
       card.setAttribute('aria-pressed', String(active));
     });
@@ -194,6 +250,7 @@ window.RecordsModule = (function () {
     tabs.forEach((tab, index) => {
       tab.onclick = () => {
         state.statusFilter = tab.dataset.status;
+        state.pushStatusFilter = 'all';
         state.page = 1;
         state.selected.clear();
         syncFilterUi();
@@ -290,6 +347,7 @@ window.RecordsModule = (function () {
           page: state.page,
           pageSize: state.pageSize,
           status: state.statusFilter === 'all' ? null : state.statusFilter,
+          pushStatus: state.pushStatusFilter === 'all' ? null : state.pushStatusFilter,
           severity: state.severityFilter === 'all' ? null : state.severityFilter,
           ruleId: state.ruleFilter === 'all' ? null : state.ruleFilter,
           search: state.search,
@@ -331,8 +389,12 @@ window.RecordsModule = (function () {
       tableEl.innerHTML = UI.emptyState({
         icon: Icon.inbox({ size: 24 }),
         iconCls: state.statusFilter === 'resolved' ? 'primary' : 'muted',
-        title: state.search || state.severityFilter !== 'all' || state.ruleFilter !== 'all' ? '没有匹配的记录' : (state.statusFilter === 'resolved' ? '尚无已解决记录' : '暂无异常记录'),
-        desc: state.search ? '尝试调整搜索条件' : (state.statusFilter === 'all' ? '系统运行平稳，未检测到数据异常' : '当前筛选条件下没有记录'),
+        title: state.pushStatusFilter === 'in_transit'
+          ? '当前没有推送途中的异常'
+          : (state.search || state.severityFilter !== 'all' || state.ruleFilter !== 'all' ? '没有匹配的记录' : (state.statusFilter === 'resolved' ? '尚无已解决记录' : '暂无异常记录')),
+        desc: state.pushStatusFilter === 'in_transit'
+          ? '当前筛选条件下的异常均已完成或中止飞书投递'
+          : (state.search ? '尝试调整搜索条件' : (state.statusFilter === 'all' ? '系统运行平稳，未检测到数据异常' : '当前筛选条件下没有记录')),
       });
       return;
     }
@@ -377,7 +439,7 @@ window.RecordsModule = (function () {
                 </td>
                 <td>
                   <div class="cell-mono" style="color:var(--color-danger);font-weight:600;">${escapeHtml(r.field)} = ${escapeHtml(formatValue(r.value))}</div>
-                  <div class="cell-muted">预期：${escapeHtml(r.expected || '—')}</div>
+                  <div class="cell-muted">预期：${escapeHtml(operatorLabel(r.expected))}</div>
                 </td>
                 <td>${UI.recordStatusBadge(r.status)}</td>
                 <td class="cell-muted">${escapeHtml(r.occurredAt)}</td>
@@ -405,7 +467,7 @@ window.RecordsModule = (function () {
             <span class="record-mobile-value">
               <span>${escapeHtml(r.field)}</span>
               <strong>${escapeHtml(formatValue(r.value))}</strong>
-              <small>预期 ${escapeHtml(r.expected || '—')}</small>
+              <small>预期 ${escapeHtml(operatorLabel(r.expected))}</small>
             </span>
             <span class="record-mobile-foot">
               <span>${Icon.clock({ size: 13 })}${escapeHtml(r.occurredAt)}</span>
@@ -575,6 +637,8 @@ window.RecordsModule = (function () {
               <div class="detail-value">${r.description ? escapeHtml(r.description) : '<span class="text-muted">—</span>'}</div>
               <div class="detail-label">校验截止时间</div>
               <div class="detail-value text-mono">${escapeHtml(r.validationDeadline || '—')}</div>
+              <div class="detail-label">校验方式</div>
+              <div class="detail-value">${r.validationMethod === 'sql' ? 'SQL 校验' : r.validationMethod === 'pseudo' ? '伪校验' : '—'}</div>
               <div class="detail-label">超时时间</div>
               <div class="detail-value text-mono">${escapeHtml(r.timedOutAt || '—')}</div>
               <div class="detail-label">解决来源</div>
@@ -597,7 +661,7 @@ window.RecordsModule = (function () {
                   <thead><tr><th>验证人 user_id</th><th>状态</th><th>尝试</th><th>送达时间</th><th>message_id / 错误</th></tr></thead>
                   <tbody>${r.validationRequests.map(item => `<tr>
                     <td class="text-mono">${escapeHtml(item.recipientUserId)}</td>
-                    <td>${escapeHtml(item.deliveryStatus)}</td>
+                    <td>${escapeHtml(deliveryStatusLabel(item.deliveryStatus))}</td>
                     <td>${item.deliveryAttempts}</td>
                     <td class="text-mono">${escapeHtml(item.deliveredAt || '—')}</td>
                     <td>${escapeHtml(item.messageId || item.lastError || '—')}</td>
@@ -612,8 +676,17 @@ window.RecordsModule = (function () {
                   <div class="detail-label">提交时间</div><div class="detail-value text-mono">${escapeHtml(r.validationSubmission.submittedAt)}</div>
                   <div class="detail-label">验证类型 / 结果</div><div class="detail-value text-mono">${escapeHtml(r.validationSubmission.validatorType)} / ${escapeHtml(r.validationSubmission.result)}</div>
                 </div>
-                <div class="detail-label" style="margin-top:var(--space-3);">提交内容</div>
-                <pre class="validation-submission-text">${escapeHtml(r.validationSubmission.submittedText)}</pre>
+                ${r.validationSubmission.validatorType === 'sql' && r.validationSubmission.resultDetail ? `
+                  <div class="detail-label" style="margin-top:var(--space-3);">SQL 校验结果</div>
+                  <div class="detail-grid sql-validation-result">
+                    <div class="detail-label">结果字段</div><div class="detail-value text-mono">${escapeHtml(r.validationSubmission.resultDetail.field || '—')}</div>
+                    <div class="detail-label">实际值</div><div class="detail-value text-mono">${escapeHtml(r.validationSubmission.resultDetail.actual ?? 'NULL')}</div>
+                    <div class="detail-label">True 条件</div><div class="detail-value text-mono">${escapeHtml(`${operatorLabel(r.validationSubmission.resultDetail.operator)} ${r.validationSubmission.resultDetail.value ?? ''}${r.validationSubmission.resultDetail.upperValue !== null && r.validationSubmission.resultDetail.upperValue !== undefined ? `, ${r.validationSubmission.resultDetail.upperValue}` : ''}`.trim())}</div>
+                  </div>
+                ` : `
+                  <div class="detail-label" style="margin-top:var(--space-3);">提交内容</div>
+                  <pre class="validation-submission-text">${escapeHtml(r.validationSubmission.submittedText)}</pre>
+                `}
               </div>` : ''}
           </div>
         </div>
@@ -631,7 +704,7 @@ window.RecordsModule = (function () {
               <div class="diff-arrow">${Icon.arrowRight({ size: 14 })}</div>
               <div>
                 <div class="cell-muted" style="font-family:var(--font-body);font-size:11px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:4px;">实际值 / 预期值</div>
-                <div><span class="diff-value-actual">${escapeHtml(formatValue(r.value))}</span> <span class="cell-muted" style="margin:0 6px;">|</span> <span class="diff-value-expected">${escapeHtml(r.expected || '—')}</span></div>
+                <div><span class="diff-value-actual">${escapeHtml(formatValue(r.value))}</span> <span class="cell-muted" style="margin:0 6px;">|</span> <span class="diff-value-expected">${escapeHtml(operatorLabel(r.expected))}</span></div>
               </div>
             </div>
             <div style="margin-top: var(--space-4);">
@@ -669,7 +742,7 @@ window.RecordsModule = (function () {
                   <tbody>${r.deliveries.map(item => `<tr>
                     <td>${escapeHtml(item.receive_id_type)}</td>
                     <td class="text-mono">${escapeHtml(item.recipient)}</td>
-                    <td>${escapeHtml(item.status)}</td>
+                    <td>${escapeHtml(deliveryStatusLabel(item.status))}</td>
                     <td>${item.attempts || 0}</td>
                     <td>${escapeHtml(item.message_id || item.last_error || '—')}</td>
                   </tr>`).join('')}</tbody>
@@ -736,6 +809,7 @@ window.RecordsModule = (function () {
     const serverBacked = typeof Store.peekRecordsPage === 'function';
     const filters = Object.freeze({
       status: state.statusFilter === 'all' ? null : state.statusFilter,
+      pushStatus: state.pushStatusFilter === 'all' ? null : state.pushStatusFilter,
       severity: state.severityFilter === 'all' ? null : state.severityFilter,
       ruleId: state.ruleFilter === 'all' ? null : state.ruleFilter,
       search: state.search,

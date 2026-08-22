@@ -9,7 +9,7 @@ import pytest
 from app.config import Settings
 from app.database import Base, make_session_factory
 from app.main import create_app
-from app.models import AnomalyRecord, AnomalyValidationRequest
+from app.models import AnomalyPushJob, AnomalyRecord, AnomalyValidationRequest
 
 
 def test_maintenance_cycle_uses_a_fresh_closed_session_and_runs_domain_operations(monkeypatch):
@@ -36,8 +36,8 @@ def test_maintenance_cycle_uses_a_fresh_closed_session_and_runs_domain_operation
         lambda session, **kwargs: events.append(("expire", session, kwargs)),
     )
     monkeypatch.setattr(
-        "app.main.deliver_validation_requests",
-        lambda session, settings, **kwargs: events.append(("deliver", session, kwargs)),
+        "app.main.queue_due_validation_push_jobs",
+        lambda session, **kwargs: events.append(("queue", session, kwargs)),
     )
     monkeypatch.setattr(
         "app.main.reconcile_validation_cards",
@@ -52,17 +52,17 @@ def test_maintenance_cycle_uses_a_fresh_closed_session_and_runs_domain_operation
     assert events == [
         ("open", sessions[0]),
         ("expire", sessions[0], {"limit": 50, "should_stop": None}),
-        ("deliver", sessions[0], {"limit": 50, "should_stop": None}),
+        ("queue", sessions[0], {"limit": 50}),
         ("reconcile", sessions[0], {"limit": 50, "should_stop": None}), ("close", sessions[0]),
         ("open", sessions[1]),
         ("expire", sessions[1], {"limit": 50, "should_stop": None}),
-        ("deliver", sessions[1], {"limit": 50, "should_stop": None}),
+        ("queue", sessions[1], {"limit": 50}),
         ("reconcile", sessions[1], {"limit": 50, "should_stop": None}), ("close", sessions[1]),
     ]
 
 
-def test_maintenance_cycle_recovers_a_request_committed_before_the_process_crashed(tmp_path, monkeypatch):
-    """A restart must deliver a durable pending request even when execution never reached send."""
+def test_maintenance_cycle_recovers_a_request_into_kafka_pipeline_without_direct_send(tmp_path, monkeypatch):
+    """A restart must queue a durable request without bypassing Kafka and DolphinScheduler."""
     from app.main import run_validation_maintenance_cycle
 
     database_url = f"sqlite+pysqlite:///{tmp_path / 'maintenance-recovery.sqlite'}"
@@ -83,23 +83,6 @@ def test_maintenance_cycle_recovers_a_request_committed_before_the_process_crash
         session.commit()
         request_id = request.id
 
-    sent = []
-
-    class RestartClient:
-        def __init__(self, *_args, **_kwargs):
-            pass
-
-        def send_interactive(self, receive_id_type, recipient, card, *, idempotency_key=None):
-            sent.append((receive_id_type, recipient, card["schema"], idempotency_key))
-            return "om_recovered"
-
-        def patch_interactive(self, *_args, **_kwargs):
-            raise AssertionError("no terminal card should need reconciliation")
-
-        def close(self):
-            pass
-
-    monkeypatch.setattr("app.validation_service.FeishuClient", RestartClient)
     settings = Settings(
         feishu_app_id="cli", feishu_app_secret="secret", validation_maintenance_batch_size=50,
     )
@@ -107,9 +90,10 @@ def test_maintenance_cycle_recovers_a_request_committed_before_the_process_crash
 
     with factory() as session:
         recovered = session.get(AnomalyValidationRequest, request_id)
-        assert sent == [("user_id", "user-1", "2.0", request_id)]
-        assert recovered.delivery_status == "sent"
-        assert recovered.message_id == "om_recovered"
+        job = session.query(AnomalyPushJob).filter_by(delivery_id=request_id).one()
+        assert recovered.delivery_status == "pending"
+        assert recovered.message_id is None
+        assert job.status == "pending_publish"
     engine.dispose()
 
 
@@ -117,8 +101,10 @@ def test_testing_app_disables_validation_maintenance_task():
     app = create_app(testing=True)
 
     assert app.state.validation_maintenance_task is None
+    assert app.state.push_pipeline_task is None
     with TestClient(app):
         assert app.state.validation_maintenance_task is None
+        assert app.state.push_pipeline_task is None
 
 
 def test_maintenance_loop_waits_for_an_inflight_cycle_before_cancelling(monkeypatch):
@@ -174,13 +160,16 @@ def test_maintenance_loop_preserves_cancellation_if_inflight_cycle_fails(monkeyp
 
 
 def test_validation_runtime_settings_have_safe_local_defaults():
-    settings = Settings()
+    settings = Settings(_env_file=None)
 
     assert settings.sentinel_public_base_url == "http://localhost:8000"
     assert settings.sentinel_api_base_url == "http://127.0.0.1:8000"
     assert settings.validation_timeout_scan_interval_seconds == 60
     assert settings.validation_maintenance_batch_size == 50
     assert settings.feishu_http_timeout_seconds == 10
+    assert settings.kafka_bootstrap_servers == "localhost:9092"
+    assert settings.kafka_anomaly_push_topic == "sentinel-anomaly-push"
+    assert settings.kafka_anomaly_push_group == "sentinel-anomaly-push-dispatcher"
 
 
 def test_testing_app_uses_fixed_internal_token_instead_of_runtime_environment(monkeypatch):

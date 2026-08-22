@@ -42,3 +42,6 @@ Thumbs.db
 logs/
 tmp/
 .worktrees/
+
+# Standalone local StarRocks temperature manager (intentionally untracked)
+/intransit-temperature-admin/

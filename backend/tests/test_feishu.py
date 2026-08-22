@@ -25,6 +25,21 @@ def test_feishu_obtains_token_and_sends_message():
     assert requests[1].url.params["receive_id_type"] == "open_id"
 
 
+def test_feishu_text_uses_stable_idempotency_key():
+    requests = []
+
+    def handler(request: httpx.Request):
+        requests.append(request)
+        if request.url.path.endswith("tenant_access_token/internal/"):
+            return httpx.Response(200, json={"code": 0, "tenant_access_token": "token", "expire": 7200})
+        return httpx.Response(200, json={"code": 0, "data": {"message_id": "om_123"}})
+
+    client = FeishuClient("cli_app", "secret", transport=httpx.MockTransport(handler))
+    client.send_text("open_id", "ou_user", "检测到异常", idempotency_key="delivery-1")
+
+    assert json.loads(requests[1].content)["uuid"] == "delivery-1"
+
+
 def test_feishu_sends_and_patches_interactive_cards_with_shared_token():
     """Using the wrong message type, content encoding, or patch endpoint must fail."""
     requests = []
