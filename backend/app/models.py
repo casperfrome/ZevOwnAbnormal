@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -75,7 +75,12 @@ class Rule(Base, TimestampMixin):
     schedule: Mapped[dict] = mapped_column(JSON, nullable=False)
     notification_targets: Mapped[list[dict]] = mapped_column(JSON, nullable=False)
     validation_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    validation_targets: Mapped[list[dict]] = mapped_column(JSON, default=list, nullable=False)
+    validation_targets: Mapped[list[dict]] = mapped_column(
+        JSON,
+        default=list,
+        nullable=False,
+        server_default=text("('[]')"),
+    )
     validation_timeout_minutes: Mapped[int] = mapped_column(Integer, default=1440, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     sync_status: Mapped[str] = mapped_column(String(30), default="pending", nullable=False)

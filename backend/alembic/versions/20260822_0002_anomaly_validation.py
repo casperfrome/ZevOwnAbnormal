@@ -18,13 +18,22 @@ def _columns(bind, table_name):
     return {column["name"] for column in sa.inspect(bind).get_columns(table_name)}
 
 
+def _validation_targets_column():
+    return sa.Column(
+        "validation_targets",
+        sa.JSON(),
+        nullable=False,
+        server_default=sa.text("('[]')"),
+    )
+
+
 def upgrade():
     bind = op.get_bind()
     rule_columns = _columns(bind, "rules")
     if "validation_enabled" not in rule_columns:
         op.add_column("rules", sa.Column("validation_enabled", sa.Boolean(), nullable=False, server_default=sa.text("0")))
     if "validation_targets" not in rule_columns:
-        op.add_column("rules", sa.Column("validation_targets", sa.JSON(), nullable=False, server_default=sa.text("'[]'")))
+        op.add_column("rules", _validation_targets_column())
     if "validation_timeout_minutes" not in rule_columns:
         op.add_column("rules", sa.Column("validation_timeout_minutes", sa.Integer(), nullable=False, server_default=sa.text("1440")))
 
