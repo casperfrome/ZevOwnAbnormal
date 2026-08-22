@@ -83,6 +83,7 @@ def create_app(testing: bool = False) -> FastAPI:
         database_url="sqlite+pysqlite:///:memory:",
         datasource_encryption_key="y4R9V3fBMN_WBq6j7u5oA-rOQ1z3B1l1J1dQxQ8_s8Y=",
         session_secret=TEST_SESSION_SECRET,
+        internal_execution_token="change-this-internal-token",
         auto_login=True,
     ) if testing else get_settings()
     engine, session_factory = make_session_factory(settings.database_url, testing=testing)

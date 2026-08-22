@@ -183,6 +183,14 @@ def test_validation_runtime_settings_have_safe_local_defaults():
     assert settings.feishu_http_timeout_seconds == 10
 
 
+def test_testing_app_uses_fixed_internal_token_instead_of_runtime_environment(monkeypatch):
+    monkeypatch.setenv("SENTINEL_INTERNAL_TOKEN", "production-runtime-token")
+
+    app = create_app(testing=True)
+
+    assert app.state.settings.internal_execution_token == "change-this-internal-token"
+
+
 def test_settings_accept_the_sentinel_internal_token_name_from_env_file(tmp_path):
     env_file = tmp_path / ".env"
     env_file.write_text("SENTINEL_INTERNAL_TOKEN=sentinel-token-name\n", encoding="utf-8")
