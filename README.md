@@ -39,6 +39,14 @@ Pop-Location
 & .\backend\start.ps1
 ```
 
+如需接收飞书卡片验证回调，在另一个终端设置以下环境变量后启动长连接：
+`FEISHU_APP_ID`、`FEISHU_APP_SECRET`、`SENTINEL_API_BASE_URL` 和
+`INTERNAL_EXECUTION_TOKEN`）：
+
+```powershell
+& 'D:\PythonVEnv\FirstVEnv\Scripts\python.exe' .\飞书长连接启动\飞书长连接启动.py
+```
+
 本地默认 `AUTO_LOGIN=true`，打开 <http://localhost:8000> 后自动登录超级管理员。默认账号为 `admin`；密码由 `.env` 中的 `SUPERADMIN_PASSWORD` 控制。
 
 FastAPI 启动时会幂等核对全部启用规则。也可以单独执行：
