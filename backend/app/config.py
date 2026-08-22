@@ -2,6 +2,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from cryptography.fernet import Fernet
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -21,6 +22,8 @@ class Settings(BaseSettings):
     feishu_app_id: str = ""
     feishu_app_secret: str = ""
     sentinel_public_base_url: str = "http://localhost:8000"
+    sentinel_api_base_url: str = "http://127.0.0.1:8000"
+    validation_timeout_scan_interval_seconds: int = Field(default=60, ge=1)
     dolphinscheduler_url: str = "http://localhost:12345/dolphinscheduler"
     dolphinscheduler_username: str = "admin"
     dolphinscheduler_password: str = "dolphinscheduler123"

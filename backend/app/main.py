@@ -1,4 +1,7 @@
+import asyncio
 from contextlib import asynccontextmanager
+from contextlib import suppress
+import logging
 from pathlib import Path
 
 import bcrypt
@@ -7,15 +10,39 @@ from fastapi import FastAPI, Header, HTTPException, Response
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
 
-from .api import router
+from .api import internal_router, router
 from .config import Settings, get_settings
 from .database import Base, make_session_factory
 from .models import User
 from .scheduler_service import reconcile_enabled_rules
+from .validation_service import expire_due_anomalies, reconcile_validation_cards
 
 
 SESSION_COOKIE = "sentinel_session"
 TEST_SESSION_SECRET = "test-session-secret-that-is-long-enough"
+logger = logging.getLogger(__name__)
+
+
+def run_validation_maintenance_cycle(session_factory, settings: Settings) -> None:
+    with session_factory() as session:
+        expire_due_anomalies(session)
+        reconcile_validation_cards(session, settings)
+
+
+async def validation_maintenance_loop(session_factory, settings: Settings) -> None:
+    while True:
+        cycle = asyncio.create_task(asyncio.to_thread(run_validation_maintenance_cycle, session_factory, settings))
+        try:
+            await asyncio.shield(cycle)
+        except asyncio.CancelledError as cancelled:
+            try:
+                await cycle
+            except Exception:
+                logger.exception("异常验证超时维护周期在关闭期间执行失败")
+            raise cancelled
+        except Exception:
+            logger.exception("异常验证超时维护周期执行失败")
+        await asyncio.sleep(settings.validation_timeout_scan_interval_seconds)
 
 
 def create_app(testing: bool = False) -> FastAPI:
@@ -27,7 +54,7 @@ def create_app(testing: bool = False) -> FastAPI:
     engine, session_factory = make_session_factory(settings.database_url, testing=testing)
 
     @asynccontextmanager
-    async def lifespan(_: FastAPI):
+    async def lifespan(app_instance: FastAPI):
         Base.metadata.create_all(engine)
         with session_factory() as session:
             user = session.scalar(select(User).where(User.username == settings.superadmin_username))
@@ -42,13 +69,28 @@ def create_app(testing: bool = False) -> FastAPI:
                 session.commit()
             if not testing and settings.reconcile_on_startup:
                 reconcile_enabled_rules(session, settings)
-        yield
-        engine.dispose()
+        maintenance_task = None
+        if not testing:
+            maintenance_task = asyncio.create_task(
+                validation_maintenance_loop(session_factory, settings),
+                name="validation-maintenance",
+            )
+        app_instance.state.validation_maintenance_task = maintenance_task
+        try:
+            yield
+        finally:
+            if maintenance_task is not None:
+                maintenance_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await maintenance_task
+            engine.dispose()
 
     app = FastAPI(title="Sentinel 数据异常监控平台", version="0.1.0", lifespan=lifespan)
     app.state.settings = settings
     app.state.session_factory = session_factory
+    app.state.validation_maintenance_task = None
     app.include_router(router)
+    app.include_router(internal_router)
 
     @app.get("/api/v1/health")
     def health() -> dict[str, str]:

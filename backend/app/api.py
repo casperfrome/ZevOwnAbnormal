@@ -2,7 +2,7 @@ import csv
 import io
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -10,7 +10,18 @@ from sqlalchemy.orm import Session
 from . import feishu as feishu_gateway
 from .config import Settings
 from .execution_service import RuleExecutionConflict, execute_rule
-from .models import AnomalyEvent, AnomalyRecord, Dataset, Datasource, NotificationDelivery, Rule, RuleRun, utcnow
+from .models import (
+    AnomalyEvent,
+    AnomalyRecord,
+    AnomalyValidationRequest,
+    AnomalyValidationSubmission,
+    Dataset,
+    Datasource,
+    NotificationDelivery,
+    Rule,
+    RuleRun,
+    utcnow,
+)
 from .query_service import connect_to_datasource, execute_readonly_query
 from .schemas import (
     AnomalyStatusUpdate,
@@ -19,15 +30,25 @@ from .schemas import (
     DatasourceUpdate,
     DatasetCreate,
     DatasetUpdate,
+    FeishuCardActionCallback,
     FeishuMessageTestRequest,
     RuleCreate,
 )
 from .security import CredentialCipher
 from .scheduler_service import sync_rule_record
 from .sql_guard import SqlValidationError, validate_readonly_sql
+from .validation_service import (
+    InvalidValidationTransition,
+    ValidationRecipientError,
+    ValidationTextError,
+    build_validation_card,
+    submit_validation,
+    transition_anomaly,
+)
 
 
 router = APIRouter(prefix="/api/v1")
+internal_router = APIRouter(prefix="/api/internal")
 FEISHU_TEST_MESSAGE = "【Sentinel 测试消息】飞书消息发送测试成功。"
 
 
@@ -61,6 +82,62 @@ def test_feishu_message(
     except (feishu_gateway.FeishuError, httpx.HTTPError) as exc:
         raise HTTPException(502, str(exc)) from exc
     return {"ok": True, "message_id": message_id}
+
+
+def _card_action_result(toast_type: str, content: str, anomaly: AnomalyRecord, settings: Settings) -> dict:
+    return {
+        "toast": {"type": toast_type, "content": content},
+        "card": build_validation_card(anomaly, settings.sentinel_public_base_url),
+    }
+
+
+@internal_router.post("/feishu/card-actions")
+def feishu_card_action(
+    payload: FeishuCardActionCallback,
+    x_internal_token: str = Header(default=""),
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_app_settings),
+):
+    if x_internal_token != settings.internal_execution_token:
+        raise HTTPException(401, "内部令牌无效")
+    if payload.action != "submit_validation":
+        raise HTTPException(400, "不支持的飞书卡片操作")
+
+    anomaly = session.get(AnomalyRecord, payload.anomaly_id)
+    if anomaly is None:
+        raise HTTPException(404, "异常记录不存在")
+    request = session.scalar(select(AnomalyValidationRequest).where(
+        AnomalyValidationRequest.anomaly_id == anomaly.id,
+        AnomalyValidationRequest.message_id == payload.message_id,
+    ))
+    if request is None:
+        raise HTTPException(404, "飞书消息不存在")
+    if request.recipient_user_id != payload.operator_user_id:
+        raise HTTPException(403, "当前用户无权提交该异常验证")
+
+    try:
+        result = submit_validation(
+            session,
+            anomaly.id,
+            payload.operator_user_id,
+            payload.validation_text,
+        )
+    except ValidationTextError as exc:
+        return _card_action_result("error", str(exc), anomaly, settings)
+    except ValidationRecipientError as exc:
+        raise HTTPException(403, "当前用户无权提交该异常验证") from exc
+    except InvalidValidationTransition:
+        session.rollback()
+        return _card_action_result("error", "当前异常状态不允许实时验证", anomaly, settings)
+    except Exception as exc:
+        session.rollback()
+        raise HTTPException(500, "处理飞书回调失败") from exc
+
+    if result.outcome == "accepted":
+        return _card_action_result("success", "验证已提交，异常已解决", anomaly, settings)
+    if result.outcome == "duplicate":
+        return _card_action_result("warning", "该验证已提交，无需重复操作", anomaly, settings)
+    return _card_action_result("warning", "该异常已由其他验证人解决", anomaly, settings)
 
 
 def datasource_dict(item: Datasource) -> dict:
@@ -520,38 +597,95 @@ def get_anomaly(anomaly_id: str, session: Session = Depends(get_session)):
         {"receive_id_type": d.receive_id_type, "recipient": d.recipient, "status": d.status, "attempts": d.attempts, "message_id": d.message_id, "last_error": d.last_error}
         for d in session.scalars(select(NotificationDelivery).where(NotificationDelivery.anomaly_id == item.id))
     ]
+    body["validation_requests"] = [
+        {
+            "recipient_user_id": request.recipient_user_id,
+            "delivery_status": request.delivery_status,
+            "delivery_attempts": request.delivery_attempts,
+            "message_id": request.message_id,
+            "last_error": request.last_error,
+            "delivered_at": request.delivered_at,
+        }
+        for request in session.scalars(
+            select(AnomalyValidationRequest).where(AnomalyValidationRequest.anomaly_id == item.id)
+        )
+    ]
+    submission = session.scalar(
+        select(AnomalyValidationSubmission).where(AnomalyValidationSubmission.anomaly_id == item.id)
+    )
+    body["validation_submission"] = None if submission is None else {
+        "submitted_by_user_id": submission.submitted_by_user_id,
+        "submitted_text": submission.submitted_text,
+        "validator_type": submission.validator_type,
+        "result": submission.result,
+        "submitted_at": submission.submitted_at,
+    }
     return body
 
 
-def _set_anomaly_status(item: AnomalyRecord, payload: AnomalyStatusUpdate, session: Session):
-    item.status = payload.status
+def _set_anomaly_status(
+    item: AnomalyRecord,
+    payload: AnomalyStatusUpdate,
+    session: Session,
+    settings: Settings,
+) -> bool:
+    resolver = payload.assignee.strip() if payload.assignee and payload.assignee.strip() else settings.superadmin_username
+    changed = transition_anomaly(
+        session,
+        item,
+        payload.status,
+        source="manual" if payload.status == "resolved" else None,
+        user_id=resolver if payload.status == "resolved" else None,
+    )
     if payload.assignee is not None:
-        item.assignee = payload.assignee
-    if payload.status == "resolved":
-        item.resolved_at = utcnow()
-        item.active_fingerprint = None
-    else:
-        item.resolved_at = None
-    session.add(AnomalyEvent(anomaly_id=item.id, event_type="status_changed", description=f"状态更新为 {payload.status}"))
+        item.assignee = payload.assignee.strip() or None
+    if changed:
+        session.add(AnomalyEvent(
+            anomaly_id=item.id,
+            event_type="status_changed",
+            description=f"状态更新为 {payload.status}",
+        ))
+    return changed
 
 
 @router.patch("/anomalies/{anomaly_id}/status")
-def update_anomaly_status(anomaly_id: str, payload: AnomalyStatusUpdate, session: Session = Depends(get_session)):
+def update_anomaly_status(
+    anomaly_id: str,
+    payload: AnomalyStatusUpdate,
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_app_settings),
+):
     item = session.get(AnomalyRecord, anomaly_id)
     if not item:
         raise HTTPException(404, "异常记录不存在")
-    _set_anomaly_status(item, payload, session)
+    try:
+        _set_anomaly_status(item, payload, session, settings)
+    except InvalidValidationTransition as exc:
+        session.rollback()
+        raise HTTPException(409, str(exc)) from exc
     session.commit()
     return anomaly_dict(item)
 
 
 @router.post("/anomalies/bulk-status")
-def bulk_anomaly_status(payload: BulkAnomalyStatusUpdate, session: Session = Depends(get_session)):
+def bulk_anomaly_status(
+    payload: BulkAnomalyStatusUpdate,
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_app_settings),
+):
     items = list(session.scalars(select(AnomalyRecord).where(AnomalyRecord.id.in_(payload.ids))))
-    for item in items:
-        _set_anomaly_status(item, payload, session)
+    items_by_id = {item.id: item for item in items}
+    missing_ids = list(dict.fromkeys(item_id for item_id in payload.ids if item_id not in items_by_id))
+    if missing_ids:
+        raise HTTPException(404, f"异常记录不存在: {', '.join(missing_ids)}")
+    try:
+        for item_id in dict.fromkeys(payload.ids):
+            _set_anomaly_status(items_by_id[item_id], payload, session, settings)
+    except InvalidValidationTransition as exc:
+        session.rollback()
+        raise HTTPException(409, str(exc)) from exc
     session.commit()
-    return {"updated": len(items)}
+    return {"updated": len(items_by_id)}
 
 
 @router.get("/overview")
@@ -564,6 +698,7 @@ def overview(session: Session = Depends(get_session)):
         "stats": {
             "pending_records": sum(a.status == "pending" for a in anomalies),
             "processing_records": sum(a.status == "processing" for a in anomalies),
+            "timed_out_records": sum(a.status == "timed_out" for a in anomalies),
             "resolved_records": sum(a.status == "resolved" for a in anomalies),
             "critical_anomalies": sum(a.severity == "critical" and a.status != "resolved" for a in anomalies),
             "active_rules": sum(r.enabled for r in rules), "total_rules": len(rules),
