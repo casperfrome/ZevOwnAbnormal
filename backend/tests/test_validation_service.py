@@ -829,6 +829,79 @@ def test_named_admin_can_manually_resolve():
         engine.dispose()
 
 
+def test_stale_manual_transition_cannot_overwrite_committed_resolution(tmp_path):
+    """Trusting the caller's stale ORM instance must not reopen a resolved anomaly."""
+    from app.validation_service import InvalidValidationTransition, transition_anomaly
+
+    database_path = tmp_path / "manual-transition.sqlite"
+    engine, factory, setup_session, rule = build_session(
+        f"sqlite+pysqlite:///{database_path}", testing=False,
+    )
+    anomaly = make_anomaly(rule)
+    setup_session.add(anomaly)
+    setup_session.commit()
+    anomaly_id = anomaly.id
+    setup_session.close()
+
+    with factory() as stale_session:
+        stale = stale_session.get(AnomalyRecord, anomaly_id)
+        assert stale.status == "pending"
+        with factory() as winner_session:
+            winner = winner_session.get(AnomalyRecord, anomaly_id)
+            assert transition_anomaly(
+                winner_session, winner, "resolved", now=NOW, source="manual", user_id="admin-winner",
+            ) is True
+            winner_session.commit()
+
+        with pytest.raises(InvalidValidationTransition):
+            transition_anomaly(stale_session, stale, "processing", now=NOW + timedelta(seconds=1))
+        stale_session.rollback()
+
+    with factory() as verify_session:
+        persisted = verify_session.get(AnomalyRecord, anomaly_id)
+        assert persisted.status == "resolved"
+        assert persisted.resolved_by_user_id == "admin-winner"
+    engine.dispose()
+
+
+def test_callback_lock_refreshes_preloaded_anomaly_and_preserves_manual_winner(tmp_path):
+    """A preloaded pending identity must not hide a manual resolution from the locked callback read."""
+    from app.validation_service import submit_validation, transition_anomaly
+
+    database_path = tmp_path / "callback-identity-map.sqlite"
+    engine, factory, setup_session, rule = build_session(
+        f"sqlite+pysqlite:///{database_path}", testing=False,
+    )
+    anomaly = make_anomaly(rule)
+    setup_session.add(anomaly)
+    setup_session.flush()
+    setup_session.add(AnomalyValidationRequest(anomaly_id=anomaly.id, recipient_user_id="user-1"))
+    setup_session.commit()
+    anomaly_id = anomaly.id
+    setup_session.close()
+
+    with factory() as callback_session:
+        preloaded = callback_session.get(AnomalyRecord, anomaly_id)
+        assert preloaded.status == "pending"
+        with factory() as manual_session:
+            winner = manual_session.get(AnomalyRecord, anomaly_id)
+            transition_anomaly(
+                manual_session, winner, "resolved", now=NOW, source="manual", user_id="admin-winner",
+            )
+            manual_session.commit()
+
+        result = submit_validation(callback_session, anomaly_id, "user-1", "stale callback", now=NOW)
+        assert result.outcome == "already_resolved"
+
+    with factory() as verify_session:
+        persisted = verify_session.get(AnomalyRecord, anomaly_id)
+        assert persisted.status == "resolved"
+        assert persisted.resolution_source == "manual"
+        assert persisted.resolved_by_user_id == "admin-winner"
+        assert list(verify_session.scalars(select(AnomalyValidationSubmission))) == []
+    engine.dispose()
+
+
 def test_concurrent_callbacks_persist_exactly_one_winner(tmp_path):
     """Removing row serialization or the unique-conflict recovery must allow two winners or leak an error."""
     from app.validation_service import submit_validation

@@ -2,13 +2,14 @@ import csv
 import io
 
 import httpx
+import jwt
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from . import feishu as feishu_gateway
-from .config import Settings
+from .config import SESSION_COOKIE, Settings
 from .execution_service import RuleExecutionConflict, execute_rule
 from .models import (
     AnomalyEvent,
@@ -20,6 +21,7 @@ from .models import (
     NotificationDelivery,
     Rule,
     RuleRun,
+    User,
     utcnow,
 )
 from .query_service import connect_to_datasource, execute_readonly_query
@@ -64,6 +66,31 @@ def get_app_settings(request: Request) -> Settings:
     return request.app.state.settings
 
 
+def get_current_admin(
+    request: Request,
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_app_settings),
+) -> str:
+    if settings.auto_login:
+        return settings.superadmin_username
+    token = request.cookies.get(SESSION_COOKIE)
+    if not token:
+        raise HTTPException(401, "未登录")
+    try:
+        claims = jwt.decode(token, settings.session_secret, algorithms=["HS256"])
+    except jwt.PyJWTError as exc:
+        raise HTTPException(401, "登录状态无效") from exc
+    username = claims.get("sub")
+    if not isinstance(username, str) or not username.strip():
+        raise HTTPException(401, "登录状态无效")
+    user = session.scalar(select(User).where(User.username == username))
+    if user is None:
+        raise HTTPException(401, "登录状态无效")
+    if not user.is_superuser:
+        raise HTTPException(403, "需要超级管理员权限")
+    return user.username
+
+
 @router.post("/tests/feishu-message")
 def test_feishu_message(
     payload: FeishuMessageTestRequest,
@@ -84,7 +111,20 @@ def test_feishu_message(
     return {"ok": True, "message_id": message_id}
 
 
-def _card_action_result(toast_type: str, content: str, anomaly: AnomalyRecord, settings: Settings) -> dict:
+def _card_action_result(
+    toast_type: str,
+    content: str,
+    anomaly_id: str,
+    session: Session,
+    settings: Settings,
+) -> dict:
+    anomaly = session.scalar(
+        select(AnomalyRecord).where(
+            AnomalyRecord.id == anomaly_id
+        ).execution_options(populate_existing=True)
+    )
+    if anomaly is None:
+        raise HTTPException(404, "异常记录不存在")
     return {
         "toast": {"type": toast_type, "content": content},
         "card": build_validation_card(anomaly, settings.sentinel_public_base_url),
@@ -103,41 +143,47 @@ def feishu_card_action(
     if payload.action != "submit_validation":
         raise HTTPException(400, "不支持的飞书卡片操作")
 
-    anomaly = session.get(AnomalyRecord, payload.anomaly_id)
-    if anomaly is None:
+    anomaly_id = session.scalar(select(AnomalyRecord.id).where(AnomalyRecord.id == payload.anomaly_id))
+    if anomaly_id is None:
         raise HTTPException(404, "异常记录不存在")
     request = session.scalar(select(AnomalyValidationRequest).where(
-        AnomalyValidationRequest.anomaly_id == anomaly.id,
+        AnomalyValidationRequest.anomaly_id == anomaly_id,
         AnomalyValidationRequest.message_id == payload.message_id,
     ))
     if request is None:
         raise HTTPException(404, "飞书消息不存在")
     if request.recipient_user_id != payload.operator_user_id:
-        raise HTTPException(403, "当前用户无权提交该异常验证")
+        return _card_action_result(
+            "error", "当前用户无权提交该异常验证", anomaly_id, session, settings,
+        )
 
     try:
         result = submit_validation(
             session,
-            anomaly.id,
+            anomaly_id,
             payload.operator_user_id,
             payload.validation_text,
         )
     except ValidationTextError as exc:
-        return _card_action_result("error", str(exc), anomaly, settings)
-    except ValidationRecipientError as exc:
-        raise HTTPException(403, "当前用户无权提交该异常验证") from exc
+        return _card_action_result("error", str(exc), anomaly_id, session, settings)
+    except ValidationRecipientError:
+        return _card_action_result(
+            "error", "当前用户无权提交该异常验证", anomaly_id, session, settings,
+        )
     except InvalidValidationTransition:
         session.rollback()
-        return _card_action_result("error", "当前异常状态不允许实时验证", anomaly, settings)
+        return _card_action_result(
+            "error", "当前异常状态不允许实时验证", anomaly_id, session, settings,
+        )
     except Exception as exc:
         session.rollback()
         raise HTTPException(500, "处理飞书回调失败") from exc
 
     if result.outcome == "accepted":
-        return _card_action_result("success", "验证已提交，异常已解决", anomaly, settings)
+        return _card_action_result("success", "验证已提交，异常已解决", anomaly_id, session, settings)
     if result.outcome == "duplicate":
-        return _card_action_result("warning", "该验证已提交，无需重复操作", anomaly, settings)
-    return _card_action_result("warning", "该异常已由其他验证人解决", anomaly, settings)
+        return _card_action_result("warning", "该验证已提交，无需重复操作", anomaly_id, session, settings)
+    return _card_action_result("warning", "该异常已由其他验证人解决", anomaly_id, session, settings)
 
 
 def datasource_dict(item: Datasource) -> dict:
@@ -627,9 +673,8 @@ def _set_anomaly_status(
     item: AnomalyRecord,
     payload: AnomalyStatusUpdate,
     session: Session,
-    settings: Settings,
+    resolver: str,
 ) -> bool:
-    resolver = payload.assignee.strip() if payload.assignee and payload.assignee.strip() else settings.superadmin_username
     changed = transition_anomaly(
         session,
         item,
@@ -653,13 +698,13 @@ def update_anomaly_status(
     anomaly_id: str,
     payload: AnomalyStatusUpdate,
     session: Session = Depends(get_session),
-    settings: Settings = Depends(get_app_settings),
+    admin_username: str = Depends(get_current_admin),
 ):
     item = session.get(AnomalyRecord, anomaly_id)
     if not item:
         raise HTTPException(404, "异常记录不存在")
     try:
-        _set_anomaly_status(item, payload, session, settings)
+        _set_anomaly_status(item, payload, session, admin_username)
     except InvalidValidationTransition as exc:
         session.rollback()
         raise HTTPException(409, str(exc)) from exc
@@ -671,7 +716,7 @@ def update_anomaly_status(
 def bulk_anomaly_status(
     payload: BulkAnomalyStatusUpdate,
     session: Session = Depends(get_session),
-    settings: Settings = Depends(get_app_settings),
+    admin_username: str = Depends(get_current_admin),
 ):
     items = list(session.scalars(select(AnomalyRecord).where(AnomalyRecord.id.in_(payload.ids))))
     items_by_id = {item.id: item for item in items}
@@ -680,7 +725,7 @@ def bulk_anomaly_status(
         raise HTTPException(404, f"异常记录不存在: {', '.join(missing_ids)}")
     try:
         for item_id in dict.fromkeys(payload.ids):
-            _set_anomaly_status(items_by_id[item_id], payload, session, settings)
+            _set_anomaly_status(items_by_id[item_id], payload, session, admin_username)
     except InvalidValidationTransition as exc:
         session.rollback()
         raise HTTPException(409, str(exc)) from exc

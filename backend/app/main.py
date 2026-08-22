@@ -11,14 +11,13 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
 
 from .api import internal_router, router
-from .config import Settings, get_settings
+from .config import SESSION_COOKIE, Settings, get_settings
 from .database import Base, make_session_factory
 from .models import User
 from .scheduler_service import reconcile_enabled_rules
 from .validation_service import expire_due_anomalies, reconcile_validation_cards
 
 
-SESSION_COOKIE = "sentinel_session"
 TEST_SESSION_SECRET = "test-session-secret-that-is-long-enough"
 logger = logging.getLogger(__name__)
 

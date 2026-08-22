@@ -443,26 +443,46 @@ def transition_anomaly(
 ) -> bool:
     if target_status not in {"pending", "processing", "timed_out", "resolved"}:
         raise InvalidValidationTransition("未知异常状态")
-    if anomaly.status == "resolved":
-        if target_status == "resolved":
-            return False
-        raise InvalidValidationTransition("已解决异常不能重新打开")
-    if anomaly.status == "timed_out" and target_status in {"pending", "processing"}:
-        raise InvalidValidationTransition("已超时异常只能被解决")
     if target_status == "timed_out" and not allow_timeout:
         raise InvalidValidationTransition("超时状态只能由系统设置")
-    if anomaly.status == target_status:
-        return False
     changed_at = now or utcnow()
     if target_status == "resolved":
         if source != "manual" or not isinstance(user_id, str) or not user_id.strip():
             raise InvalidValidationTransition("解决异常需要已识别的管理员")
-        _apply_resolution(anomaly, changed_at, "manual", user_id.strip())
+        values = {
+            "status": "resolved",
+            "resolved_at": changed_at,
+            "active_fingerprint": None,
+            "resolution_source": "manual",
+            "resolved_by_user_id": user_id.strip(),
+        }
+    elif target_status == "timed_out":
+        values = {"status": "timed_out", "timed_out_at": changed_at}
+    else:
+        values = {"status": target_status}
+
+    allowed_sources = {
+        "pending": ["processing"],
+        "processing": ["pending"],
+        "timed_out": ["pending", "processing"],
+        "resolved": ["pending", "processing", "timed_out"],
+    }
+    result = session.execute(
+        update(AnomalyRecord).where(
+            AnomalyRecord.id == anomaly.id,
+            AnomalyRecord.status.in_(allowed_sources[target_status]),
+        ).values(**values).execution_options(synchronize_session=False)
+    )
+    session.refresh(anomaly)
+    if result.rowcount == 1:
         return True
-    anomaly.status = target_status
-    if target_status == "timed_out":
-        anomaly.timed_out_at = changed_at
-    return True
+    if anomaly.status == target_status:
+        return False
+    if anomaly.status == "resolved":
+        raise InvalidValidationTransition("已解决异常不能重新打开")
+    if anomaly.status == "timed_out" and target_status in {"pending", "processing"}:
+        raise InvalidValidationTransition("已超时异常只能被解决")
+    raise InvalidValidationTransition("异常状态已变更，请刷新后重试")
 
 
 def _apply_resolution(
@@ -541,7 +561,9 @@ def submit_validation(
     submitted_at = now or utcnow()
     with _serialize_sqlite(session, f"submission:{anomaly_id}"):
         anomaly = session.scalar(
-            select(AnomalyRecord).where(AnomalyRecord.id == anomaly_id).with_for_update()
+            select(AnomalyRecord).where(
+                AnomalyRecord.id == anomaly_id
+            ).execution_options(populate_existing=True).with_for_update()
         )
         if anomaly is None:
             raise ValueError("异常不存在")

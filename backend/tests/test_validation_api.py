@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 
+import bcrypt
 from fastapi.testclient import TestClient
 
 from app.main import create_app
@@ -10,6 +11,7 @@ from app.models import (
     Dataset,
     Datasource,
     Rule,
+    User,
 )
 
 
@@ -113,7 +115,9 @@ def test_feishu_callback_returns_safe_transport_errors_for_bad_relationships():
 
         assert unknown_anomaly.status_code == 404
         assert unknown_message.status_code == 404
-        assert wrong_recipient.status_code == 403
+        assert wrong_recipient.status_code == 200
+        assert wrong_recipient.json()["toast"]["type"] == "error"
+        assert wrong_recipient.json()["card"]["header"]["template"] == "orange"
         assert wrong_action.status_code == 400
         assert "validator-2" not in wrong_recipient.text
 
@@ -162,6 +166,65 @@ def test_feishu_callback_hides_unexpected_internal_failures(monkeypatch):
         assert "database password leaked" not in response.text
 
 
+def test_feishu_callback_maps_service_recipient_rejection_to_safe_card(monkeypatch):
+    from app.validation_service import ValidationRecipientError
+
+    app = create_app(testing=True)
+    with TestClient(app) as client:
+        anomaly_id = seed_validation_anomaly(client)
+        monkeypatch.setattr(
+            "app.api.submit_validation",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                ValidationRecipientError("recipient validator-2 is forbidden")
+            ),
+        )
+
+        response = client.post(
+            "/api/internal/feishu/card-actions",
+            headers={"X-Internal-Token": "change-this-internal-token"},
+            json=callback_payload(anomaly_id),
+        )
+
+        assert response.status_code == 200
+        assert response.json()["toast"] == {"type": "error", "content": "当前用户无权提交该异常验证"}
+        assert response.json()["card"]["header"]["template"] == "orange"
+        assert "validator-2" not in response.text
+
+
+def test_empty_callback_renders_state_committed_after_relationship_check(monkeypatch):
+    from app.validation_service import submit_validation as real_submit_validation
+    from app.validation_service import transition_anomaly
+
+    app = create_app(testing=True)
+    with TestClient(app) as client:
+        anomaly_id = seed_validation_anomaly(client)
+
+        def resolve_then_validate_empty(session, target_id, operator_user_id, text):
+            with app.state.session_factory() as concurrent_session:
+                concurrent = concurrent_session.get(AnomalyRecord, target_id)
+                transition_anomaly(
+                    concurrent_session,
+                    concurrent,
+                    "resolved",
+                    source="manual",
+                    user_id="admin",
+                )
+                concurrent_session.commit()
+            return real_submit_validation(session, target_id, operator_user_id, text)
+
+        monkeypatch.setattr("app.api.submit_validation", resolve_then_validate_empty)
+        response = client.post(
+            "/api/internal/feishu/card-actions",
+            headers={"X-Internal-Token": "change-this-internal-token"},
+            json=callback_payload(anomaly_id, validation_text="   "),
+        )
+
+        assert response.status_code == 200
+        assert response.json()["toast"]["type"] == "error"
+        assert response.json()["card"]["header"]["template"] == "green"
+        assert response.json()["card"]["body"]["elements"][-1]["content"].startswith("**验证人：** admin")
+
+
 def test_manual_status_routes_enforce_state_machine_and_identify_resolver():
     with TestClient(create_app(testing=True)) as client:
         anomaly_id = seed_validation_anomaly(client)
@@ -187,7 +250,8 @@ def test_manual_status_routes_enforce_state_machine_and_identify_resolver():
         assert pending.status_code == 200
         assert resolved.status_code == 200
         assert resolved.json()["resolution_source"] == "manual"
-        assert resolved.json()["resolved_by_user_id"] == "admin-2"
+        assert resolved.json()["resolved_by_user_id"] == "admin"
+        assert resolved.json()["assignee"] == "admin-2"
         assert reopened.status_code == 409
         assert manual_timeout.status_code == 422
 
@@ -202,6 +266,54 @@ def test_manual_resolution_falls_back_to_configured_superadmin():
         )
 
         assert response.status_code == 200
+        assert response.json()["resolved_by_user_id"] == "admin"
+
+
+def test_manual_status_routes_require_superadmin_when_auto_login_is_disabled():
+    app = create_app(testing=True)
+    app.state.settings.auto_login = False
+    with TestClient(app) as client:
+        anomaly_id = seed_validation_anomaly(client)
+        with app.state.session_factory() as session:
+            session.add(User(
+                username="analyst",
+                password_hash=bcrypt.hashpw(b"Analyst@123", bcrypt.gensalt()).decode(),
+                is_superuser=False,
+            ))
+            session.commit()
+
+        unauthenticated = client.patch(
+            f"/api/v1/anomalies/{anomaly_id}/status", json={"status": "processing"}
+        )
+        assert unauthenticated.status_code == 401
+
+        assert client.post(
+            "/api/v1/auth/login", json={"username": "analyst", "password": "Analyst@123"}
+        ).status_code == 200
+        non_admin = client.patch(
+            f"/api/v1/anomalies/{anomaly_id}/status", json={"status": "processing"}
+        )
+        assert non_admin.status_code == 403
+        with app.state.session_factory() as session:
+            assert session.get(AnomalyRecord, anomaly_id).status == "pending"
+
+
+def test_manual_resolution_uses_authenticated_admin_not_forged_assignee():
+    app = create_app(testing=True)
+    app.state.settings.auto_login = False
+    with TestClient(app) as client:
+        anomaly_id = seed_validation_anomaly(client)
+        assert client.post(
+            "/api/v1/auth/login", json={"username": "admin", "password": "Admin@123456"}
+        ).status_code == 200
+
+        response = client.patch(
+            f"/api/v1/anomalies/{anomaly_id}/status",
+            json={"status": "resolved", "assignee": "forged-resolver"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["assignee"] == "forged-resolver"
         assert response.json()["resolved_by_user_id"] == "admin"
 
 
