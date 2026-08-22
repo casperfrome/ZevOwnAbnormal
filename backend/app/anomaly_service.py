@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from .models import AnomalyEvent, AnomalyRecord, NotificationDelivery, Rule, utcnow
 from .rule_engine import EvaluationMatch
+from .validation_service import snapshot_validation
 
 
 @dataclass(frozen=True)
@@ -90,7 +91,10 @@ def persist_matches(session: Session, rule: Rule, matches: list[EvaluationMatch]
         session.add(record)
         session.flush()
         session.add(AnomalyEvent(anomaly_id=record.id, event_type="detected", description="规则首次检出异常"))
+        validation_recipients = set(snapshot_validation(session, rule, record, now=now))
         for receive_id_type, recipient in resolve_targets(rule.notification_targets, match.row):
+            if receive_id_type == "user_id" and recipient in validation_recipients:
+                continue
             delivery = NotificationDelivery(
                 anomaly_id=record.id,
                 receive_id_type=receive_id_type,

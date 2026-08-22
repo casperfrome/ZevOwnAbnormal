@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     internal_execution_token: str = "change-this-internal-token"
     feishu_app_id: str = ""
     feishu_app_secret: str = ""
+    sentinel_public_base_url: str = "http://localhost:8000"
     dolphinscheduler_url: str = "http://localhost:12345/dolphinscheduler"
     dolphinscheduler_username: str = "admin"
     dolphinscheduler_password: str = "dolphinscheduler123"

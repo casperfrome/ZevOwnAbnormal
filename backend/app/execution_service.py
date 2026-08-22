@@ -13,6 +13,7 @@ from .models import AnomalyRecord, NotificationDelivery, Rule, RuleRun, utcnow
 from .query_service import connect_to_datasource, fetch_rule_rows
 from .rule_engine import evaluate_rows
 from .security import CredentialCipher
+from .validation_service import deliver_validation_requests
 
 
 class RuleExecutionConflict(ValueError):
@@ -132,6 +133,7 @@ def execute_rule(session: Session, settings: Settings, rule_id: str, trigger_sou
             matches = evaluate_rows(rows, rule.conditions, rule.logic, rule.anomaly_key_fields, field_types)
             persisted = persist_matches(session, rule, matches)
             failures = deliver_notifications(session, settings, rule_id=rule.id)
+            failures += deliver_validation_requests(session, settings, rule_id=rule.id)
             run.status = "partial_failed" if failures else "success"
             run.scanned_rows = len(rows)
             run.matched_rows = len(matches)

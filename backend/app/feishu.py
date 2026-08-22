@@ -82,6 +82,39 @@ class FeishuClient:
             raise FeishuError("发送飞书消息失败: 飞书响应缺少 message_id")
         return message_id
 
+    def send_interactive(self, receive_id_type: str, recipient: str, card: dict) -> str:
+        token = self._tenant_token()
+        response = self._client.post(
+            "/open-apis/im/v1/messages",
+            params={"receive_id_type": receive_id_type},
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "receive_id": recipient,
+                "msg_type": "interactive",
+                "content": json.dumps(card, ensure_ascii=False),
+            },
+        )
+        self._ensure_success(response, "发送飞书卡片失败")
+        body = self._response_body(response, "发送飞书卡片失败")
+        if body.get("code") != 0:
+            raise FeishuError(f"发送飞书卡片失败: {body.get('msg', body)}")
+        message_id = body.get("data", {}).get("message_id") if isinstance(body.get("data"), dict) else None
+        if not isinstance(message_id, str) or not message_id:
+            raise FeishuError("发送飞书卡片失败: 飞书响应缺少 message_id")
+        return message_id
+
+    def patch_interactive(self, message_id: str, card: dict) -> None:
+        token = self._tenant_token()
+        response = self._client.patch(
+            f"/open-apis/im/v1/messages/{message_id}",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"content": json.dumps(card, ensure_ascii=False)},
+        )
+        self._ensure_success(response, "更新飞书卡片失败")
+        body = self._response_body(response, "更新飞书卡片失败")
+        if body.get("code") != 0:
+            raise FeishuError(f"更新飞书卡片失败: {body.get('msg', body)}")
+
 
 def send_configured_text(
     app_id: str,

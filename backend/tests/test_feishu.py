@@ -1,3 +1,5 @@
+import json
+
 import httpx
 import pytest
 
@@ -21,6 +23,35 @@ def test_feishu_obtains_token_and_sends_message():
     assert len(requests) == 2
     assert requests[1].headers["Authorization"] == "Bearer token"
     assert requests[1].url.params["receive_id_type"] == "open_id"
+
+
+def test_feishu_sends_and_patches_interactive_cards_with_shared_token():
+    """Using the wrong message type, content encoding, or patch endpoint must fail."""
+    requests = []
+
+    def handler(request: httpx.Request):
+        requests.append(request)
+        if request.url.path.endswith("tenant_access_token/internal/"):
+            return httpx.Response(200, json={"code": 0, "tenant_access_token": "token", "expire": 7200})
+        if request.method == "POST":
+            return httpx.Response(200, json={"code": 0, "data": {"message_id": "om_card"}})
+        return httpx.Response(200, json={"code": 0})
+
+    client = FeishuClient("cli_app", "secret", transport=httpx.MockTransport(handler))
+    card = {"schema": "2.0", "body": {"elements": [{"tag": "markdown", "content": "hello"}]}}
+
+    assert client.send_interactive("user_id", "user-1", card) == "om_card"
+    client.patch_interactive("om_card", card)
+
+    assert len(requests) == 3
+    send_payload = json.loads(requests[1].content)
+    patch_payload = json.loads(requests[2].content)
+    assert requests[1].url.params["receive_id_type"] == "user_id"
+    assert send_payload == {"receive_id": "user-1", "msg_type": "interactive", "content": json.dumps(card, ensure_ascii=False)}
+    assert requests[2].method == "PATCH"
+    assert requests[2].url.path == "/open-apis/im/v1/messages/om_card"
+    assert patch_payload == {"content": json.dumps(card, ensure_ascii=False)}
+    assert requests[2].headers["Authorization"] == "Bearer token"
 
 
 @pytest.mark.parametrize(
