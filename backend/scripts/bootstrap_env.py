@@ -25,16 +25,23 @@ def parse_credentials(text: str) -> tuple[str, str]:
 
 def main():
     app_id, app_secret = parse_credentials(CREDENTIAL_FILE.read_text(encoding="utf-8"))
+    internal_token = secrets.token_urlsafe(48)
     values = {
         "DATABASE_URL": "mysql+pymysql://app:dev_app_password@127.0.0.1:3306/app?charset=utf8mb4",
         "DATASOURCE_ENCRYPTION_KEY": Fernet.generate_key().decode("ascii"),
         "SESSION_SECRET": secrets.token_urlsafe(48),
-        "INTERNAL_EXECUTION_TOKEN": secrets.token_urlsafe(48),
-        "AUTO_LOGIN": "true",
+        "INTERNAL_EXECUTION_TOKEN": internal_token,
+        "SENTINEL_INTERNAL_TOKEN": internal_token,
+        "AUTO_LOGIN": "false",
         "SUPERADMIN_USERNAME": "admin",
         "SUPERADMIN_PASSWORD": "Admin@123456",
         "FEISHU_APP_ID": app_id,
         "FEISHU_APP_SECRET": app_secret,
+        "SENTINEL_PUBLIC_BASE_URL": "http://localhost:8000",
+        "SENTINEL_API_BASE_URL": "http://127.0.0.1:8000",
+        "VALIDATION_TIMEOUT_SCAN_INTERVAL_SECONDS": "60",
+        "VALIDATION_MAINTENANCE_BATCH_SIZE": "50",
+        "FEISHU_HTTP_TIMEOUT_SECONDS": "10",
         "DOLPHINSCHEDULER_URL": "http://localhost:12345/dolphinscheduler",
         "DOLPHINSCHEDULER_USERNAME": "admin",
         "DOLPHINSCHEDULER_PASSWORD": "dolphinscheduler123",

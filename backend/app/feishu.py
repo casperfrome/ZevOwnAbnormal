@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 import json
 import time
 
@@ -19,15 +20,27 @@ class FeishuConfigurationError(RuntimeError):
 
 
 class FeishuClient:
-    def __init__(self, app_id: str, app_secret: str, transport=None):
+    def __init__(
+        self,
+        app_id: str,
+        app_secret: str,
+        transport=None,
+        timeout: float = 10.0,
+        cancellation_check: Callable[[], bool] | None = None,
+    ):
         self.app_id = app_id
         self.app_secret = app_secret
-        self._client = httpx.Client(base_url="https://open.feishu.cn", timeout=10, transport=transport)
+        self._client = httpx.Client(base_url="https://open.feishu.cn", timeout=timeout, transport=transport)
         self._token = ""
         self._token_expires_at = 0.0
+        self._cancellation_check = cancellation_check
 
     def close(self):
         self._client.close()
+
+    def _ensure_not_cancelled(self) -> None:
+        if self._cancellation_check is not None and self._cancellation_check():
+            raise FeishuError("飞书操作已取消")
 
     @staticmethod
     def _response_body(response: httpx.Response, operation: str) -> dict:
@@ -52,10 +65,13 @@ class FeishuClient:
     def _tenant_token(self) -> str:
         if self._token and time.monotonic() < self._token_expires_at:
             return self._token
-        response = self._client.post(
-            "/open-apis/auth/v3/tenant_access_token/internal/",
-            json={"app_id": self.app_id, "app_secret": self.app_secret},
-        )
+        try:
+            response = self._client.post(
+                "/open-apis/auth/v3/tenant_access_token/internal/",
+                json={"app_id": self.app_id, "app_secret": self.app_secret},
+            )
+        except httpx.TransportError as exc:
+            raise FeishuError("获取 tenant_access_token 失败: 网络请求失败") from exc
         self._ensure_success(response, "获取 tenant_access_token 失败")
         body = self._response_body(response, "获取 tenant_access_token 失败")
         token = body.get("tenant_access_token")
@@ -95,6 +111,7 @@ class FeishuClient:
         idempotency_key: str | None = None,
     ) -> str:
         token = self._tenant_token()
+        self._ensure_not_cancelled()
         payload = {
             "receive_id": recipient,
             "msg_type": "interactive",
@@ -111,11 +128,19 @@ class FeishuClient:
             )
         except httpx.TransportError as exc:
             raise FeishuDeliveryUncertainError("发送飞书卡片结果未知: 网络响应丢失") from exc
-        self._ensure_success(response, "发送飞书卡片失败")
+        if response.status_code == 408 or response.status_code >= 500:
+            raise FeishuDeliveryUncertainError(
+                f"发送飞书卡片结果未知: HTTP {response.status_code}"
+            )
         try:
             body = self._response_body(response, "发送飞书卡片失败")
         except FeishuError as exc:
-            raise FeishuDeliveryUncertainError("发送飞书卡片结果未知: 成功响应无法解析") from exc
+            raise FeishuDeliveryUncertainError("发送飞书卡片结果未知: 响应无法解析") from exc
+        if not response.is_success:
+            message = body.get("msg") or f"HTTP {response.status_code}"
+            code = body.get("code")
+            suffix = f" (code: {code})" if code is not None else ""
+            raise FeishuError(f"发送飞书卡片失败: {message}{suffix}")
         if not isinstance(body.get("code"), int):
             raise FeishuDeliveryUncertainError("发送飞书卡片结果未知: 成功响应缺少 code")
         if body.get("code") != 0:
@@ -127,6 +152,7 @@ class FeishuClient:
 
     def patch_interactive(self, message_id: str, card: dict) -> None:
         token = self._tenant_token()
+        self._ensure_not_cancelled()
         response = self._client.patch(
             f"/open-apis/im/v1/messages/{message_id}",
             headers={"Authorization": f"Bearer {token}"},

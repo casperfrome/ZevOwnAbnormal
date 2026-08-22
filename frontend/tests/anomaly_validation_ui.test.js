@@ -31,6 +31,49 @@ function datasetFixture() {
   };
 }
 
+test('rule field selectors preserve hostile names and types as inert option text', async t => {
+  const fieldName = 'owner" data-pwned="yes"><img src=x onerror="window.ruleXss=1">';
+  const fieldType = 'varchar</option><option id="field-type-xss" value="pwned" onerror="window.ruleXss=1">owned</option><option>';
+  const dataset = {
+    id: 'dataset-hostile', name: 'Hostile fields', rowCount: 1,
+    fields: [{ name: fieldName, type: fieldType }],
+  };
+  const { page, pageErrors } = await withPage(t, async page => {
+    await page.evaluate(datasetValue => {
+      window.ruleXss = 0;
+      window.Store = {
+        getRules: () => [], getDatasets: () => [datasetValue],
+        getDataset: id => id === datasetValue.id ? datasetValue : null,
+      };
+    }, dataset);
+    await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'rules.js') });
+    await page.evaluate(() => RulesModule.render(document.getElementById('content'), {
+      actionsEl: document.getElementById('actions'), navigate: () => {},
+    }));
+  });
+
+  await page.click('#r-add');
+  await page.selectOption('#f-dataset', dataset.id);
+  const selectors = [
+    '#f-field', '#f-field-source', '#f-validation-fields', '#f-key-fields',
+    '.condition-row [data-c="field"]',
+  ];
+  for (const selector of selectors) {
+    const options = await page.locator(`${selector} option`).evaluateAll(nodes => nodes.map(option => ({
+      value: option.value,
+      text: option.textContent,
+      pwned: option.getAttribute('data-pwned'),
+    })));
+    const matching = options.filter(option => option.value === fieldName);
+    assert.equal(matching.length, 1, `${selector} keeps exactly one field option`);
+    assert.equal(matching[0].text, `${fieldName} · ${fieldType}`);
+    assert.equal(matching[0].pwned, null);
+  }
+  assert.equal(await page.locator('#field-type-xss').count(), 0);
+  assert.equal(await page.evaluate(() => window.ruleXss), 0);
+  assert.deepEqual(pageErrors, []);
+});
+
 test('rule form saves real-time validation targets and reports an inline error when enabled without targets', async t => {
   const { page, pageErrors } = await withPage(t, async page => {
     await page.evaluate(dataset => {
@@ -374,6 +417,85 @@ test('record tabs use overview totals and request status-filtered backend pages'
     page: 2, pageSize: 10, status: 'timed_out', severity: null, ruleId: null, search: '',
     sortKey: 'occurredAt', sortOrder: 'desc',
   });
+  assert.deepEqual(pageErrors, []);
+});
+
+test('record search debounces rapid typing into one server request', async t => {
+  const { page, pageErrors } = await withPage(t, async page => {
+    await page.evaluate(() => {
+      window.recordQueries = [];
+      window.Store = {
+        getStats: () => ({ pendingRecords: 0, processingRecords: 0, timedOutRecords: 0, resolvedToday: 0, criticalAnomalies: 0 }),
+        getRecords: () => [],
+        getRules: () => [],
+        loadRecordsPage: async query => {
+          window.recordQueries.push({ ...query });
+          return { items: [], total: 0, page: 1, pageSize: query.pageSize };
+        },
+        refresh: async () => {}, exportUrl: '/export',
+      };
+    });
+    await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'records.js') });
+    await page.evaluate(() => RecordsModule.render(document.getElementById('content'), {
+      actionsEl: document.getElementById('actions'), navigate: () => {},
+    }));
+  });
+
+  await page.waitForFunction(() => window.recordQueries.length === 1);
+  await page.locator('#rec-search').fill('a');
+  await page.locator('#rec-search').fill('ab');
+  await page.locator('#rec-search').fill('abc');
+  await page.waitForTimeout(350);
+
+  assert.equal(await page.evaluate(() => window.recordQueries.length), 2);
+  assert.equal(await page.evaluate(() => window.recordQueries.at(-1).search), 'abc');
+  assert.deepEqual(pageErrors, []);
+});
+
+test('record export sends current server filters and reports the server total', async t => {
+  const { page, pageErrors } = await withPage(t, async page => {
+    await page.evaluate(() => {
+      const record = {
+        id: 'record-page-item', ruleId: 'rule-1', ruleName: 'GMV check', datasetName: 'Orders',
+        severity: 'high', status: 'pending', occurredAt: '2026-08-22T09:00:00',
+        field: 'gmv', value: 999, expected: 'gt', assignee: null,
+      };
+      window.currentPageRecords = [record];
+      window.exportFilters = null;
+      const exportUrl = filters => {
+        window.exportFilters = { ...filters };
+        return '#export';
+      };
+      exportUrl.toString = () => '#export';
+      window.Store = {
+        getStats: () => ({ pendingRecords: 42, processingRecords: 0, timedOutRecords: 0, resolvedToday: 0, criticalAnomalies: 0 }),
+        getRecords: () => window.currentPageRecords,
+        getRules: () => [],
+        loadRecordsPage: async query => ({
+          items: window.currentPageRecords,
+          total: query.search ? 3 : 42,
+          page: 1,
+          pageSize: query.pageSize,
+        }),
+        refresh: async () => {}, exportUrl,
+      };
+    });
+    await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'records.js') });
+    await page.evaluate(() => RecordsModule.render(document.getElementById('content'), {
+      actionsEl: document.getElementById('actions'), navigate: () => {},
+    }));
+  });
+
+  await page.locator('.rec-row-check[data-id="record-page-item"]').waitFor();
+  await page.locator('#rec-search').fill('new');
+  await page.click('#rec-export');
+  await page.waitForFunction(() => window.exportFilters !== null);
+
+  assert.deepEqual(await page.evaluate(() => window.exportFilters), {
+    status: null, severity: null, ruleId: null, search: 'new',
+    sortKey: 'occurredAt', sortOrder: 'desc',
+  });
+  assert.match(await page.locator('#toast-container').textContent(), /3 条记录/);
   assert.deepEqual(pageErrors, []);
 });
 

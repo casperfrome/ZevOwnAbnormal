@@ -3,7 +3,7 @@ import json
 import httpx
 import pytest
 
-from app.feishu import FeishuClient, FeishuError
+from app.feishu import FeishuClient, FeishuDeliveryUncertainError, FeishuError
 
 
 def test_feishu_obtains_token_and_sends_message():
@@ -59,8 +59,6 @@ def test_feishu_sends_and_patches_interactive_cards_with_shared_token():
 
 def test_feishu_classifies_transport_loss_and_success_without_message_id_as_uncertain():
     """An ambiguous create result must not be treated as a definitive retryable rejection."""
-    from app.feishu import FeishuDeliveryUncertainError
-
     responses = iter([
         httpx.ReadTimeout("response lost"),
         httpx.Response(200, json={"code": 0, "data": {}}),
@@ -86,11 +84,95 @@ def test_feishu_classifies_transport_loss_and_success_without_message_id_as_unce
 @pytest.mark.parametrize(
     "send_response",
     [
+        httpx.Response(408, json={"code": 999, "msg": "timeout"}),
+        httpx.Response(500, json={"code": 999, "msg": "temporary"}),
+        httpx.Response(503, text="truncated upstream response"),
+        httpx.Response(200, text='{"code": 0, "data":'),
+    ],
+)
+def test_interactive_post_http_timeout_server_error_or_unparseable_response_is_uncertain(send_response):
+    """Once the message POST starts, these responses cannot prove that no card was created."""
+    def handler(request: httpx.Request):
+        if request.url.path.endswith("tenant_access_token/internal/"):
+            return httpx.Response(200, json={"code": 0, "tenant_access_token": "token", "expire": 7200})
+        return send_response
+
+    client = FeishuClient("cli_app", "secret", transport=httpx.MockTransport(handler))
+
+    with pytest.raises(FeishuDeliveryUncertainError):
+        client.send_interactive("user_id", "user-1", {"schema": "2.0"}, idempotency_key="request-1")
+
+
+def test_interactive_token_failure_is_a_safe_pre_post_error_and_valid_4xx_is_definitive():
+    """Token acquisition never posts a card; a parsed 4xx explicitly rejects the message create."""
+    token_calls = []
+
+    def token_failure(request: httpx.Request):
+        token_calls.append(request.url.path)
+        return httpx.Response(503, json={"code": 999, "msg": "token unavailable"})
+
+    token_client = FeishuClient("cli_app", "secret", transport=httpx.MockTransport(token_failure))
+    with pytest.raises(FeishuError) as token_error:
+        token_client.send_interactive("user_id", "user-1", {"schema": "2.0"})
+    assert not isinstance(token_error.value, FeishuDeliveryUncertainError)
+    assert token_calls == ["/open-apis/auth/v3/tenant_access_token/internal/"]
+
+    network_token_client = FeishuClient(
+        "cli_app",
+        "secret",
+        transport=httpx.MockTransport(lambda request: (_ for _ in ()).throw(
+            httpx.ReadTimeout("token response lost", request=request)
+        )),
+    )
+    with pytest.raises(FeishuError) as network_token_error:
+        network_token_client.send_interactive("user_id", "user-1", {"schema": "2.0"})
+    assert not isinstance(network_token_error.value, FeishuDeliveryUncertainError)
+
+    def rejected_message(request: httpx.Request):
+        if request.url.path.endswith("tenant_access_token/internal/"):
+            return httpx.Response(200, json={"code": 0, "tenant_access_token": "token", "expire": 7200})
+        return httpx.Response(400, json={"code": 230002, "msg": "user_id rejected"})
+
+    rejected_client = FeishuClient("cli_app", "secret", transport=httpx.MockTransport(rejected_message))
+    with pytest.raises(FeishuError) as rejection:
+        rejected_client.send_interactive("user_id", "missing", {"schema": "2.0"})
+    assert not isinstance(rejection.value, FeishuDeliveryUncertainError)
+
+
+def test_interactive_cancellation_after_token_does_not_start_the_message_post():
+    stopped = False
+    paths = []
+
+    def handler(request: httpx.Request):
+        nonlocal stopped
+        paths.append(request.url.path)
+        if request.url.path.endswith("tenant_access_token/internal/"):
+            stopped = True
+            return httpx.Response(200, json={"code": 0, "tenant_access_token": "token", "expire": 7200})
+        raise AssertionError("cancellation between external calls must prevent message POST")
+
+    client = FeishuClient(
+        "cli_app",
+        "secret",
+        transport=httpx.MockTransport(handler),
+        cancellation_check=lambda: stopped,
+    )
+
+    with pytest.raises(FeishuError, match="已取消") as cancelled:
+        client.send_interactive("user_id", "user-1", {"schema": "2.0"})
+
+    assert not isinstance(cancelled.value, FeishuDeliveryUncertainError)
+    assert paths == ["/open-apis/auth/v3/tenant_access_token/internal/"]
+
+
+@pytest.mark.parametrize(
+    "send_response",
+    [
         httpx.Response(200, text="not-json"),
         httpx.Response(200, json={"code": 0, "data": {}}),
     ],
 )
-def test_feishu_wraps_malformed_send_response_as_feishu_error(send_response):
+def test_text_send_malformed_response_is_a_definitive_feishu_error(send_response):
     def handler(request: httpx.Request):
         if request.url.path.endswith("tenant_access_token/internal/"):
             return httpx.Response(200, json={"code": 0, "tenant_access_token": "token", "expire": 7200})

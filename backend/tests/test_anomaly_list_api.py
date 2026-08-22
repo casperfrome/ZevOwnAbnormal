@@ -1,12 +1,14 @@
+import csv
+import io
 from datetime import datetime, timedelta
 
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import event, select
 from sqlalchemy.dialects import mysql
 
 from app import api
 from app.main import create_app
-from app.models import AnomalyRecord
+from app.models import AnomalyRecord, NotificationDelivery
 
 
 def seed_anomalies(client: TestClient) -> None:
@@ -128,3 +130,66 @@ def test_anomaly_sort_parameters_are_whitelisted():
     with TestClient(create_app(testing=True)) as client:
         assert client.get("/api/v1/anomalies", params={"sort_key": "description"}).status_code == 422
         assert client.get("/api/v1/anomalies", params={"sort_order": "sideways"}).status_code == 422
+
+
+def test_anomaly_page_uses_sql_count_limit_offset_and_one_delivery_aggregate_query():
+    app = create_app(testing=True)
+    statements = []
+    with TestClient(app) as client:
+        seed_anomalies(client)
+        with app.state.session_factory() as session:
+            session.add_all([
+                NotificationDelivery(
+                    anomaly_id="record-00", receive_id_type="user_id", recipient="u-0", status="sent",
+                ),
+                NotificationDelivery(
+                    anomaly_id="record-01", receive_id_type="user_id", recipient="u-1", status="sent",
+                ),
+                NotificationDelivery(
+                    anomaly_id="record-01", receive_id_type="open_id", recipient="o-1", status="failed",
+                ),
+                NotificationDelivery(
+                    anomaly_id="record-02", receive_id_type="user_id", recipient="u-2", status="pending",
+                ),
+            ])
+            session.commit()
+            engine = session.get_bind()
+
+        def capture(_connection, _cursor, statement, _parameters, _context, _executemany):
+            statements.append(" ".join(statement.lower().split()))
+
+        event.listen(engine, "before_cursor_execute", capture)
+        try:
+            response = client.get("/api/v1/anomalies", params={
+                "page": 1, "page_size": 3, "sort_key": "occurredAt", "sort_order": "asc",
+            })
+        finally:
+            event.remove(engine, "before_cursor_execute", capture)
+
+    assert response.status_code == 200
+    assert response.json()["total"] == 12
+    assert [item["id"] for item in response.json()["items"]] == ["record-00", "record-01", "record-02"]
+    assert [item["delivery_status"] for item in response.json()["items"]] == ["sent", "failed", "pending"]
+    anomaly_queries = [sql for sql in statements if "from anomaly_records" in sql]
+    delivery_queries = [sql for sql in statements if "from notification_deliveries" in sql]
+    assert any("count(" in sql for sql in anomaly_queries)
+    assert any(" limit " in sql and " offset " in sql for sql in anomaly_queries)
+    assert len(delivery_queries) == 1
+
+
+def test_anomaly_export_uses_the_same_server_filters_and_global_sort_as_the_list():
+    with TestClient(create_app(testing=True)) as client:
+        seed_anomalies(client)
+
+        response = client.get("/api/v1/anomalies/export", params={
+            "status_filter": "pending",
+            "severity": "high",
+            "search": "Rule",
+            "sort_key": "occurredAt",
+            "sort_order": "desc",
+        })
+
+    assert response.status_code == 200
+    rows = list(csv.DictReader(io.StringIO(response.text)))
+    assert [row["id"] for row in rows] == ["record-11", "record-07"]
+    assert all(row["status"] == "pending" and row["severity"] == "high" for row in rows)

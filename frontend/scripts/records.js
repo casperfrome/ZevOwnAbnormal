@@ -7,7 +7,7 @@ window.RecordsModule = (function () {
   let state = {
     search: '', statusFilter: 'all', severityFilter: 'all', ruleFilter: 'all',
     sortKey: 'occurredAt', sortDir: 'desc', page: 1, pageSize: 10,
-    selected: new Set(), requestSequence: 0,
+    selected: new Set(), requestSequence: 0, searchTimer: null, total: 0,
   };
 
   function renderActions(actionsEl) {
@@ -138,7 +138,16 @@ window.RecordsModule = (function () {
       <div class="toolbar-divider"></div>
       <span class="text-xs text-muted" id="rec-count-text"></span>
     `;
-    document.getElementById('rec-search').addEventListener('input', (e) => { state.search = e.target.value; state.page = 1; state.selected.clear(); renderList(); });
+    document.getElementById('rec-search').addEventListener('input', (e) => {
+      state.search = e.target.value;
+      state.page = 1;
+      state.selected.clear();
+      if (state.searchTimer) window.clearTimeout(state.searchTimer);
+      state.searchTimer = window.setTimeout(() => {
+        state.searchTimer = null;
+        renderList();
+      }, 250);
+    });
     document.getElementById('rec-severity-filter').addEventListener('change', (e) => { state.severityFilter = e.target.value; state.page = 1; state.selected.clear(); renderList(); });
     document.getElementById('rec-rule-filter').addEventListener('change', (e) => { state.ruleFilter = e.target.value; state.page = 1; state.selected.clear(); renderList(); });
   }
@@ -188,6 +197,7 @@ window.RecordsModule = (function () {
         pageItems = all;
       } catch (error) {
         if (requestSequence !== state.requestSequence) return;
+        state.total = 0;
         tableEl.innerHTML = UI.emptyState({
           icon: Icon.alert({ size: 24 }), iconCls: 'danger', title: '异常记录加载失败', desc: error.message,
         });
@@ -200,6 +210,7 @@ window.RecordsModule = (function () {
       pageItems = all.slice((state.page - 1) * state.pageSize, state.page * state.pageSize);
     }
     const totalPages = Math.max(1, Math.ceil(total / state.pageSize));
+    state.total = total;
     if (state.page > totalPages) {
       state.page = totalPages;
       state.selected.clear();
@@ -591,11 +602,26 @@ window.RecordsModule = (function () {
     });
   }
 
-  function exportRecords() {
-    const all = getFiltered();
-    if (all.length === 0) { UI.toast({ type: 'warning', title: '暂无数据可导出' }); return; }
-    window.location.href = Store.exportUrl;
-    UI.toast({ type: 'success', title: '导出已开始', desc: `${all.length} 条记录 · CSV 格式` });
+  async function exportRecords() {
+    const serverBacked = typeof Store.loadRecordsPage === 'function';
+    if (serverBacked) {
+      if (state.searchTimer) window.clearTimeout(state.searchTimer);
+      state.searchTimer = null;
+      await renderList();
+    }
+    const count = serverBacked ? state.total : getFiltered().length;
+    if (count === 0) { UI.toast({ type: 'warning', title: '暂无数据可导出' }); return; }
+    const filters = {
+      status: state.statusFilter === 'all' ? null : state.statusFilter,
+      severity: state.severityFilter === 'all' ? null : state.severityFilter,
+      ruleId: state.ruleFilter === 'all' ? null : state.ruleFilter,
+      search: state.search,
+      sortKey: state.sortKey,
+      sortOrder: state.sortDir,
+    };
+    const url = typeof Store.exportUrl === 'function' ? Store.exportUrl(filters) : Store.exportUrl;
+    window.location.href = url;
+    UI.toast({ type: 'success', title: '导出已开始', desc: `${count} 条记录 · CSV 格式` });
   }
 
   return { render, openDetail };

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -14,6 +15,7 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
 
 ERROR_TOAST = "处理验证请求失败，请稍后重试"
 SUPPORTED_TOAST_TYPES = frozenset({"success", "info", "warning", "error"})
+logger = logging.getLogger(__name__)
 
 
 class CallbackPayloadError(ValueError):
@@ -30,9 +32,13 @@ class GatewaySettings:
 
     @classmethod
     def from_environment(cls, required_env: Callable[[str], str]) -> "GatewaySettings":
+        try:
+            internal_token = required_env("SENTINEL_INTERNAL_TOKEN")
+        except RuntimeError:
+            internal_token = required_env("INTERNAL_EXECUTION_TOKEN")
         return cls(
             api_base_url=required_env("SENTINEL_API_BASE_URL"),
-            internal_token=required_env("INTERNAL_EXECUTION_TOKEN"),
+            internal_token=internal_token,
         )
 
 
@@ -154,5 +160,12 @@ class CardActionGateway:
             if not 200 <= response.status_code < 300:
                 return _error_response()
             return _map_api_response(response.json())
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "feishu_card_callback_failed",
+                extra={
+                    "event": "feishu_card_callback_failed",
+                    "error_type": type(exc).__name__,
+                },
+            )
             return _error_response()

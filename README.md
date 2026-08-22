@@ -39,8 +39,9 @@ Pop-Location
 & .\backend\start.ps1
 ```
 
-如需接收飞书卡片验证回调，在另一个终端设置以下环境变量后启动长连接：
-`FEISHU_APP_ID`、`FEISHU_APP_SECRET`、`SENTINEL_API_BASE_URL` 和
+如需接收飞书卡片验证回调，在另一个终端启动长连接。启动器会安全加载仓库根目录的 `.env`
+（不会覆盖终端中显式设置的环境变量），其中需包含 `FEISHU_APP_ID`、`FEISHU_APP_SECRET`、
+`SENTINEL_API_BASE_URL` 和 `SENTINEL_INTERNAL_TOKEN`；后者也兼容回退到
 `INTERNAL_EXECUTION_TOKEN`：
 
 ```powershell
@@ -49,10 +50,14 @@ Pop-Location
 
 飞书开放平台必须使用长连接订阅 `p2.card.action.trigger`。卡片详情链接使用
 `SENTINEL_PUBLIC_BASE_URL`，真实验收时该地址必须能从接收者设备访问，不能使用仅服务端可见的
-`localhost`。完整迁移、启动、安全诊断和以 `user_id=753f6bdf` 为目标的人工 smoke 步骤见
+`localhost`。该深链不会绕过登录：接收者必须先建立有效的 Sentinel 登录会话，才能进入详情。
+完整迁移、启动、安全诊断和以 `user_id=753f6bdf` 为目标的人工 smoke 步骤见
 [异常实时校验部署与验收](docs/anomaly-validation-acceptance.md)。真实消息发送必须在执行当时再次获得明确授权。
 
-本地默认 `AUTO_LOGIN=true`，打开 <http://localhost:8000> 后自动登录超级管理员。默认账号为 `admin`；密码由 `.env` 中的 `SUPERADMIN_PASSWORD` 控制。
+生产和新生成的本地配置默认 `AUTO_LOGIN=false`。先通过部署登录流程（`POST /api/v1/auth/login`）建立签名会话；`/auth/me` 会同时验证
+cookie/JWT 和当前持久化用户，管理写操作还要求该用户仍为超级管理员。仅显式设置
+`AUTO_LOGIN=true` 的受控开发环境才会自动登录。默认账号为 `admin`；密码由 `.env` 中的
+`SUPERADMIN_PASSWORD` 控制。
 
 FastAPI 启动时会幂等核对全部启用规则。也可以单独执行：
 

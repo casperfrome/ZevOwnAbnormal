@@ -1,10 +1,20 @@
 """Start a Feishu event long connection via the Lark SDK."""
 
 import os
+from pathlib import Path
 
 import lark_oapi as lark
+from dotenv import load_dotenv
 
 from feishu_callback_gateway import CardActionGateway, GatewaySettings
+
+
+ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
+
+
+def load_repository_env() -> None:
+    """Load repository-local settings while preserving explicit process overrides."""
+    load_dotenv(ENV_FILE, override=False)
 
 
 def get_required_env(name: str) -> str:
@@ -16,6 +26,7 @@ def get_required_env(name: str) -> str:
 
 
 def main() -> None:
+    load_repository_env()
     app_id = get_required_env("FEISHU_APP_ID")
     app_secret = get_required_env("FEISHU_APP_SECRET")
     gateway_settings = GatewaySettings.from_environment(get_required_env)

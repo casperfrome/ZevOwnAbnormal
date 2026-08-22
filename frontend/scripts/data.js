@@ -90,11 +90,12 @@ window.Store = (function () {
     };
   };
 
-  async function loadRecordsPage(filters = {}) {
-    const requestSequence = ++recordsPageSequence;
+  function anomalyQuery(filters = {}, includePagination = false) {
     const entries = [
-      ['page', filters.page || 1],
-      ['page_size', filters.pageSize || 10],
+      ...(includePagination ? [
+        ['page', filters.page || 1],
+        ['page_size', filters.pageSize || 10],
+      ] : []),
       ['status_filter', filters.status],
       ['severity', filters.severity],
       ['rule_id', filters.ruleId],
@@ -102,7 +103,12 @@ window.Store = (function () {
       ['sort_key', filters.sortKey],
       ['sort_order', filters.sortOrder],
     ].filter(([, value]) => value !== null && value !== undefined && value !== '');
-    const query = entries.map(([key, value]) => `${key}=${encodeURIComponent(value)}`).join('&');
+    return entries.map(([key, value]) => `${key}=${encodeURIComponent(value)}`).join('&');
+  }
+
+  async function loadRecordsPage(filters = {}) {
+    const requestSequence = ++recordsPageSequence;
+    const query = anomalyQuery(filters, true);
     const result = await request(`/anomalies?${query}`);
     const items = (result.items || []).map(mapRecord);
     if (requestSequence === recordsPageSequence) state.records = items;
@@ -227,7 +233,10 @@ window.Store = (function () {
       return item;
     },
     bulkUpdateRecords: async (ids, status) => { await request('/anomalies/bulk-status', { method: 'POST', body: JSON.stringify({ ids, status }) }); await refresh(); },
-    exportUrl: '/api/v1/anomalies/export',
+    exportUrl: filters => {
+      const query = anomalyQuery(filters);
+      return `/api/v1/anomalies/export${query ? `?${query}` : ''}`;
+    },
     getOverview: () => state.overview,
     getStats: () => {
       const server = state.overview?.stats || {};

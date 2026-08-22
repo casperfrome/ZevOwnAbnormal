@@ -67,13 +67,18 @@ def get_app_settings(request: Request) -> Settings:
     return request.app.state.settings
 
 
-def get_current_admin(
+def get_current_user(
     request: Request,
     session: Session = Depends(get_session),
     settings: Settings = Depends(get_app_settings),
-) -> str:
+) -> User:
     if settings.auto_login:
-        return settings.superadmin_username
+        return User(
+            id="auto-login-superadmin",
+            username=settings.superadmin_username,
+            password_hash="",
+            is_superuser=True,
+        )
     token = request.cookies.get(SESSION_COOKIE)
     if not token:
         raise HTTPException(401, "未登录")
@@ -87,6 +92,10 @@ def get_current_admin(
     user = session.scalar(select(User).where(User.username == username))
     if user is None:
         raise HTTPException(401, "登录状态无效")
+    return user
+
+
+def get_current_admin(user: User = Depends(get_current_user)) -> str:
     if not user.is_superuser:
         raise HTTPException(403, "需要超级管理员权限")
     return user.username
@@ -96,6 +105,7 @@ def get_current_admin(
 def test_feishu_message(
     payload: FeishuMessageTestRequest,
     settings: Settings = Depends(get_app_settings),
+    _admin_username: str = Depends(get_current_admin),
 ):
     try:
         message_id = feishu_gateway.send_configured_text(
@@ -290,7 +300,7 @@ def list_datasources(session: Session = Depends(get_session)):
 
 
 @router.post("/datasources", status_code=status.HTTP_201_CREATED)
-def create_datasource(payload: DatasourceCreate, session: Session = Depends(get_session), settings: Settings = Depends(get_app_settings)):
+def create_datasource(payload: DatasourceCreate, session: Session = Depends(get_session), settings: Settings = Depends(get_app_settings), _admin_username: str = Depends(get_current_admin)):
     cipher = CredentialCipher(settings.datasource_encryption_key)
     item = Datasource(
         **payload.model_dump(exclude={"password"}),
@@ -306,7 +316,7 @@ def create_datasource(payload: DatasourceCreate, session: Session = Depends(get_
 
 
 @router.post("/datasources/test")
-def test_datasource_config(payload: DatasourceCreate):
+def test_datasource_config(payload: DatasourceCreate, _admin_username: str = Depends(get_current_admin)):
     item = Datasource(**payload.model_dump(exclude={"password"}), password_encrypted="")
     try:
         connection = connect_to_datasource(item, payload.password)
@@ -328,7 +338,7 @@ def get_datasource(datasource_id: str, session: Session = Depends(get_session)):
 
 
 @router.patch("/datasources/{datasource_id}")
-def update_datasource(datasource_id: str, payload: DatasourceUpdate, session: Session = Depends(get_session), settings: Settings = Depends(get_app_settings)):
+def update_datasource(datasource_id: str, payload: DatasourceUpdate, session: Session = Depends(get_session), settings: Settings = Depends(get_app_settings), _admin_username: str = Depends(get_current_admin)):
     item = session.get(Datasource, datasource_id)
     if not item:
         raise HTTPException(404, "数据源不存在")
@@ -343,7 +353,7 @@ def update_datasource(datasource_id: str, payload: DatasourceUpdate, session: Se
 
 
 @router.delete("/datasources/{datasource_id}", status_code=204)
-def delete_datasource(datasource_id: str, session: Session = Depends(get_session)):
+def delete_datasource(datasource_id: str, session: Session = Depends(get_session), _admin_username: str = Depends(get_current_admin)):
     item = session.get(Datasource, datasource_id)
     if not item:
         raise HTTPException(404, "数据源不存在")
@@ -354,7 +364,7 @@ def delete_datasource(datasource_id: str, session: Session = Depends(get_session
 
 
 @router.post("/datasources/{datasource_id}/test")
-def test_datasource(datasource_id: str, session: Session = Depends(get_session), settings: Settings = Depends(get_app_settings)):
+def test_datasource(datasource_id: str, session: Session = Depends(get_session), settings: Settings = Depends(get_app_settings), _admin_username: str = Depends(get_current_admin)):
     item = session.get(Datasource, datasource_id)
     if not item:
         raise HTTPException(404, "数据源不存在")
@@ -382,7 +392,7 @@ def list_datasets(session: Session = Depends(get_session)):
 
 
 @router.post("/datasets", status_code=status.HTTP_201_CREATED)
-def create_dataset(payload: DatasetCreate, session: Session = Depends(get_session)):
+def create_dataset(payload: DatasetCreate, session: Session = Depends(get_session), _admin_username: str = Depends(get_current_admin)):
     if not session.get(Datasource, payload.datasource_id):
         raise HTTPException(404, "数据源不存在")
     try:
@@ -405,7 +415,7 @@ def get_dataset(dataset_id: str, session: Session = Depends(get_session)):
 
 
 @router.patch("/datasets/{dataset_id}")
-def update_dataset(dataset_id: str, payload: DatasetUpdate, session: Session = Depends(get_session)):
+def update_dataset(dataset_id: str, payload: DatasetUpdate, session: Session = Depends(get_session), _admin_username: str = Depends(get_current_admin)):
     item = session.get(Dataset, dataset_id)
     if not item:
         raise HTTPException(404, "数据集不存在")
@@ -422,7 +432,7 @@ def update_dataset(dataset_id: str, payload: DatasetUpdate, session: Session = D
 
 
 @router.delete("/datasets/{dataset_id}", status_code=204)
-def delete_dataset(dataset_id: str, session: Session = Depends(get_session)):
+def delete_dataset(dataset_id: str, session: Session = Depends(get_session), _admin_username: str = Depends(get_current_admin)):
     item = session.get(Dataset, dataset_id)
     if not item:
         raise HTTPException(404, "数据集不存在")
@@ -433,7 +443,7 @@ def delete_dataset(dataset_id: str, session: Session = Depends(get_session)):
 
 
 @router.post("/datasets/{dataset_id}/execute")
-def execute_saved_dataset(dataset_id: str, session: Session = Depends(get_session), settings: Settings = Depends(get_app_settings)):
+def execute_saved_dataset(dataset_id: str, session: Session = Depends(get_session), settings: Settings = Depends(get_app_settings), _admin_username: str = Depends(get_current_admin)):
     item = session.get(Dataset, dataset_id)
     if not item:
         raise HTTPException(404, "数据集不存在")
@@ -452,7 +462,7 @@ def execute_saved_dataset(dataset_id: str, session: Session = Depends(get_sessio
 
 
 @router.post("/datasets/execute")
-def execute_ad_hoc_dataset(payload: dict, session: Session = Depends(get_session), settings: Settings = Depends(get_app_settings)):
+def execute_ad_hoc_dataset(payload: dict, session: Session = Depends(get_session), settings: Settings = Depends(get_app_settings), _admin_username: str = Depends(get_current_admin)):
     datasource = session.get(Datasource, payload.get("datasource_id"))
     if not datasource:
         raise HTTPException(404, "数据源不存在")
@@ -483,7 +493,7 @@ def list_rules(session: Session = Depends(get_session)):
 
 
 @router.post("/rules", status_code=201)
-def create_rule(payload: RuleCreate, session: Session = Depends(get_session), settings: Settings = Depends(get_app_settings)):
+def create_rule(payload: RuleCreate, session: Session = Depends(get_session), settings: Settings = Depends(get_app_settings), _admin_username: str = Depends(get_current_admin)):
     dataset = session.get(Dataset, payload.dataset_id)
     if not dataset:
         raise HTTPException(404, "数据集不存在")
@@ -509,7 +519,7 @@ def get_rule(rule_id: str, session: Session = Depends(get_session)):
 
 
 @router.put("/rules/{rule_id}")
-def update_rule(rule_id: str, payload: RuleCreate, session: Session = Depends(get_session)):
+def update_rule(rule_id: str, payload: RuleCreate, session: Session = Depends(get_session), _admin_username: str = Depends(get_current_admin)):
     item = session.get(Rule, rule_id)
     if not item or item.deleted_at:
         raise HTTPException(404, "规则不存在")
@@ -522,7 +532,7 @@ def update_rule(rule_id: str, payload: RuleCreate, session: Session = Depends(ge
 
 
 @router.delete("/rules/{rule_id}", status_code=204)
-def delete_rule(rule_id: str, session: Session = Depends(get_session), settings: Settings = Depends(get_app_settings)):
+def delete_rule(rule_id: str, session: Session = Depends(get_session), settings: Settings = Depends(get_app_settings), _admin_username: str = Depends(get_current_admin)):
     item = session.get(Rule, rule_id)
     if not item or item.deleted_at:
         raise HTTPException(404, "规则不存在")
@@ -534,7 +544,7 @@ def delete_rule(rule_id: str, session: Session = Depends(get_session), settings:
 
 
 @router.post("/rules/{rule_id}/execute")
-def execute_rule_manually(rule_id: str, session: Session = Depends(get_session), settings: Settings = Depends(get_app_settings)):
+def execute_rule_manually(rule_id: str, session: Session = Depends(get_session), settings: Settings = Depends(get_app_settings), _admin_username: str = Depends(get_current_admin)):
     try:
         run = execute_rule(session, settings, rule_id, "manual")
     except RuleExecutionConflict as exc:
@@ -547,7 +557,7 @@ def execute_rule_manually(rule_id: str, session: Session = Depends(get_session),
 
 
 @router.post("/rules/{rule_id}/sync")
-def sync_rule(rule_id: str, session: Session = Depends(get_session), settings: Settings = Depends(get_app_settings)):
+def sync_rule(rule_id: str, session: Session = Depends(get_session), settings: Settings = Depends(get_app_settings), _admin_username: str = Depends(get_current_admin)):
     item = session.get(Rule, rule_id)
     if not item or item.deleted_at:
         raise HTTPException(404, "规则不存在")
@@ -558,7 +568,7 @@ def sync_rule(rule_id: str, session: Session = Depends(get_session), settings: S
 
 
 @router.post("/rules/{rule_id}/enable")
-def enable_rule(rule_id: str, session: Session = Depends(get_session), settings: Settings = Depends(get_app_settings)):
+def enable_rule(rule_id: str, session: Session = Depends(get_session), settings: Settings = Depends(get_app_settings), _admin_username: str = Depends(get_current_admin)):
     item = session.get(Rule, rule_id)
     if not item or item.deleted_at:
         raise HTTPException(404, "规则不存在")
@@ -570,7 +580,7 @@ def enable_rule(rule_id: str, session: Session = Depends(get_session), settings:
 
 
 @router.post("/rules/{rule_id}/disable")
-def disable_rule(rule_id: str, session: Session = Depends(get_session), settings: Settings = Depends(get_app_settings)):
+def disable_rule(rule_id: str, session: Session = Depends(get_session), settings: Settings = Depends(get_app_settings), _admin_username: str = Depends(get_current_admin)):
     item = session.get(Rule, rule_id)
     if not item or item.deleted_at:
         raise HTTPException(404, "规则不存在")
@@ -609,6 +619,38 @@ def _anomaly_search_predicate(search: str, dialect_name: str):
     )
 
 
+def _apply_anomaly_filters(
+    query,
+    *,
+    status_filter: str | None,
+    severity: str | None,
+    rule_id: str | None,
+    search: str | None,
+    dialect_name: str,
+):
+    if status_filter:
+        query = query.where(AnomalyRecord.status == status_filter)
+    if severity:
+        query = query.where(AnomalyRecord.severity == severity)
+    if rule_id:
+        query = query.where(AnomalyRecord.rule_id == rule_id)
+    if search:
+        query = query.where(_anomaly_search_predicate(search, dialect_name))
+    return query
+
+
+def _anomaly_ordering(sort_key: str, sort_order: str):
+    severity_rank = case(
+        (AnomalyRecord.severity == "critical", 4),
+        (AnomalyRecord.severity == "high", 3),
+        (AnomalyRecord.severity == "medium", 2),
+        (AnomalyRecord.severity == "low", 1),
+        else_=0,
+    )
+    sort_column = severity_rank if sort_key == "severity" else AnomalyRecord.first_seen_at
+    return sort_column.asc() if sort_order == "asc" else sort_column.desc()
+
+
 @router.get("/anomalies")
 def list_anomalies(
     page: int = 1,
@@ -621,42 +663,74 @@ def list_anomalies(
     sort_order: Literal["asc", "desc"] = "desc",
     session: Session = Depends(get_session),
 ):
-    severity_rank = case(
-        (AnomalyRecord.severity == "critical", 4),
-        (AnomalyRecord.severity == "high", 3),
-        (AnomalyRecord.severity == "medium", 2),
-        (AnomalyRecord.severity == "low", 1),
-        else_=0,
+    ordering = _anomaly_ordering(sort_key, sort_order)
+    dialect_name = session.get_bind().dialect.name
+    query = _apply_anomaly_filters(
+        select(AnomalyRecord),
+        status_filter=status_filter,
+        severity=severity,
+        rule_id=rule_id,
+        search=search,
+        dialect_name=dialect_name,
     )
-    sort_column = severity_rank if sort_key == "severity" else AnomalyRecord.first_seen_at
-    ordering = sort_column.asc() if sort_order == "asc" else sort_column.desc()
-    query = select(AnomalyRecord)
-    if status_filter:
-        query = query.where(AnomalyRecord.status == status_filter)
-    if severity:
-        query = query.where(AnomalyRecord.severity == severity)
-    if rule_id:
-        query = query.where(AnomalyRecord.rule_id == rule_id)
-    if search:
-        query = query.where(_anomaly_search_predicate(search, session.get_bind().dialect.name))
-    query = query.order_by(ordering, AnomalyRecord.id.asc())
-    all_items = list(session.scalars(query))
+    count_query = _apply_anomaly_filters(
+        select(AnomalyRecord.id),
+        status_filter=status_filter,
+        severity=severity,
+        rule_id=rule_id,
+        search=search,
+        dialect_name=dialect_name,
+    )
     start = max(page - 1, 0) * min(max(page_size, 1), 100)
     size = min(max(page_size, 1), 100)
+    total = session.scalar(select(func.count()).select_from(count_query.subquery())) or 0
+    page_items = list(session.scalars(
+        query.order_by(ordering, AnomalyRecord.id.asc()).limit(size).offset(start)
+    ))
+    statuses_by_anomaly: dict[str, list[str]] = {}
+    if page_items:
+        for anomaly_id, delivery_status, _count in session.execute(
+            select(
+                NotificationDelivery.anomaly_id,
+                NotificationDelivery.status,
+                func.count(NotificationDelivery.id),
+            ).where(
+                NotificationDelivery.anomaly_id.in_([item.id for item in page_items])
+            ).group_by(NotificationDelivery.anomaly_id, NotificationDelivery.status)
+        ):
+            statuses_by_anomaly.setdefault(anomaly_id, []).append(delivery_status)
     items = []
-    for item in all_items[start:start + size]:
-        statuses = list(session.scalars(select(NotificationDelivery.status).where(NotificationDelivery.anomaly_id == item.id)))
+    for item in page_items:
+        statuses = statuses_by_anomaly.get(item.id, [])
         delivery = "failed" if "failed" in statuses else "sent" if statuses and all(s == "sent" for s in statuses) else "pending" if statuses else "none"
         items.append(anomaly_dict(item, delivery))
-    return {"items": items, "total": len(all_items), "page": page, "page_size": size}
+    return {"items": items, "total": total, "page": page, "page_size": size}
 
 
 @router.get("/anomalies/export")
-def export_anomalies(session: Session = Depends(get_session)):
+def export_anomalies(
+    status_filter: str | None = None,
+    severity: str | None = None,
+    rule_id: str | None = None,
+    search: str | None = None,
+    sort_key: Literal["occurredAt", "severity"] = "occurredAt",
+    sort_order: Literal["asc", "desc"] = "desc",
+    session: Session = Depends(get_session),
+):
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(["id", "rule_name", "dataset_name", "severity", "status", "business_key", "first_seen_at", "last_seen_at", "hit_count"])
-    for item in session.scalars(select(AnomalyRecord).order_by(AnomalyRecord.last_seen_at.desc())):
+    query = _apply_anomaly_filters(
+        select(AnomalyRecord),
+        status_filter=status_filter,
+        severity=severity,
+        rule_id=rule_id,
+        search=search,
+        dialect_name=session.get_bind().dialect.name,
+    )
+    for item in session.scalars(query.order_by(
+        _anomaly_ordering(sort_key, sort_order), AnomalyRecord.id.asc()
+    )):
         writer.writerow([item.id, item.rule_name, item.dataset_name, item.severity, item.status, item.business_key, item.first_seen_at, item.last_seen_at, item.hit_count])
     return Response(output.getvalue(), media_type="text/csv; charset=utf-8", headers={"Content-Disposition": "attachment; filename=anomalies.csv"})
 

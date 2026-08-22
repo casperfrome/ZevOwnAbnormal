@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, text
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -107,7 +107,11 @@ class RuleRun(Base):
 
 class AnomalyRecord(Base):
     __tablename__ = "anomaly_records"
-    __table_args__ = (UniqueConstraint("rule_id", "active_fingerprint", name="uq_active_anomaly"),)
+    __table_args__ = (
+        UniqueConstraint("rule_id", "active_fingerprint", name="uq_active_anomaly"),
+        Index("ix_anomaly_records_status_deadline", "status", "validation_deadline"),
+        Index("ix_anomaly_records_first_seen_id", "first_seen_at", "id"),
+    )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     rule_id: Mapped[str] = mapped_column(ForeignKey("rules.id"), nullable=False)
     rule_name: Mapped[str] = mapped_column(String(150), nullable=False)
@@ -157,7 +161,10 @@ class NotificationDelivery(Base):
 
 class AnomalyValidationRequest(Base, TimestampMixin):
     __tablename__ = "anomaly_validation_requests"
-    __table_args__ = (UniqueConstraint("anomaly_id", "recipient_user_id", name="uq_validation_request_recipient"),)
+    __table_args__ = (
+        UniqueConstraint("anomaly_id", "recipient_user_id", name="uq_validation_request_recipient"),
+        Index("ix_validation_requests_delivery_status_updated", "delivery_status", "updated_at"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     anomaly_id: Mapped[str] = mapped_column(ForeignKey("anomaly_records.id"), nullable=False)

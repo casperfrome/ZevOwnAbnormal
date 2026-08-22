@@ -296,6 +296,13 @@ test('record pages are loaded from the backend with status and pagination filter
   assert.equal(result.pageSize, 10);
   assert.equal(result.items[0].status, 'timed_out');
   assert.equal(store.getRecords()[0].id, 'record-21');
+  assert.equal(
+    store.exportUrl({
+      status: 'timed_out', severity: 'high', ruleId: 'rule-1', search: 'GMV',
+      sortKey: 'severity', sortOrder: 'asc',
+    }),
+    '/api/v1/anomalies/export?status_filter=timed_out&severity=high&rule_id=rule-1&search=GMV&sort_key=severity&sort_order=asc',
+  );
 });
 
 test('the newest record-page request owns the Store cache when responses arrive out of order', async () => {

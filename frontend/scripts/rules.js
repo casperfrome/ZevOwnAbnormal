@@ -408,22 +408,41 @@ window.RulesModule = (function () {
     const keyFieldsSel = m.dialog.querySelector('#f-key-fields');
     const fieldsPreview = m.dialog.querySelector('#dataset-fields-preview');
 
+    function replaceFieldOptions(select, fields, selectedValues = [], placeholder = null) {
+      const selected = new Set(selectedValues.filter(value => value !== null && value !== undefined).map(String));
+      select.replaceChildren();
+      if (placeholder !== null) {
+        const option = document.createElement('option');
+        option.value = '';
+        option.textContent = placeholder;
+        select.append(option);
+      }
+      (fields || []).forEach(field => {
+        const name = String(field.name ?? '');
+        const type = String(field.type ?? '');
+        const option = document.createElement('option');
+        option.value = name;
+        option.textContent = `${name} · ${type}`;
+        option.selected = selected.has(name);
+        select.append(option);
+      });
+    }
+
     function updateFieldsForDataset(datasetId) {
       if (!datasetId) {
-        fieldSel.innerHTML = '<option value="">请先选择数据集…</option>';
-        fieldSourceSel.innerHTML = '<option value="">请选择字段…</option>';
-        validationFieldsSel.innerHTML = '<option value="">请先选择数据集…</option>';
-        keyFieldsSel.innerHTML = '<option value="">请选择字段…</option>';
+        replaceFieldOptions(fieldSel, [], [], '请先选择数据集…');
+        replaceFieldOptions(fieldSourceSel, [], [], '请选择字段…');
+        replaceFieldOptions(validationFieldsSel, [], [], '请先选择数据集…');
+        replaceFieldOptions(keyFieldsSel, [], [], '请选择字段…');
         fieldsPreview.innerHTML = '';
         return;
       }
       const ds = Store.getDataset(datasetId);
       if (!ds) return;
-      const opts = ds.fields.map(f => `<option value="${f.name}" ${data.field === f.name ? 'selected' : ''}>${escapeHtml(f.name)} · ${f.type}</option>`).join('');
-      fieldSel.innerHTML = `<option value="">请选择字段…</option>${opts}`;
-      fieldSourceSel.innerHTML = `<option value="">请选择字段…</option>${ds.fields.map(f => `<option value="${f.name}" ${data.notify.fieldSource === f.name ? 'selected' : ''}>${escapeHtml(f.name)} · ${f.type}</option>`).join('')}`;
-      validationFieldsSel.innerHTML = ds.fields.map(f => `<option value="${f.name}" ${validationFields.includes(f.name) ? 'selected' : ''}>${escapeHtml(f.name)} · ${f.type}</option>`).join('');
-      keyFieldsSel.innerHTML = ds.fields.map(f => `<option value="${f.name}" ${(data.anomalyKeyFields || []).includes(f.name) ? 'selected' : ''}>${escapeHtml(f.name)} · ${f.type}</option>`).join('');
+      replaceFieldOptions(fieldSel, ds.fields, [data.field], '请选择字段…');
+      replaceFieldOptions(fieldSourceSel, ds.fields, [data.notify.fieldSource], '请选择字段…');
+      replaceFieldOptions(validationFieldsSel, ds.fields, validationFields);
+      replaceFieldOptions(keyFieldsSel, ds.fields, data.anomalyKeyFields || []);
       fieldsPreview.innerHTML = `
         <div class="schedule-preview" style="background:var(--color-info-soft);border-color:var(--color-info-line);color:#0369A1;margin-top:var(--space-3);">
           ${Icon.info({ size: 14 })}
@@ -452,7 +471,6 @@ window.RulesModule = (function () {
     function renderConditions() {
       const container = m.dialog.querySelector('#conditions-container');
       const ds = Store.getDataset(datasetSel.value);
-      const fieldOpts = ds ? ds.fields.map(f => `<option value="${f.name}">${escapeHtml(f.name)}</option>`).join('') : '';
       container.innerHTML = conditions.map((c, idx) => {
         const showValue = !['is_null', 'is_not_null'].includes(c.op);
         const showBaseline = c.op === 'gt_threshold_ratio' || c.op === 'lt_threshold_ratio';
@@ -461,7 +479,6 @@ window.RulesModule = (function () {
           <div class="condition-row" data-idx="${idx}">
             <select class="select" data-c="field">
               <option value="">选择字段…</option>
-              ${fieldOpts}
             </select>
             <select class="select" data-c="op">
               ${Object.entries(OP_LABELS).map(([k, v]) => `<option value="${k}" ${c.op === k ? 'selected' : ''}>${v}</option>`).join('')}
@@ -483,7 +500,7 @@ window.RulesModule = (function () {
       container.querySelectorAll('.condition-row').forEach((row, idx) => {
         const c = conditions[idx];
         const fieldSel = row.querySelector('[data-c="field"]');
-        if (c.field && fieldSel) fieldSel.value = c.field;
+        if (fieldSel) replaceFieldOptions(fieldSel, ds?.fields || [], [c.field], '选择字段…');
         row.querySelectorAll('[data-c]').forEach(el => {
           el.addEventListener('change', () => {
             conditions[idx][el.dataset.c] = el.value;

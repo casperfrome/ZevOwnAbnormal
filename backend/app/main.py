@@ -3,37 +3,67 @@ from contextlib import asynccontextmanager
 from contextlib import suppress
 import logging
 from pathlib import Path
+import threading
 
 import bcrypt
 import jwt
-from fastapi import FastAPI, Header, HTTPException, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Response
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
 
-from .api import internal_router, router
+from .api import get_current_user, internal_router, router
 from .config import SESSION_COOKIE, Settings, get_settings
 from .database import Base, make_session_factory
 from .models import User
 from .scheduler_service import reconcile_enabled_rules
-from .validation_service import expire_due_anomalies, reconcile_validation_cards
+from .validation_service import deliver_validation_requests, expire_due_anomalies, reconcile_validation_cards
 
 
 TEST_SESSION_SECRET = "test-session-secret-that-is-long-enough"
 logger = logging.getLogger(__name__)
 
 
-def run_validation_maintenance_cycle(session_factory, settings: Settings) -> None:
+def run_validation_maintenance_cycle(
+    session_factory,
+    settings: Settings,
+    stop_event: threading.Event | None = None,
+) -> None:
+    should_stop = stop_event.is_set if stop_event is not None else None
     with session_factory() as session:
         expire_due_anomalies(session)
-        reconcile_validation_cards(session, settings)
+        if should_stop is not None and should_stop():
+            logger.warning("异常验证维护已取消，初始投递与卡片收敛留待下一轮")
+            return
+        deliver_validation_requests(
+            session,
+            settings,
+            limit=settings.validation_maintenance_batch_size,
+            should_stop=should_stop,
+        )
+        if should_stop is not None and should_stop():
+            logger.warning("异常验证维护已取消，终态卡片收敛留待下一轮")
+            return
+        reconcile_validation_cards(
+            session,
+            settings,
+            limit=settings.validation_maintenance_batch_size,
+            should_stop=should_stop,
+        )
 
 
 async def validation_maintenance_loop(session_factory, settings: Settings) -> None:
     while True:
-        cycle = asyncio.create_task(asyncio.to_thread(run_validation_maintenance_cycle, session_factory, settings))
+        stop_event = threading.Event()
+        cycle = asyncio.create_task(asyncio.to_thread(
+            run_validation_maintenance_cycle,
+            session_factory,
+            settings,
+            stop_event,
+        ))
         try:
             await asyncio.shield(cycle)
         except asyncio.CancelledError as cancelled:
+            stop_event.set()
             try:
                 await cycle
             except Exception:
@@ -49,6 +79,7 @@ def create_app(testing: bool = False) -> FastAPI:
         database_url="sqlite+pysqlite:///:memory:",
         datasource_encryption_key="y4R9V3fBMN_WBq6j7u5oA-rOQ1z3B1l1J1dQxQ8_s8Y=",
         session_secret=TEST_SESSION_SECRET,
+        auto_login=True,
     ) if testing else get_settings()
     engine, session_factory = make_session_factory(settings.database_url, testing=testing)
 
@@ -96,19 +127,22 @@ def create_app(testing: bool = False) -> FastAPI:
         return {"status": "ok"}
 
     @app.get("/api/v1/auth/me")
-    def me(response: Response) -> dict[str, object]:
-        if not settings.auto_login:
-            raise HTTPException(401, "未登录")
-        token = jwt.encode({"sub": "admin", "role": "superadmin"}, settings.session_secret, algorithm="HS256")
-        response.set_cookie(
-            SESSION_COOKIE,
-            token,
-            httponly=True,
-            samesite="lax",
-            secure=False,
-            max_age=86400,
-        )
-        return {"id": 1, "username": "admin", "is_superuser": True}
+    def me(response: Response, user: User = Depends(get_current_user)) -> dict[str, object]:
+        if settings.auto_login:
+            token = jwt.encode(
+                {"sub": user.username, "role": "superadmin" if user.is_superuser else "user"},
+                settings.session_secret,
+                algorithm="HS256",
+            )
+            response.set_cookie(
+                SESSION_COOKIE,
+                token,
+                httponly=True,
+                samesite="lax",
+                secure=False,
+                max_age=86400,
+            )
+        return {"id": user.id, "username": user.username, "is_superuser": user.is_superuser}
 
     @app.post("/api/v1/auth/login")
     def login(payload: dict, response: Response):

@@ -27,6 +27,15 @@ def _validation_targets_column():
     )
 
 
+def _description_column():
+    return sa.Column(
+        "description",
+        sa.Text(),
+        nullable=False,
+        server_default=sa.text("('')"),
+    )
+
+
 def upgrade():
     bind = op.get_bind()
     rule_columns = _columns(bind, "rules")
@@ -39,7 +48,7 @@ def upgrade():
 
     anomaly_columns = _columns(bind, "anomaly_records")
     if "description" not in anomaly_columns:
-        op.add_column("anomaly_records", sa.Column("description", sa.Text(), nullable=False, server_default=""))
+        op.add_column("anomaly_records", _description_column())
     if "validation_deadline" not in anomaly_columns:
         op.add_column("anomaly_records", sa.Column("validation_deadline", sa.DateTime(), nullable=True))
     if "timed_out_at" not in anomaly_columns:

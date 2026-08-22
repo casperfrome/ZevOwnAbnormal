@@ -372,6 +372,36 @@ def test_seed_platform_does_not_upgrade_legacy_metadata_on_same_named_custom_dat
         engine.dispose()
 
 
+def test_seed_platform_skips_demo_dataset_and_rule_for_same_named_custom_datasource_without_dataset(
+    tmp_path, monkeypatch, capsys
+):
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'custom-source-no-dataset.sqlite'}"
+    engine, factory = make_session_factory(database_url, testing=True)
+    Base.metadata.create_all(engine)
+    with factory() as session:
+        session.add(Datasource(
+            name="塔斯汀经营 ADS", type="starrocks", host="customer-starrocks.internal", port=9030,
+            database="customer_ads", username="customer", password_encrypted="encrypted",
+            description="customer-owned datasource",
+        ))
+        session.commit()
+    engine.dispose()
+    monkeypatch.setattr(seed_platform, "get_settings", lambda: Settings(database_url=database_url))
+
+    seed_platform.main()
+
+    engine, factory = make_session_factory(database_url, testing=True)
+    try:
+        with factory() as session:
+            assert session.scalar(select(Dataset).where(Dataset.name == "门店综合经营日报")) is None
+            assert session.scalar(select(Rule).where(Rule.name == "门店高退款率检测")) is None
+        output = capsys.readouterr().out
+        assert "完整 demo 数据源指纹" in output
+        assert "跳过" in output
+    finally:
+        engine.dispose()
+
+
 def test_seed_platform_does_not_add_validation_target_to_active_legacy_demo_rule(
     tmp_path, monkeypatch, capsys
 ):

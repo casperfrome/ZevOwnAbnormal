@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import threading
 import time
+import logging
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from sqlalchemy import and_, or_, select, update
 from sqlalchemy.exc import IntegrityError
@@ -46,6 +47,8 @@ _SQLITE_LOCK_STRIPES = tuple(threading.Lock() for _ in range(64))
 _FEISHU_DEDUPE_WINDOW = timedelta(hours=1)
 _FEISHU_RETRY_SAFETY_MARGIN = timedelta(minutes=1)
 _DELIVERY_CLAIM_LEASE = timedelta(seconds=30)
+_MAX_DELIVERY_ATTEMPTS = 3
+logger = logging.getLogger(__name__)
 
 
 def resolve_validation_targets(targets: list[dict], row: dict[str, Any]) -> list[str]:
@@ -90,7 +93,7 @@ def snapshot_validation(
         session.add(AnomalyEvent(
             anomaly_id=anomaly.id,
             event_type="validation_requested",
-            description=f"已向 {len(new_recipients)} 位验证人发送实时验证请求",
+            description=f"已创建 {len(new_recipients)} 位验证人的实时验证请求，待发送",
             created_at=snapshot_time,
         ))
     if recipients:
@@ -149,10 +152,14 @@ def build_validation_card(anomaly: AnomalyRecord, public_base_url: str) -> dict:
                 },
                 {
                     "tag": "button",
+                    "name": "submit_validation",
                     "text": {"tag": "plain_text", "content": "提交验证"},
                     "type": "primary",
-                    "action_type": "form_submit",
-                    "value": {"action": "submit_validation", "anomaly_id": anomaly.id},
+                    "form_action_type": "submit",
+                    "behaviors": [{
+                        "type": "callback",
+                        "value": {"action": "submit_validation", "anomaly_id": anomaly.id},
+                    }],
                 },
             ],
         })
@@ -168,12 +175,21 @@ def build_validation_card(anomaly: AnomalyRecord, public_base_url: str) -> dict:
     }
 
 
-def _active_client(settings: Settings, client: FeishuClient | None) -> tuple[FeishuClient, bool]:
+def _active_client(
+    settings: Settings,
+    client: FeishuClient | None,
+    should_stop: Callable[[], bool] | None = None,
+) -> tuple[FeishuClient, bool]:
     if client is not None:
         return client, False
     if not settings.feishu_app_id or not settings.feishu_app_secret:
         raise FeishuConfigurationError("未配置飞书 App ID/App Secret")
-    return FeishuClient(settings.feishu_app_id, settings.feishu_app_secret), True
+    return FeishuClient(
+        settings.feishu_app_id,
+        settings.feishu_app_secret,
+        timeout=settings.feishu_http_timeout_seconds,
+        cancellation_check=should_stop,
+    ), True
 
 
 def deliver_validation_requests(
@@ -184,6 +200,8 @@ def deliver_validation_requests(
     rule_id: str | None = None,
     client: FeishuClient | None = None,
     now: datetime | None = None,
+    limit: int | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> int:
     query = select(AnomalyValidationRequest.id).join(
         AnomalyRecord, AnomalyValidationRequest.anomaly_id == AnomalyRecord.id
@@ -194,20 +212,37 @@ def deliver_validation_requests(
         query = query.where(AnomalyValidationRequest.id.in_(request_ids))
     if rule_id is not None:
         query = query.where(AnomalyRecord.rule_id == rule_id)
-    pending_ids = list(session.scalars(query))
+    query = query.order_by(AnomalyValidationRequest.created_at, AnomalyValidationRequest.id)
+    if limit is not None:
+        query = query.limit(limit + 1)
+    candidate_ids = list(session.scalars(query))
+    has_more = limit is not None and len(candidate_ids) > limit
+    pending_ids = candidate_ids[:limit] if limit is not None else candidate_ids
     session.commit()
     if not pending_ids:
+        return 0
+    failure_time = now if now is not None else utcnow()
+    pending_ids = _close_resolved_never_sent_requests(session, pending_ids, failure_time)
+    if not pending_ids:
+        if has_more:
+            logger.warning("初始验证投递已达到维护批次上限，剩余请求将在下一轮处理")
+        return 0
+    if should_stop is not None and should_stop():
+        logger.warning("初始验证投递维护已取消，剩余请求将在下一轮处理")
         return 0
     active_client = None
     owns_client = False
     try:
-        active_client, owns_client = _active_client(settings, client)
+        active_client, owns_client = _active_client(settings, client, should_stop)
     except Exception as exc:
-        failure_time = now if now is not None else utcnow()
         return _mark_delivery_configuration_failure(session, pending_ids, exc, failure_time)
     failures = 0
+    interrupted = False
     try:
         for request_id in pending_ids:
+            if should_stop is not None and should_stop():
+                interrupted = True
+                break
             claim_time = now if now is not None else utcnow()
             claim_outcome, pair = _claim_validation_delivery(session, request_id, claim_time)
             if claim_outcome == "uncertain":
@@ -219,8 +254,12 @@ def deliver_validation_requests(
             message_id = None
             final_error: Exception | None = None
             ambiguous_error: Exception | None = None
-            for attempt in range(3):
+            attempt_budget = _MAX_DELIVERY_ATTEMPTS - request.delivery_attempts + 1
+            for attempt in range(attempt_budget):
                 if attempt:
+                    if should_stop is not None and should_stop():
+                        interrupted = True
+                        break
                     retry_time = now if now is not None else utcnow()
                     if not _record_validation_delivery_retry(session, request.id, retry_time):
                         final_error = RuntimeError("发送认领已失效")
@@ -254,10 +293,44 @@ def deliver_validation_requests(
             else:
                 _fail_validation_delivery_definitively(session, request.id, final_error, finish_time)
                 failures += 1
+        if has_more or interrupted:
+            logger.warning("初始验证投递仍有未完成请求，将在下一轮维护继续处理")
         return failures
     finally:
         if owns_client and active_client is not None:
             active_client.close()
+
+
+def _close_resolved_never_sent_requests(
+    session: Session,
+    request_ids: list[str],
+    closed_at: datetime,
+) -> list[str]:
+    remaining: list[str] = []
+    for request_id in request_ids:
+        with _serialize_sqlite(session, f"delivery:{request_id}"):
+            pair = session.execute(
+                select(AnomalyValidationRequest, AnomalyRecord).join(
+                    AnomalyRecord, AnomalyValidationRequest.anomaly_id == AnomalyRecord.id
+                ).where(AnomalyValidationRequest.id == request_id).with_for_update()
+            ).one_or_none()
+            if pair is None:
+                session.commit()
+                continue
+            request, anomaly = pair
+            if (
+                anomaly.status == "resolved"
+                and request.delivery_status in {"pending", "failed"}
+                and request.message_id is None
+            ):
+                request.delivery_status = "resolved"
+                request.last_error = None
+                request.updated_at = closed_at
+                session.commit()
+                continue
+            remaining.append(request_id)
+            session.commit()
+    return remaining
 
 
 def _mark_delivery_configuration_failure(
@@ -311,10 +384,22 @@ def _claim_validation_delivery(
         if pair is None:
             session.commit()
             return "skipped", None
-        request, _ = pair
+        request, anomaly = pair
+        if anomaly.status == "resolved" and request.delivery_status == "sending":
+            if not _can_safely_retry_delivery(request, claim_time):
+                request.delivery_status = "uncertain"
+                request.last_error = "飞书发送结果未知且已进入一小时去重窗口安全边界，请人工核查"
+                request.updated_at = claim_time
+                session.commit()
+                return "uncertain", None
+            session.commit()
+            return "skipped", None
         if request.delivery_status in {"pending", "failed"}:
             request.delivery_status = "sending"
             request.send_started_at = claim_time
+            # A definitive failure starts a new safe sequence. From this point,
+            # the counter is the durable budget of POSTs that may have happened.
+            request.delivery_attempts = 0
         elif request.delivery_status == "sending":
             if not _can_safely_retry_delivery(request, claim_time):
                 request.delivery_status = "uncertain"
@@ -322,6 +407,9 @@ def _claim_validation_delivery(
                 request.updated_at = claim_time
                 session.commit()
                 return "uncertain", None
+            if request.delivery_attempts >= _MAX_DELIVERY_ATTEMPTS:
+                session.commit()
+                return "skipped", None
             if request.updated_at and claim_time < request.updated_at + _DELIVERY_CLAIM_LEASE:
                 session.commit()
                 return "skipped", None
@@ -343,6 +431,9 @@ def _record_validation_delivery_retry(session: Session, request_id: str, retry_t
             ).with_for_update()
         )
         if request is None or request.delivery_status != "sending":
+            session.commit()
+            return False
+        if request.delivery_attempts >= _MAX_DELIVERY_ATTEMPTS:
             session.commit()
             return False
         if not _can_safely_retry_delivery(request, retry_time):
@@ -618,53 +709,109 @@ def reconcile_validation_cards(
     settings: Settings,
     *,
     client: FeishuClient | None = None,
+    limit: int | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> int:
-    candidates = list(session.execute(
-        select(AnomalyValidationRequest, AnomalyRecord).join(
-            AnomalyRecord, AnomalyValidationRequest.anomaly_id == AnomalyRecord.id
-        ).where(
-            AnomalyValidationRequest.message_id.is_not(None),
-            or_(
-                and_(
-                    AnomalyRecord.status == "timed_out",
-                    AnomalyValidationRequest.delivery_status.in_(["sent", "update_failed"]),
-                ),
-                and_(
-                    AnomalyRecord.status == "resolved",
-                    AnomalyValidationRequest.delivery_status.in_(["sent", "timed_out", "update_failed"]),
-                ),
+    candidate_query = select(AnomalyValidationRequest.id).join(
+        AnomalyRecord, AnomalyValidationRequest.anomaly_id == AnomalyRecord.id
+    ).where(
+        AnomalyValidationRequest.message_id.is_not(None),
+        or_(
+            and_(
+                AnomalyRecord.status == "timed_out",
+                AnomalyValidationRequest.delivery_status.in_(["sent", "update_failed"]),
             ),
-        )
-    ))
-    if not candidates:
+            and_(
+                AnomalyRecord.status == "resolved",
+                AnomalyValidationRequest.delivery_status.in_(["sent", "timed_out", "update_failed"]),
+            ),
+        ),
+    ).order_by(AnomalyValidationRequest.updated_at, AnomalyValidationRequest.id)
+    if limit is not None:
+        candidate_query = candidate_query.limit(limit + 1)
+    candidate_ids = list(session.scalars(candidate_query))
+    has_more = limit is not None and len(candidate_ids) > limit
+    candidate_ids = candidate_ids[:limit] if limit is not None else candidate_ids
+    session.commit()
+    if not candidate_ids:
         return 0
+    if should_stop is not None and should_stop():
+        logger.warning("终态卡片收敛维护已取消，剩余卡片将在下一轮处理")
+        return 0
+
     failures = 0
+    interrupted = False
     active_client = None
     owns_client = False
     try:
-        active_client, owns_client = _active_client(settings, client)
-        for request, anomaly in candidates:
-            try:
-                active_client.patch_interactive(
-                    request.message_id,
-                    build_validation_card(anomaly, settings.sentinel_public_base_url),
-                )
-                request.delivery_status = anomaly.status
-                request.last_error = None
-            except Exception as exc:
-                request.delivery_attempts += 1
-                request.delivery_status = "update_failed"
-                request.last_error = str(exc)[:2000]
-                failures += 1
-        session.commit()
+        active_client, owns_client = _active_client(settings, client, should_stop)
     except Exception as exc:
-        for request, _ in candidates:
-            request.delivery_attempts += 1
-            request.delivery_status = "update_failed"
-            request.last_error = str(exc)[:2000]
-        session.commit()
-        failures = len(candidates)
+        for request_id in candidate_ids:
+            _record_card_reconciliation_failure(session, request_id, exc)
+        if has_more:
+            logger.warning("终态卡片收敛已达到维护批次上限，剩余卡片将在下一轮处理")
+        return len(candidate_ids)
+
+    try:
+        for request_id in candidate_ids:
+            if should_stop is not None and should_stop():
+                interrupted = True
+                break
+            pair = session.execute(
+                select(AnomalyValidationRequest, AnomalyRecord).join(
+                    AnomalyRecord, AnomalyValidationRequest.anomaly_id == AnomalyRecord.id
+                ).where(
+                    AnomalyValidationRequest.id == request_id,
+                    AnomalyValidationRequest.message_id.is_not(None),
+                    or_(
+                        and_(
+                            AnomalyRecord.status == "timed_out",
+                            AnomalyValidationRequest.delivery_status.in_(["sent", "update_failed"]),
+                        ),
+                        and_(
+                            AnomalyRecord.status == "resolved",
+                            AnomalyValidationRequest.delivery_status.in_(["sent", "timed_out", "update_failed"]),
+                        ),
+                    ),
+                ).with_for_update()
+            ).one_or_none()
+            if pair is None:
+                session.commit()
+                continue
+            request, anomaly = pair
+            message_id = request.message_id
+            target_status = anomaly.status
+            card = build_validation_card(anomaly, settings.sentinel_public_base_url)
+            session.commit()
+            try:
+                active_client.patch_interactive(message_id, card)
+            except Exception as exc:
+                _record_card_reconciliation_failure(session, request_id, exc)
+                failures += 1
+                continue
+            with _serialize_sqlite(session, f"reconcile:{request_id}"):
+                request = session.get(AnomalyValidationRequest, request_id, with_for_update=True)
+                if request is not None and request.message_id == message_id:
+                    request.delivery_status = target_status
+                    request.last_error = None
+                session.commit()
+        if has_more or interrupted:
+            logger.warning("终态卡片收敛仍有未完成卡片，将在下一轮维护继续处理")
+        return failures
     finally:
         if owns_client and active_client is not None:
             active_client.close()
-    return failures
+
+
+def _record_card_reconciliation_failure(
+    session: Session,
+    request_id: str,
+    error: Exception,
+) -> None:
+    with _serialize_sqlite(session, f"reconcile:{request_id}"):
+        request = session.get(AnomalyValidationRequest, request_id, with_for_update=True)
+        if request is not None:
+            request.delivery_attempts += 1
+            request.delivery_status = "update_failed"
+            request.last_error = str(error)[:2000]
+        session.commit()

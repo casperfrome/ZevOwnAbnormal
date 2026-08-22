@@ -132,19 +132,29 @@ GROUP BY DATE(ordered_at), store_id ORDER BY store_id, metric_date""",
             session.add(order_daily)
         ads_daily = session.scalar(select(Dataset).where(Dataset.name == "门店综合经营日报"))
         if not ads_daily:
-            ads_daily = Dataset(
-                name="门店综合经营日报", description="StarRocks 门店级 ADS 指标，用于异常检测",
-                datasource=starrocks,
-                sql=ADS_DAILY_SQL,
-                fields=[dict(field) for field in ADS_DAILY_FIELDS],
-            )
-            session.add(ads_daily)
-            ads_validation_ready = True
+            if _is_seed_starrocks(starrocks):
+                ads_daily = Dataset(
+                    name="门店综合经营日报", description="StarRocks 门店级 ADS 指标，用于异常检测",
+                    datasource=starrocks,
+                    sql=ADS_DAILY_SQL,
+                    fields=[dict(field) for field in ADS_DAILY_FIELDS],
+                )
+                session.add(ads_daily)
+                ads_validation_ready = True
+            else:
+                ads_validation_ready = False
+                print(
+                    "检测到同名数据源但完整 demo 数据源指纹不匹配，"
+                    "跳过创建 demo 数据集与规则；请人工确认数据源归属。"
+                )
         else:
             ads_validation_ready = _upgrade_demo_dataset(ads_daily, starrocks)
         session.flush()
         demo_rule = session.scalar(select(Rule).where(Rule.name == "门店高退款率检测"))
-        if not demo_rule:
+        if ads_daily is None:
+            if demo_rule is not None:
+                print("demo 数据集未创建，保留现有同名规则且跳过自动更新。")
+        elif not demo_rule:
             demo_rule = Rule(
                 name="门店高退款率检测", description=DEMO_RULE_DESCRIPTION,
                 dataset=ads_daily, severity="high", logic="AND",

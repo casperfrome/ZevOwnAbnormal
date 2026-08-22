@@ -8,9 +8,12 @@
 
 - `SENTINEL_PUBLIC_BASE_URL`：写入飞书卡片“查看异常详情”深链的浏览器地址。真实验收必须是接收者设备可访问的完整 `http://` 或 `https://` 地址；`localhost`/`127.0.0.1` 仅适合浏览器与 Sentinel 在同一台机器上的本地验证。生产建议使用 HTTPS。`#records/<uuid>` 是浏览器 fragment，不会随 HTTP 请求发送给服务器；反向代理只需正确提供 SPA 根文档、静态资源和 API，无需配置带 `#` 的服务端路由。
 - `SENTINEL_API_BASE_URL`：飞书长连接进程调用 FastAPI 的服务端地址。长连接和 FastAPI 同机时可保持 `http://127.0.0.1:8000`，不要求暴露到公网。
-- `INTERNAL_EXECUTION_TOKEN`：长连接调用内部回调 API 的共享令牌。FastAPI 与长连接进程必须一致；不要将值写入命令历史、日志或文档。
+- `INTERNAL_EXECUTION_TOKEN` / `SENTINEL_INTERNAL_TOKEN`：FastAPI 与长连接进程使用的同一共享令牌；`bootstrap_env.py` 会为两者写入同一个随机值。不要将值写入命令历史、日志或文档。
 - `FEISHU_APP_ID` / `FEISHU_APP_SECRET`：同一飞书应用的凭证。不要用命令打印它们。
 - `VALIDATION_TIMEOUT_SCAN_INTERVAL_SECONDS`：超时扫描与卡片收敛周期，默认 `60` 秒。
+- `VALIDATION_MAINTENANCE_BATCH_SIZE`：每轮初始投递和终态卡片收敛的最大候选数，默认 `50`；未完成项留待下一轮。
+- `FEISHU_HTTP_TIMEOUT_SECONDS`：单次飞书 HTTP 调用超时，默认 `10` 秒；维护轮次可在每次外部调用之间取消。
+- `AUTO_LOGIN`：生产默认 `false`。`/auth/me` 必须验证签名 cookie/JWT 及当前数据库用户，管理写操作还要求当前用户是超级管理员。公共卡片深链也要求先建立登录会话。
 
 不要用通用环境转储、shell tracing 或调试代理检查这些设置。启动器会在连接前只报告缺失的变量名，不会打印变量值。
 
@@ -36,8 +39,8 @@ Pop-Location
 `--reset` 仍额外负责删除并重建整个 demo 数据库。
 
 `seed_platform.py` 只在 datasource 的名称、类型、主机、端口、数据库、用户、SSL、密码占位和描述均匹配
-seed 指纹，而且 Dataset 仍精确匹配旧 demo SQL/字段时自动迁移。即使 SQL/字段看似旧版，同名自定义
-datasource 也只提示人工迁移。规则只有在 demo 特征匹配、`enabled=false`、实时校验未启用且目标为空时才会
+seed 指纹时创建 demo Dataset/规则；更新时还要求 Dataset 精确匹配旧 demo SQL/字段。即使 SQL/字段看似旧版，
+同名自定义 datasource 也只提示并跳过创建或迁移。规则只有在 demo 特征匹配、`enabled=false`、实时校验未启用且目标为空时才会
 自动加入字段 target；启用中的规则只提示先停用核对，不改 validation 配置。
 
 可用一次性 SQLite 文件验证完整 `0001 -> head` 链，不触碰正式数据库：
@@ -62,6 +65,40 @@ try {
 Write-Host "一次性迁移数据库保留在: $acceptanceDb"
 ```
 
+`20260809_0001` 已冻结为原始平台表定义，后续模型只由后续 revision 引入。正式 MySQL 升级前，可在明确允许
+启动本地 Docker 容器时运行下面的可丢弃 MySQL 8.4 门禁；它不会连接正式数据库，也不会使用真实凭证：
+
+```powershell
+$gateName = 'sentinel-mysql-migration-' + [guid]::NewGuid().ToString('N')
+$previousDatabaseUrl = $env:DATABASE_URL
+$pushedBackend = $false
+try {
+  docker run --detach --rm --name $gateName `
+    --env MYSQL_ALLOW_EMPTY_PASSWORD=yes --env MYSQL_DATABASE=app `
+    --publish 127.0.0.1::3306 mysql:8.4.10 | Out-Null
+  $ready = $false
+  for ($attempt = 0; $attempt -lt 60; $attempt++) {
+    docker exec $gateName mysqladmin ping --silent 2>$null
+    if ($LASTEXITCODE -eq 0) { $ready = $true; break }
+    Start-Sleep -Seconds 2
+  }
+  if (-not $ready) { throw 'Disposable MySQL did not become ready' }
+  $binding = (docker port $gateName 3306/tcp | Select-Object -First 1).Trim()
+  $gatePort = $binding.Substring($binding.LastIndexOf(':') + 1)
+  $env:DATABASE_URL = "mysql+pymysql://root@127.0.0.1:$gatePort/app?charset=utf8mb4"
+  Push-Location backend
+  $pushedBackend = $true
+  & 'D:\PythonVEnv\FirstVEnv\Scripts\python.exe' -m alembic -c alembic.ini upgrade head
+  if ($LASTEXITCODE -ne 0) { throw 'MySQL Alembic upgrade failed' }
+  & 'D:\PythonVEnv\FirstVEnv\Scripts\python.exe' -m alembic -c alembic.ini current
+  if ($LASTEXITCODE -ne 0) { throw 'MySQL Alembic current check failed' }
+} finally {
+  if ($pushedBackend) { Pop-Location }
+  $env:DATABASE_URL = $previousDatabaseUrl
+  if (docker inspect $gateName 2>$null) { docker rm --force $gateName | Out-Null }
+}
+```
+
 启动 FastAPI（脚本会先执行 `alembic upgrade head`）：
 
 ```powershell
@@ -74,7 +111,7 @@ Write-Host "一次性迁移数据库保留在: $acceptanceDb"
 Invoke-RestMethod 'http://127.0.0.1:8000/api/v1/health'
 ```
 
-随后启动飞书长连接：
+随后启动飞书长连接；启动器自动读取仓库根 `.env`，且不覆盖终端显式环境变量：
 
 ```powershell
 & 'D:\PythonVEnv\FirstVEnv\Scripts\python.exe' .\飞书长连接启动\飞书长连接启动.py
@@ -91,7 +128,7 @@ Invoke-RestMethod 'http://127.0.0.1:8000/api/v1/health'
 3. 确认应用具备向目标用户发送消息及更新卡片所需权限，并已安装到验收组织。
 4. 不要为这条链路额外配置公网回调 URL；SDK 长连接接收事件后，会调用 `SENTINEL_API_BASE_URL/api/internal/feishu/card-actions`。
 
-`SENTINEL_PUBLIC_BASE_URL` 不负责接收飞书回调，但卡片接收者必须能从自己的网络打开 `${SENTINEL_PUBLIC_BASE_URL}/#records/<uuid>`。人工 smoke 前，应从目标用户实际使用的浏览器或外部网络访问该地址及 `/api/v1/health`，不能只在服务端本机验证。
+`SENTINEL_PUBLIC_BASE_URL` 不负责接收飞书回调，但卡片接收者必须能从自己的网络打开 `${SENTINEL_PUBLIC_BASE_URL}/#records/<uuid>`，并先通过部署登录流程（`POST /api/v1/auth/login`）建立有效会话；深链不会自动授予超级管理员身份。人工 smoke 前，应从目标用户实际使用的浏览器或外部网络访问该地址及 `/api/v1/health`，不能只在服务端本机验证。
 
 ## 4. 无外部副作用的自动验收
 

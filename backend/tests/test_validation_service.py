@@ -10,7 +10,7 @@ from sqlalchemy import event, select
 
 from app.config import Settings
 from app.database import Base, make_session_factory
-from app.feishu import FeishuClient
+from app.feishu import FeishuClient, FeishuDeliveryUncertainError
 from app.models import (
     AnomalyEvent,
     AnomalyRecord,
@@ -20,6 +20,7 @@ from app.models import (
     Datasource,
     NotificationDelivery,
     Rule,
+    utcnow,
 )
 from app.rule_engine import EvaluationMatch
 
@@ -92,7 +93,9 @@ def test_snapshot_creates_ordered_unique_requests_and_suppresses_matching_legacy
         assert [(item.receive_id_type, item.recipient) for item in session.scalars(
             select(NotificationDelivery).order_by(NotificationDelivery.recipient, NotificationDelivery.receive_id_type)
         )] == [("open_id", "user-1"), ("user_id", "user-3")]
-        assert [event.event_type for event in session.scalars(select(AnomalyEvent))] == ["validation_requested"]
+        events = list(session.scalars(select(AnomalyEvent)))
+        assert [event.event_type for event in events] == ["validation_requested"]
+        assert events[0].description == "已创建 2 位验证人的实时验证请求，待发送"
     finally:
         session.close()
         engine.dispose()
@@ -227,8 +230,16 @@ def test_cards_show_active_controls_timeout_and_read_only_resolution():
         button = next(element for element in form["elements"] if element["tag"] == "button")
         assert input_element["name"] == "validation_text"
         assert input_element["required"] is True
-        assert button["action_type"] == "form_submit"
-        assert button["value"] == {"action": "submit_validation", "anomaly_id": anomaly.id}
+        names = [form["name"], *(element["name"] for element in form["elements"])]
+        assert len(names) == len(set(names))
+        assert button["name"] == "submit_validation"
+        assert button["form_action_type"] == "submit"
+        assert button["behaviors"] == [{
+            "type": "callback",
+            "value": {"action": "submit_validation", "anomaly_id": anomaly.id},
+        }]
+        assert "action_type" not in button
+        assert "value" not in button
 
         anomaly.status = "timed_out"
         timeout_text = json.dumps(build_validation_card(anomaly, "https://sentinel.example"), ensure_ascii=False)
@@ -242,7 +253,7 @@ def test_cards_show_active_controls_timeout_and_read_only_resolution():
         assert "user-2" in resolved_text
         assert "2026-08-22 04:10:00" in resolved_text
         assert "validation_text" not in resolved_text
-        assert "form_submit" not in resolved_text
+        assert "form_action_type" not in resolved_text
     finally:
         session.close()
         engine.dispose()
@@ -550,6 +561,249 @@ def test_ambiguous_attempt_is_not_downgraded_by_later_definitive_errors(monkeypa
         assert send_attempts == 3
         assert request.delivery_status == "sending"
         assert request.send_started_at == NOW
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_three_server_errors_stay_sending_then_become_uncertain_without_a_fourth_post(monkeypatch):
+    """Three ambiguous POST responses must preserve the original one-hour UUID safety boundary."""
+    from app.validation_service import deliver_validation_requests
+
+    engine, _, session, rule = build_session()
+    post_uuids = []
+    attempt_time = utcnow()
+    try:
+        anomaly = make_anomaly(rule)
+        session.add(anomaly)
+        session.flush()
+        request = AnomalyValidationRequest(anomaly_id=anomaly.id, recipient_user_id="user-1")
+        session.add(request)
+        session.commit()
+
+        def handler(http_request: httpx.Request):
+            if http_request.url.path.endswith("tenant_access_token/internal/"):
+                return httpx.Response(200, json={"code": 0, "tenant_access_token": "token", "expire": 7200})
+            post_uuids.append(json.loads(http_request.content)["uuid"])
+            return httpx.Response(500, json={"code": 999, "msg": "temporary"})
+
+        monkeypatch.setattr("app.validation_service.time.sleep", lambda _: None)
+        client = FeishuClient("cli", "secret", transport=httpx.MockTransport(handler))
+        assert deliver_validation_requests(
+            session,
+            Settings(feishu_app_id="cli", feishu_app_secret="secret"),
+            client=client,
+            now=attempt_time,
+        ) == 1
+        assert post_uuids == [request.id, request.id, request.id]
+        assert request.delivery_status == "sending"
+        assert request.send_started_at == attempt_time
+
+        assert deliver_validation_requests(
+            session,
+            Settings(feishu_app_id="cli", feishu_app_secret="secret"),
+            client=client,
+            now=attempt_time + timedelta(seconds=31),
+        ) == 0
+        assert post_uuids == [request.id, request.id, request.id]
+        assert request.delivery_status == "sending"
+
+        assert deliver_validation_requests(
+            session,
+            Settings(feishu_app_id="cli", feishu_app_secret="secret"),
+            client=client,
+            now=attempt_time + timedelta(hours=1, seconds=1),
+        ) == 1
+        assert post_uuids == [request.id, request.id, request.id]
+        assert request.delivery_status == "uncertain"
+        assert request.send_started_at == attempt_time
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_restart_after_an_ambiguous_post_never_exceeds_three_total_posts(monkeypatch):
+    """A crash before persisting the POST error must not reset the durable retry budget."""
+    from app.validation_service import deliver_validation_requests
+
+    class SimulatedProcessCrash(BaseException):
+        pass
+
+    engine, _, session, rule = build_session()
+    post_uuids = []
+    try:
+        anomaly = make_anomaly(rule)
+        session.add(anomaly)
+        session.flush()
+        request = AnomalyValidationRequest(anomaly_id=anomaly.id, recipient_user_id="user-1")
+        session.add(request)
+        session.commit()
+
+        class CrashAfterPostClient:
+            def send_interactive(self, _receive_id_type, _recipient, _card, *, idempotency_key=None):
+                post_uuids.append(idempotency_key)
+                raise SimulatedProcessCrash()
+
+        with pytest.raises(SimulatedProcessCrash):
+            deliver_validation_requests(
+                session, Settings(), client=CrashAfterPostClient(), now=NOW,
+            )
+        session.expire_all()
+        persisted = session.get(AnomalyValidationRequest, request.id)
+        assert persisted.delivery_status == "sending"
+        assert persisted.delivery_attempts == 1
+        assert persisted.last_error is None
+
+        class UncertainAfterRestartClient:
+            def send_interactive(self, _receive_id_type, _recipient, _card, *, idempotency_key=None):
+                post_uuids.append(idempotency_key)
+                raise FeishuDeliveryUncertainError("response lost")
+
+        monkeypatch.setattr("app.validation_service.time.sleep", lambda _: None)
+        assert deliver_validation_requests(
+            session,
+            Settings(),
+            client=UncertainAfterRestartClient(),
+            now=NOW + timedelta(seconds=31),
+        ) == 1
+
+        assert post_uuids == [request.id, request.id, request.id]
+        assert persisted.delivery_status == "sending"
+        assert persisted.delivery_attempts == 3
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_token_fetch_failure_is_safe_to_retry_after_clearing_the_sending_claim(monkeypatch):
+    """A failure before message POST must remain recoverable and must not be marked uncertain."""
+    from app.validation_service import deliver_validation_requests
+
+    engine, _, session, rule = build_session()
+    token_calls = 0
+    message_posts = 0
+    try:
+        anomaly = make_anomaly(rule)
+        session.add(anomaly)
+        session.flush()
+        request = AnomalyValidationRequest(anomaly_id=anomaly.id, recipient_user_id="user-1")
+        session.add(request)
+        session.commit()
+
+        def unavailable_token(http_request: httpx.Request):
+            nonlocal token_calls, message_posts
+            if http_request.url.path.endswith("tenant_access_token/internal/"):
+                token_calls += 1
+                return httpx.Response(503, json={"code": 999, "msg": "token unavailable"})
+            message_posts += 1
+            raise AssertionError("message POST must not run without a token")
+
+        monkeypatch.setattr("app.validation_service.time.sleep", lambda _: None)
+        failing_client = FeishuClient("cli", "secret", transport=httpx.MockTransport(unavailable_token))
+        assert deliver_validation_requests(
+            session, Settings(feishu_app_id="cli", feishu_app_secret="secret"), client=failing_client, now=NOW,
+        ) == 1
+        assert token_calls == 3
+        assert message_posts == 0
+        assert request.delivery_status == "failed"
+        assert request.send_started_at is None
+
+        rejected_posts = 0
+
+        def definitive_rejection(http_request: httpx.Request):
+            nonlocal rejected_posts
+            if http_request.url.path.endswith("tenant_access_token/internal/"):
+                return httpx.Response(200, json={"code": 0, "tenant_access_token": "token", "expire": 7200})
+            rejected_posts += 1
+            return httpx.Response(400, json={"code": 230002, "msg": "recipient rejected"})
+
+        rejected_client = FeishuClient(
+            "cli", "secret", transport=httpx.MockTransport(definitive_rejection)
+        )
+        assert deliver_validation_requests(
+            session,
+            Settings(feishu_app_id="cli", feishu_app_secret="secret"),
+            client=rejected_client,
+            now=NOW + timedelta(minutes=5),
+        ) == 1
+        assert rejected_posts == 3
+        assert request.delivery_status == "failed"
+        assert request.send_started_at is None
+
+        recovered_client = FeishuClient("cli", "secret", transport=httpx.MockTransport(lambda http_request: (
+            httpx.Response(200, json={"code": 0, "tenant_access_token": "token", "expire": 7200})
+            if http_request.url.path.endswith("tenant_access_token/internal/")
+            else httpx.Response(200, json={"code": 0, "data": {"message_id": "om_recovered"}})
+        )))
+        assert deliver_validation_requests(
+            session,
+            Settings(feishu_app_id="cli", feishu_app_secret="secret"),
+            client=recovered_client,
+            now=NOW + timedelta(minutes=10),
+        ) == 0
+        assert request.delivery_status == "sent"
+        assert request.message_id == "om_recovered"
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_resolved_anomaly_closes_a_never_posted_request_without_sending():
+    """A resolution committed before initial delivery must make the pending request inert."""
+    from app.validation_service import deliver_validation_requests
+
+    engine, _, session, rule = build_session()
+    try:
+        anomaly = make_anomaly(rule, status="resolved")
+        anomaly.active_fingerprint = None
+        anomaly.resolved_at = NOW
+        session.add(anomaly)
+        session.flush()
+        request = AnomalyValidationRequest(anomaly_id=anomaly.id, recipient_user_id="user-1")
+        session.add(request)
+        session.commit()
+
+        class NoSendClient:
+            def send_interactive(self, *_args, **_kwargs):
+                raise AssertionError("a resolved never-sent request must not POST")
+
+        assert deliver_validation_requests(session, Settings(), client=NoSendClient(), now=NOW) == 0
+        assert request.delivery_status == "resolved"
+        assert request.delivery_attempts == 0
+        assert request.send_started_at is None
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_initial_delivery_recovery_honors_the_maintenance_batch_limit():
+    """One maintenance scan must not claim or POST more requests than its configured batch."""
+    from app.validation_service import deliver_validation_requests
+
+    engine, _, session, rule = build_session()
+    sends = []
+    try:
+        anomaly = make_anomaly(rule)
+        session.add(anomaly)
+        session.flush()
+        requests = [
+            AnomalyValidationRequest(anomaly_id=anomaly.id, recipient_user_id=f"user-{index}")
+            for index in range(3)
+        ]
+        session.add_all(requests)
+        session.commit()
+
+        class BatchClient:
+            def send_interactive(self, _receive_id_type, recipient, _card, *, idempotency_key=None):
+                sends.append((recipient, idempotency_key))
+                return f"om_{recipient}"
+
+        assert deliver_validation_requests(
+            session, Settings(), client=BatchClient(), now=NOW, limit=2,
+        ) == 0
+        assert len(sends) == 2
+        assert [request.delivery_status for request in requests].count("sent") == 2
+        assert [request.delivery_status for request in requests].count("pending") == 1
     finally:
         session.close()
         engine.dispose()
@@ -1042,6 +1296,49 @@ def test_timed_out_card_reconciliation_converges_after_one_success():
         assert request.delivery_status == "timed_out"
         assert reconcile_validation_cards(session, settings, client=client) == 0
         assert len(patch_requests) == 1
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_terminal_card_reconciliation_is_bounded_commits_before_http_and_stops_between_cards(caplog):
+    """Shutdown may wait for the current patch, never for every candidate in an unbounded scan."""
+    from app.validation_service import reconcile_validation_cards
+
+    engine, _, session, rule = build_session()
+    stop = threading.Event()
+    patches = []
+    try:
+        anomaly = make_anomaly(rule, status="resolved")
+        anomaly.active_fingerprint = None
+        anomaly.resolved_at = NOW
+        session.add(anomaly)
+        session.flush()
+        requests = [
+            AnomalyValidationRequest(
+                anomaly_id=anomaly.id, recipient_user_id=f"user-{index}",
+                delivery_status="sent", message_id=f"om_{index}",
+            )
+            for index in range(3)
+        ]
+        session.add_all(requests)
+        session.commit()
+
+        class StopAfterOneClient:
+            def patch_interactive(self, message_id, _card):
+                patches.append((message_id, session.in_transaction()))
+                stop.set()
+
+        with caplog.at_level("WARNING", logger="app.validation_service"):
+            assert reconcile_validation_cards(
+                session, Settings(), client=StopAfterOneClient(), limit=2,
+                should_stop=stop.is_set,
+            ) == 0
+
+        assert patches == [("om_0", False)]
+        assert [request.delivery_status for request in requests].count("resolved") == 1
+        assert [request.delivery_status for request in requests].count("sent") == 2
+        assert any("下一轮" in record.getMessage() for record in caplog.records)
     finally:
         session.close()
         engine.dispose()
