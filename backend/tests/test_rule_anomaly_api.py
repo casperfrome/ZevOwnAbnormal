@@ -60,8 +60,8 @@ def test_rule_crud_exposes_key_fields_and_targets():
         assert len(client.get("/api/v1/rules").json()) == 1
 
 
-def test_rule_group_broadcast_config_is_validated_encrypted_and_never_returned():
-    """Removing encryption, secret-preserving updates, or field validation must fail this test."""
+def test_rule_group_broadcast_config_is_validated_stored_and_returned_as_plaintext():
+    """Webhook configuration is editable in full while URL and field validation remain enforced."""
     webhook = "https://open.feishu.cn/open-apis/bot/v2/hook/11111111-2222-3333-4444-555555555555"
     with TestClient(create_app(testing=True)) as client:
         dataset = create_dependencies(client)
@@ -95,13 +95,12 @@ def test_rule_group_broadcast_config_is_validated_encrypted_and_never_returned()
         assert created.status_code == 201
         assert created.json()["group_broadcast"] == {
             "enabled": True,
-            "has_webhook": True,
+            "webhook_url": webhook,
             "mention_targets": payload["group_broadcast"]["mention_targets"],
         }
         with client.app.state.session_factory() as session:
             stored = session.get(Rule, created.json()["id"])
-            assert stored.group_webhook_encrypted
-            assert stored.group_webhook_encrypted != webhook
+            assert stored.group_webhook_url == webhook
 
         preserved = client.put(
             f"/api/v1/rules/{created.json()['id']}",
@@ -114,7 +113,7 @@ def test_rule_group_broadcast_config_is_validated_encrypted_and_never_returned()
             },
         )
         assert preserved.status_code == 200
-        assert preserved.json()["group_broadcast"]["has_webhook"] is True
+        assert preserved.json()["group_broadcast"]["webhook_url"] == webhook
 
         invalid_host = client.post(
             "/api/v1/rules",
@@ -165,7 +164,7 @@ def test_rule_group_broadcast_config_is_validated_encrypted_and_never_returned()
             },
         )
         assert cleared.status_code == 200
-        assert cleared.json()["group_broadcast"]["has_webhook"] is False
+        assert cleared.json()["group_broadcast"]["webhook_url"] is None
 
 
 def test_sql_validation_rule_crud_validates_template_mappings_and_serializes_config():

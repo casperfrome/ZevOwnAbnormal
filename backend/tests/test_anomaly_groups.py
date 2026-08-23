@@ -25,7 +25,6 @@ from app.models import (
     RuleRun,
 )
 from app.rule_engine import EvaluationMatch
-from app.security import CredentialCipher
 from app.main import create_app
 from app.push_pipeline import (
     abort_pending_pushes,
@@ -55,7 +54,7 @@ def _group_rule(session, settings, *, mention_targets):
             {"receive_id_type": "open_id", "source": "literal", "value": "ordinary-target"},
         ],
         group_broadcast_enabled=True,
-        group_webhook_encrypted=CredentialCipher(settings.datasource_encryption_key).encrypt(
+        group_webhook_url=(
             "https://open.feishu.cn/open-apis/bot/v2/hook/11111111-2222-3333-4444-555555555555"
         ),
         group_mention_targets=mention_targets,
@@ -337,7 +336,7 @@ def test_group_list_and_detail_return_live_status_counts_pagination_and_partial_
                 detected_at=group.detected_at,
                 part_index=2,
                 total_parts=2,
-                webhook_encrypted=rule.group_webhook_encrypted,
+                webhook_url=rule.group_webhook_url,
                 payload={"msg_type": "post", "content": {}},
                 status="sent",
             ))

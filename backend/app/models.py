@@ -93,7 +93,7 @@ class Rule(Base, TimestampMixin):
     group_broadcast_enabled: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default=text("0"), nullable=False,
     )
-    group_webhook_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    group_webhook_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     group_mention_targets: Mapped[list[dict]] = mapped_column(
         JSON,
         default=list,
@@ -213,7 +213,7 @@ class AnomalyGroupBroadcastDelivery(Base, TimestampMixin):
     detected_at: Mapped[datetime] = mapped_column(PRECISE_DATETIME, nullable=False)
     part_index: Mapped[int] = mapped_column(Integer, nullable=False)
     total_parts: Mapped[int] = mapped_column(Integer, nullable=False)
-    webhook_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    webhook_url: Mapped[str] = mapped_column(Text, nullable=False)
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)
     attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

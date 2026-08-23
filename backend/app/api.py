@@ -345,7 +345,7 @@ def rule_dict(item: Rule) -> dict:
         "sql_validation_config": item.sql_validation_config,
         "group_broadcast": {
             "enabled": item.group_broadcast_enabled,
-            "has_webhook": bool(item.group_webhook_encrypted),
+            "webhook_url": item.group_webhook_url,
             "mention_targets": item.group_mention_targets,
         },
         "enabled": item.enabled,
@@ -420,11 +420,7 @@ def _apply_group_broadcast_configuration(
         for target in config.mention_targets
     ]
     if "webhook_url" in config.model_fields_set:
-        item.group_webhook_encrypted = (
-            CredentialCipher(settings.datasource_encryption_key).encrypt(config.webhook_url)
-            if config.webhook_url
-            else None
-        )
+        item.group_webhook_url = config.webhook_url
 
 
 def run_dict(item: RuleRun) -> dict:
@@ -795,7 +791,7 @@ def update_rule(rule_id: str, payload: RuleCreate, session: Session = Depends(ge
         raise HTTPException(404, "数据集不存在")
     _validate_rule_sql_configuration(payload, dataset)
     _validate_group_broadcast_configuration(
-        payload, dataset, existing_webhook=item.group_webhook_encrypted,
+        payload, dataset, existing_webhook=item.group_webhook_url,
     )
     for key, value in payload.model_dump(mode="json", exclude={"enabled", "group_broadcast"}).items():
         setattr(item, key, value)

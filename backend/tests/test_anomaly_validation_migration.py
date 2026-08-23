@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 import sqlalchemy as sa
+import pytest
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from sqlalchemy.dialects import mysql, sqlite
@@ -34,6 +35,9 @@ SQL_VALIDATION_MIGRATION_PATH = MIGRATION_PATH.with_name(
 )
 ANOMALY_GROUP_MIGRATION_PATH = MIGRATION_PATH.with_name(
     "20260823_0009_anomaly_record_groups.py"
+)
+PLAINTEXT_WEBHOOK_MIGRATION_PATH = MIGRATION_PATH.with_name(
+    "20260823_0010_plaintext_group_webhooks.py"
 )
 
 
@@ -100,6 +104,16 @@ def load_sql_validation_migration():
 def load_anomaly_group_migration():
     spec = importlib.util.spec_from_file_location(
         "anomaly_groups_0009", ANOMALY_GROUP_MIGRATION_PATH,
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_plaintext_webhook_migration():
+    spec = importlib.util.spec_from_file_location(
+        "plaintext_group_webhooks_0010", PLAINTEXT_WEBHOOK_MIGRATION_PATH,
     )
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
@@ -561,3 +575,88 @@ def test_anomaly_group_identity_keeps_microseconds_on_mysql_84():
         AnomalyGroupBroadcastDelivery.__table__.c.detected_at,
     ):
         assert "DATETIME(6)" in str(column.type.compile(dialect=dialect))
+
+
+def test_plaintext_webhook_migration_decrypts_existing_rules_and_deliveries(monkeypatch):
+    from app.security import CredentialCipher
+
+    key = "y4R9V3fBMN_WBq6j7u5oA-rOQ1z3B1l1J1dQxQ8_s8Y="
+    webhook = "https://open.feishu.cn/open-apis/bot/v2/hook/migrated-hook"
+    encrypted = CredentialCipher(key).encrypt(webhook)
+    migration = load_plaintext_webhook_migration()
+    monkeypatch.setattr(migration, "get_settings", lambda: type("S", (), {
+        "datasource_encryption_key": key,
+    })())
+    engine = sa.create_engine("sqlite+pysqlite:///:memory:")
+    metadata = sa.MetaData()
+    rules = sa.Table(
+        "rules", metadata,
+        sa.Column("id", sa.String(36), primary_key=True),
+        sa.Column("group_webhook_encrypted", sa.Text(), nullable=True),
+    )
+    deliveries = sa.Table(
+        "anomaly_group_broadcast_deliveries", metadata,
+        sa.Column("id", sa.String(36), primary_key=True),
+        sa.Column("webhook_encrypted", sa.Text(), nullable=False),
+    )
+    metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.execute(rules.insert(), {"id": "rule-1", "group_webhook_encrypted": encrypted})
+        connection.execute(deliveries.insert(), {"id": "delivery-1", "webhook_encrypted": encrypted})
+        migration.op = Operations(MigrationContext.configure(connection))
+        migration.upgrade()
+        assert connection.execute(sa.text(
+            "SELECT group_webhook_url FROM rules WHERE id='rule-1'"
+        )).scalar_one() == webhook
+        assert connection.execute(sa.text(
+            "SELECT webhook_url FROM anomaly_group_broadcast_deliveries WHERE id='delivery-1'"
+        )).scalar_one() == webhook
+        columns = {column["name"] for column in sa.inspect(connection).get_columns("rules")}
+        assert "group_webhook_encrypted" not in columns
+        migration.downgrade()
+        restored = connection.execute(sa.text(
+            "SELECT group_webhook_encrypted FROM rules WHERE id='rule-1'"
+        )).scalar_one()
+        assert CredentialCipher(key).decrypt(restored) == webhook
+    engine.dispose()
+
+
+def test_plaintext_webhook_migration_aborts_on_wrong_encryption_key(monkeypatch):
+    from cryptography.fernet import Fernet, InvalidToken
+    from app.security import CredentialCipher
+
+    original_key = Fernet.generate_key().decode("ascii")
+    wrong_key = Fernet.generate_key().decode("ascii")
+    encrypted = CredentialCipher(original_key).encrypt(
+        "https://open.feishu.cn/open-apis/bot/v2/hook/protected-hook"
+    )
+    migration = load_plaintext_webhook_migration()
+    monkeypatch.setattr(migration, "get_settings", lambda: type("S", (), {
+        "datasource_encryption_key": wrong_key,
+    })())
+    engine = sa.create_engine("sqlite+pysqlite:///:memory:")
+    metadata = sa.MetaData()
+    rules = sa.Table(
+        "rules", metadata,
+        sa.Column("id", sa.String(36), primary_key=True),
+        sa.Column("group_webhook_encrypted", sa.Text(), nullable=True),
+    )
+    sa.Table(
+        "anomaly_group_broadcast_deliveries", metadata,
+        sa.Column("id", sa.String(36), primary_key=True),
+        sa.Column("webhook_encrypted", sa.Text(), nullable=False),
+    )
+    metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.execute(rules.insert(), {"id": "rule-1", "group_webhook_encrypted": encrypted})
+        migration.op = Operations(MigrationContext.configure(connection))
+        with pytest.raises(InvalidToken):
+            migration.upgrade()
+        rule_columns = {column["name"] for column in sa.inspect(connection).get_columns("rules")}
+        delivery_columns = {
+            column["name"]
+            for column in sa.inspect(connection).get_columns("anomaly_group_broadcast_deliveries")
+        }
+        assert "group_webhook_url" not in rule_columns
+        assert "webhook_url" not in delivery_columns
+    engine.dispose()

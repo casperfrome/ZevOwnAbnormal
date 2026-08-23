@@ -419,7 +419,8 @@ test('rule form preserves configured webhook and saves fixed plus field group me
       validationEnabled: false, validationTargets: [], validationTimeoutMinutes: 1440,
       validationMethod: 'pseudo', sqlValidationConfig: null,
       groupBroadcast: {
-        enabled: true, hasWebhook: true,
+        enabled: true,
+        webhookUrl: 'https://open.feishu.cn/open-apis/bot/v2/hook/saved-webhook',
         mentionTargets: [
           { source: 'literal', value: 'fixed-user' },
           { source: 'field', field: 'owner_user_id' },
@@ -440,18 +441,22 @@ test('rule form preserves configured webhook and saves fixed plus field group me
 
   await page.evaluate(() => RulesModule.openItem('rule-1'));
   assert.equal(await page.locator('#f-group-broadcast-enabled').isChecked(), true);
-  assert.match(await page.locator('#f-group-webhook').getAttribute('placeholder'), /已配置/);
+  assert.equal(await page.locator('#f-group-webhook').getAttribute('type'), 'text');
+  assert.equal(await page.locator('#f-group-webhook').inputValue(), 'https://open.feishu.cn/open-apis/bot/v2/hook/saved-webhook');
   assert.deepEqual(await page.locator('#f-group-userids .tag-pill').allTextContents(), ['fixed-user']);
-  assert.deepEqual(await page.locator('#f-group-fields option:checked').allTextContents(), ['owner_user_id · VARCHAR']);
+  const groupFieldTrigger = page.locator('#f-group-fields');
+  const groupFieldListbox = page.locator('#f-group-fields-listbox');
+  assert.deepEqual(await groupFieldTrigger.locator('.key-field-picker-tag').allTextContents(), ['owner_user_id']);
 
   await page.fill('#f-group-userids-input', 'extra-user');
-  await page.selectOption('#f-group-fields', ['owner_user_id', 'backup_user_id']);
+  await groupFieldTrigger.click();
+  await groupFieldListbox.locator('[data-key-field="backup_user_id"]').click();
   await page.click('#f-save');
   await page.waitForTimeout(25);
 
   assert.deepEqual(await page.evaluate(() => window.updatedRule.groupBroadcast), {
     enabled: true,
-    hasWebhook: true,
+    webhookUrl: 'https://open.feishu.cn/open-apis/bot/v2/hook/saved-webhook',
     mentionTargets: [
       { source: 'literal', value: 'fixed-user' },
       { source: 'literal', value: 'extra-user' },
@@ -461,9 +466,8 @@ test('rule form preserves configured webhook and saves fixed plus field group me
   });
 
   await page.evaluate(() => RulesModule.openItem('rule-1'));
-  assert.equal(await page.locator('#f-group-webhook-clear').isVisible(), true);
   await page.uncheck('#f-group-broadcast-enabled');
-  await page.check('#f-group-webhook-clear');
+  await page.fill('#f-group-webhook', '');
   await page.click('#f-save');
   await page.waitForTimeout(25);
   assert.equal(await page.evaluate(() => window.updatedRule.groupBroadcast.webhookUrl), null);

@@ -266,9 +266,9 @@ window.RulesModule = (function () {
       validationTimeoutMinutes: 1440,
       validationMethod: 'pseudo',
       sqlValidationConfig: null,
-      groupBroadcast: { enabled: false, hasWebhook: false, mentionTargets: [] },
+      groupBroadcast: { enabled: false, webhookUrl: '', mentionTargets: [] },
     };
-    const groupBroadcast = data.groupBroadcast || { enabled: false, hasWebhook: false, mentionTargets: [] };
+    const groupBroadcast = data.groupBroadcast || { enabled: false, webhookUrl: '', mentionTargets: [] };
 
     const datasets = Store.getDatasets();
 
@@ -456,11 +456,21 @@ window.RulesModule = (function () {
           </div>
           <div class="form-grid">
             ${UI.field('话题群机器人 webhook', `
-              <input class="input mono" id="f-group-webhook" type="password" autocomplete="new-password" placeholder="${groupBroadcast.hasWebhook ? '已配置，留空将保留现有 webhook' : 'https://open.feishu.cn/open-apis/bot/v2/hook/...'}" />
-              ${groupBroadcast.hasWebhook ? `<label class="field-help" style="display:flex;align-items:center;gap:var(--space-2);"><input type="checkbox" id="f-group-webhook-clear" />清除已配置 webhook</label>` : ''}
-            `, { optional: true, span2: true, help: '仅支持飞书机器人 HTTPS webhook；已保存的地址不会回显' })}
+              <input class="input mono" id="f-group-webhook" type="text" value="${escapeHtml(groupBroadcast.webhookUrl || '')}" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..." />
+            `, { optional: true, span2: true, help: '仅支持飞书机器人 HTTPS webhook；保存后将在编辑界面完整显示' })}
             ${UI.field('固定艾特用户 user_id', `<div class="tag-input" id="f-group-userids"><input type="text" placeholder="输入 user_id 后回车" id="f-group-userids-input" /></div>`, { optional: true, help: '可配置多个；保存时会自动收录尚未回车的内容' })}
-            ${UI.field('数据集字段 user_id', `<select class="select" id="f-group-fields" multiple size="4"><option value="">请先选择数据集…</option></select>`, { optional: true, help: '可多选；每条异常从所选字段读取 user_id' })}
+            ${UI.field('数据集字段 user_id', `
+              <div class="key-field-picker">
+                <button type="button" class="key-field-picker-trigger" id="f-group-fields" role="combobox"
+                  aria-label="数据集字段 user_id" aria-haspopup="listbox" aria-expanded="false"
+                  aria-controls="f-group-fields-listbox" disabled>
+                  <span class="key-field-picker-summary"><span class="key-field-picker-placeholder">请先选择数据集…</span></span>
+                  <span class="key-field-picker-chevron" aria-hidden="true">${Icon.chevronDown({ size: 14 })}</span>
+                </button>
+                <div class="key-field-picker-listbox" id="f-group-fields-listbox" role="listbox"
+                  aria-label="数据集字段 user_id" aria-multiselectable="true" hidden></div>
+              </div>
+            `, { optional: true, help: '可多选；每条异常从所选字段读取 user_id' })}
           </div>
           <div class="field-error" id="f-group-broadcast-error" style="display:none;">${Icon.alert({ size: 12 })}<span></span></div>
         </div>
@@ -561,116 +571,118 @@ window.RulesModule = (function () {
     const datasetSel = m.dialog.querySelector('#f-dataset');
     const fieldSourceSel = m.dialog.querySelector('#f-field-source');
     const validationFieldsSel = m.dialog.querySelector('#f-validation-fields');
-    const groupFieldsSel = m.dialog.querySelector('#f-group-fields');
-    const keyFieldsTrigger = m.dialog.querySelector('#f-key-fields');
-    const keyFieldsListbox = m.dialog.querySelector('#f-key-fields-listbox');
-    const keyFieldsPicker = keyFieldsTrigger.closest('.key-field-picker');
-    const keyFieldsSummary = keyFieldsTrigger.querySelector('.key-field-picker-summary');
     const fieldsPreview = m.dialog.querySelector('#dataset-fields-preview');
-    let keyFieldOptions = [];
-    let selectedKeyFields = [...new Set((data.anomalyKeyFields || []).map(String))];
-    let activeKeyFieldIndex = -1;
+    function wireFieldPicker(triggerId, listboxId, initialValues = []) {
+      const trigger = m.dialog.querySelector(`#${triggerId}`);
+      const listbox = m.dialog.querySelector(`#${listboxId}`);
+      const picker = trigger.closest('.key-field-picker');
+      const summary = trigger.querySelector('.key-field-picker-summary');
+      let options = [];
+      let selectedValues = [...new Set(initialValues.map(String))];
+      let activeIndex = -1;
 
-    function renderKeyFieldPicker() {
-      const selected = new Set(selectedKeyFields);
-      const visibleTags = selectedKeyFields.slice(0, 2);
-      keyFieldsSummary.innerHTML = visibleTags.length
-        ? `${visibleTags.map(value => `<span class="key-field-picker-tag">${escapeHtml(value)}</span>`).join('')}${selectedKeyFields.length > 2 ? `<span class="key-field-picker-count">+${selectedKeyFields.length - 2}</span>` : ''}`
-        : `<span class="key-field-picker-placeholder">${keyFieldOptions.length ? '请选择字段…' : '请先选择数据集…'}</span>`;
-      keyFieldsTrigger.disabled = keyFieldOptions.length === 0;
-      keyFieldsListbox.innerHTML = keyFieldOptions.map((field, index) => `
-        <button type="button" class="key-field-picker-option${index === activeKeyFieldIndex ? ' active' : ''}"
-          id="f-key-field-option-${index}" role="option" aria-selected="${selected.has(field.name)}"
-          data-key-field="${escapeHtml(field.name)}">
-          <span><strong>${escapeHtml(field.name)}</strong><small>${escapeHtml(field.type)}</small></span>
-          <span class="key-field-picker-check" aria-hidden="true">${Icon.check({ size: 14 })}</span>
-        </button>
-      `).join('');
-      if (activeKeyFieldIndex >= 0) {
-        keyFieldsTrigger.setAttribute('aria-activedescendant', `f-key-field-option-${activeKeyFieldIndex}`);
-      } else {
-        keyFieldsTrigger.removeAttribute('aria-activedescendant');
+      function render() {
+        const selected = new Set(selectedValues);
+        const visibleTags = selectedValues.slice(0, 2);
+        summary.innerHTML = visibleTags.length
+          ? `${visibleTags.map(value => `<span class="key-field-picker-tag">${escapeHtml(value)}</span>`).join('')}${selectedValues.length > 2 ? `<span class="key-field-picker-count">+${selectedValues.length - 2}</span>` : ''}`
+          : `<span class="key-field-picker-placeholder">${options.length ? '请选择字段…' : '请先选择数据集…'}</span>`;
+        trigger.disabled = options.length === 0;
+        listbox.innerHTML = options.map((field, index) => `
+          <button type="button" class="key-field-picker-option${index === activeIndex ? ' active' : ''}"
+            id="${triggerId}-option-${index}" role="option" aria-selected="${selected.has(field.name)}"
+            data-key-field="${escapeHtml(field.name)}">
+            <span><strong>${escapeHtml(field.name)}</strong><small>${escapeHtml(field.type)}</small></span>
+            <span class="key-field-picker-check" aria-hidden="true">${Icon.check({ size: 14 })}</span>
+          </button>
+        `).join('');
+        if (activeIndex >= 0) trigger.setAttribute('aria-activedescendant', `${triggerId}-option-${activeIndex}`);
+        else trigger.removeAttribute('aria-activedescendant');
       }
-    }
 
-    function setKeyFieldOptions(fields, selectedValues = []) {
-      keyFieldOptions = (fields || []).map(field => ({
-        name: String(field.name ?? ''),
-        type: String(field.type ?? ''),
-      }));
-      const allowed = new Set(keyFieldOptions.map(field => field.name));
-      selectedKeyFields = [...new Set(selectedValues.map(String).filter(value => allowed.has(value)))];
-      activeKeyFieldIndex = -1;
-      closeKeyFieldPicker();
-      renderKeyFieldPicker();
-    }
-
-    function openKeyFieldPicker() {
-      if (keyFieldsTrigger.disabled) return;
-      document.removeEventListener('click', closeKeyFieldsOnOutsideClick);
-      document.addEventListener('click', closeKeyFieldsOnOutsideClick);
-      keyFieldsListbox.hidden = false;
-      keyFieldsPicker.classList.add('open');
-      keyFieldsTrigger.setAttribute('aria-expanded', 'true');
-      activeKeyFieldIndex = Math.max(0, keyFieldOptions.findIndex(field => selectedKeyFields.includes(field.name)));
-      renderKeyFieldPicker();
-    }
-
-    function closeKeyFieldPicker() {
-      document.removeEventListener('click', closeKeyFieldsOnOutsideClick);
-      keyFieldsListbox.hidden = true;
-      keyFieldsPicker.classList.remove('open');
-      keyFieldsTrigger.setAttribute('aria-expanded', 'false');
-      activeKeyFieldIndex = -1;
-      keyFieldsTrigger.removeAttribute('aria-activedescendant');
-    }
-
-    function closeKeyFieldsOnOutsideClick(event) {
-      if (!event.composedPath().includes(keyFieldsPicker)) closeKeyFieldPicker();
-    }
-
-    cleanupKeyFieldPicker = closeKeyFieldPicker;
-
-    function toggleKeyField(value) {
-      if (selectedKeyFields.includes(value)) {
-        selectedKeyFields = selectedKeyFields.filter(field => field !== value);
-      } else {
-        selectedKeyFields.push(value);
+      function close() {
+        document.removeEventListener('click', closeOnOutsideClick);
+        listbox.hidden = true;
+        picker.classList.remove('open');
+        trigger.setAttribute('aria-expanded', 'false');
+        activeIndex = -1;
+        trigger.removeAttribute('aria-activedescendant');
       }
-      renderKeyFieldPicker();
-    }
 
-    keyFieldsTrigger.addEventListener('click', () => {
-      if (keyFieldsListbox.hidden) openKeyFieldPicker(); else closeKeyFieldPicker();
-    });
-    keyFieldsTrigger.addEventListener('keydown', event => {
-      if (event.key === 'Escape') {
-        if (!keyFieldsListbox.hidden) {
-          event.preventDefault();
-          event.stopPropagation();
-          closeKeyFieldPicker();
+      function closeOnOutsideClick(event) {
+        if (!event.composedPath().includes(picker)) close();
+      }
+
+      function open() {
+        if (trigger.disabled) return;
+        document.removeEventListener('click', closeOnOutsideClick);
+        document.addEventListener('click', closeOnOutsideClick);
+        listbox.hidden = false;
+        picker.classList.add('open');
+        trigger.setAttribute('aria-expanded', 'true');
+        activeIndex = Math.max(0, options.findIndex(field => selectedValues.includes(field.name)));
+        render();
+      }
+
+      function toggle(value) {
+        selectedValues = selectedValues.includes(value)
+          ? selectedValues.filter(field => field !== value)
+          : [...selectedValues, value];
+        render();
+      }
+
+      trigger.addEventListener('click', () => { if (listbox.hidden) open(); else close(); });
+      trigger.addEventListener('keydown', event => {
+        if (event.key === 'Escape') {
+          if (!listbox.hidden) {
+            event.preventDefault();
+            event.stopPropagation();
+            close();
+          }
+          return;
         }
-        return;
-      }
-      if (event.key === 'Tab') { closeKeyFieldPicker(); return; }
-      if (!['ArrowDown', 'ArrowUp', 'Enter', ' '].includes(event.key)) return;
-      event.preventDefault();
-      if (keyFieldsListbox.hidden) { openKeyFieldPicker(); return; }
-      if (event.key === 'ArrowDown') activeKeyFieldIndex = (activeKeyFieldIndex + 1) % keyFieldOptions.length;
-      if (event.key === 'ArrowUp') activeKeyFieldIndex = (activeKeyFieldIndex - 1 + keyFieldOptions.length) % keyFieldOptions.length;
-      if ((event.key === 'Enter' || event.key === ' ') && activeKeyFieldIndex >= 0) {
-        toggleKeyField(keyFieldOptions[activeKeyFieldIndex].name);
-      } else {
-        renderKeyFieldPicker();
-      }
-    });
-    keyFieldsListbox.addEventListener('click', event => {
-      const option = event.target.closest('[data-key-field]');
-      if (!option) return;
-      activeKeyFieldIndex = keyFieldOptions.findIndex(field => field.name === option.dataset.keyField);
-      toggleKeyField(option.dataset.keyField);
-      keyFieldsTrigger.focus();
-    });
+        if (event.key === 'Tab') { close(); return; }
+        if (!['ArrowDown', 'ArrowUp', 'Enter', ' '].includes(event.key)) return;
+        event.preventDefault();
+        if (listbox.hidden) { open(); return; }
+        if (event.key === 'ArrowDown') activeIndex = (activeIndex + 1) % options.length;
+        if (event.key === 'ArrowUp') activeIndex = (activeIndex - 1 + options.length) % options.length;
+        if ((event.key === 'Enter' || event.key === ' ') && activeIndex >= 0) toggle(options[activeIndex].name);
+        else render();
+      });
+      listbox.addEventListener('click', event => {
+        const option = event.target.closest('[data-key-field]');
+        if (!option) return;
+        activeIndex = options.findIndex(field => field.name === option.dataset.keyField);
+        toggle(option.dataset.keyField);
+        trigger.focus();
+      });
+
+      return {
+        close,
+        values: () => [...selectedValues],
+        setOptions(fields, values = []) {
+          options = (fields || []).map(field => ({
+            name: String(field.name ?? ''), type: String(field.type ?? ''),
+          }));
+          const allowed = new Set(options.map(field => field.name));
+          selectedValues = [...new Set(values.map(String).filter(value => allowed.has(value)))];
+          close();
+          render();
+        },
+      };
+    }
+
+    const keyFieldControl = wireFieldPicker(
+      'f-key-fields', 'f-key-fields-listbox', data.anomalyKeyFields || [],
+    );
+    const groupFieldControl = wireFieldPicker(
+      'f-group-fields', 'f-group-fields-listbox', groupFields,
+    );
+    cleanupKeyFieldPicker = () => {
+      keyFieldControl.close();
+      groupFieldControl.close();
+    };
     function replaceFieldOptions(select, fields, selectedValues = [], placeholder = null) {
       const selected = new Set(selectedValues.filter(value => value !== null && value !== undefined).map(String));
       select.replaceChildren();
@@ -695,8 +707,8 @@ window.RulesModule = (function () {
       if (!datasetId) {
         replaceFieldOptions(fieldSourceSel, [], [], '请选择字段…');
         replaceFieldOptions(validationFieldsSel, [], [], '请先选择数据集…');
-        replaceFieldOptions(groupFieldsSel, [], [], '请先选择数据集…');
-        setKeyFieldOptions([], []);
+        groupFieldControl.setOptions([], []);
+        keyFieldControl.setOptions([], []);
         sqlParameters = sqlParameters.map(parameter => ({ ...parameter, field: '' }));
         renderSqlParameters();
         fieldsPreview.innerHTML = '';
@@ -712,8 +724,8 @@ window.RulesModule = (function () {
       renderSqlParameters();
       replaceFieldOptions(fieldSourceSel, ds.fields, [data.notify.fieldSource], '请选择字段…');
       replaceFieldOptions(validationFieldsSel, ds.fields, validationFields);
-      replaceFieldOptions(groupFieldsSel, ds.fields, groupFields);
-      setKeyFieldOptions(ds.fields, initialKeyFields);
+      groupFieldControl.setOptions(ds.fields, groupFields);
+      keyFieldControl.setOptions(ds.fields, initialKeyFields);
       fieldsPreview.innerHTML = `
         <div class="schedule-preview" style="background:var(--color-info-soft);border-color:var(--color-info-line);color:#0369A1;margin-top:var(--space-3);">
           ${Icon.info({ size: 14 })}
@@ -890,11 +902,6 @@ window.RulesModule = (function () {
       '#f-group-userids', '#f-group-userids-input', groupUserIds,
     );
     const groupWebhookInput = m.dialog.querySelector('#f-group-webhook');
-    const groupWebhookClear = m.dialog.querySelector('#f-group-webhook-clear');
-    groupWebhookClear?.addEventListener('change', () => {
-      groupWebhookInput.disabled = groupWebhookClear.checked;
-      if (groupWebhookClear.checked) groupWebhookInput.value = '';
-    });
 
     // ---------- Cancel / Test / Save ----------
     m.dialog.querySelector('[data-action="cancel"]').addEventListener('click', () => m.close());
@@ -924,7 +931,7 @@ window.RulesModule = (function () {
       const ds = Store.getDataset(datasetId);
       const validConditions = conditions.filter(c => c.field && c.op);
       if (validConditions.length === 0) { UI.toast({ type: 'warning', title: '请至少配置一个有效条件' }); return; }
-      const anomalyKeyFields = [...selectedKeyFields];
+      const anomalyKeyFields = keyFieldControl.values();
       if (!anomalyKeyFields.length) { UI.toast({ type: 'warning', title: '请至少选择一个异常主键字段' }); return; }
 
       commitPendingTargets.forEach(commit => commit());
@@ -990,19 +997,16 @@ window.RulesModule = (function () {
       }
 
       commitPendingGroupTarget();
-      groupFields = [...groupFieldsSel.selectedOptions].map(option => option.value).filter(Boolean);
+      groupFields = groupFieldControl.values();
       const groupBroadcastEnabled = m.dialog.querySelector('#f-group-broadcast-enabled').checked;
       const groupWebhookUrl = groupWebhookInput.value.trim();
-      const clearGroupWebhook = !!groupWebhookClear?.checked;
       const groupMentionTargets = [
         ...groupUserIds.map(value => ({ source: 'literal', value })),
         ...groupFields.map(field => ({ source: 'field', field })),
       ];
       const groupBroadcastError = m.dialog.querySelector('#f-group-broadcast-error');
       let groupBroadcastMessage = '';
-      if (groupBroadcastEnabled && clearGroupWebhook) {
-        groupBroadcastMessage = '启用群聊播报时不能清除 webhook';
-      } else if (groupBroadcastEnabled && !groupWebhookUrl && !groupBroadcast.hasWebhook) {
+      if (groupBroadcastEnabled && !groupWebhookUrl) {
         groupBroadcastMessage = '启用群聊播报时必须配置 webhook';
       } else if (groupBroadcastEnabled && !groupMentionTargets.length) {
         groupBroadcastMessage = '启用群聊播报时，请至少配置一个艾特用户来源';
@@ -1031,10 +1035,7 @@ window.RulesModule = (function () {
         sqlValidationConfig,
         groupBroadcast: {
           enabled: groupBroadcastEnabled,
-          hasWebhook: clearGroupWebhook ? false : !!groupBroadcast.hasWebhook,
-          ...(clearGroupWebhook
-            ? { webhookUrl: null }
-            : (groupWebhookUrl ? { webhookUrl: groupWebhookUrl } : {})),
+          webhookUrl: groupWebhookUrl || null,
           mentionTargets: groupMentionTargets,
         },
         logic,

@@ -83,7 +83,8 @@ test('validation rule fields and anomaly audit details map between API and UI co
         true_condition: { field: 'status', operator: 'eq', value: 'normal', upper_value: null },
       },
       group_broadcast: {
-        enabled: true, has_webhook: true,
+        enabled: true,
+        webhook_url: 'https://open.feishu.cn/open-apis/bot/v2/hook/saved-webhook',
         mention_targets: [{ source: 'literal', value: 'group-owner' }, { source: 'field', field: 'owner_id' }],
       },
       enabled: true, sync_status: 'synced', sync_error: null, last_run: null, next_run: null,
@@ -146,7 +147,7 @@ test('validation rule fields and anomaly audit details map between API and UI co
             sql_validation_config: body.sql_validation_config,
             group_broadcast: {
               enabled: body.group_broadcast.enabled,
-              has_webhook: !!body.group_broadcast.webhook_url,
+              webhook_url: body.group_broadcast.webhook_url,
               mention_targets: body.group_broadcast.mention_targets,
             },
           }),
@@ -171,7 +172,7 @@ test('validation rule fields and anomaly audit details map between API and UI co
   ]);
   assert.deepEqual(JSON.parse(JSON.stringify(rule.groupBroadcast)), {
     enabled: true,
-    hasWebhook: true,
+    webhookUrl: 'https://open.feishu.cn/open-apis/bot/v2/hook/saved-webhook',
     mentionTargets: [{ source: 'literal', value: 'group-owner' }, { source: 'field', field: 'owner_id' }],
   });
   const listed = store.getRecord('record-1');
@@ -212,7 +213,6 @@ test('validation rule fields and anomaly audit details map between API and UI co
     },
     groupBroadcast: {
       enabled: true,
-      hasWebhook: false,
       webhookUrl: 'https://open.feishu.cn/open-apis/bot/v2/hook/test-webhook',
       mentionTargets: [{ source: 'literal', value: 'group-user' }, { source: 'field', field: 'owner_id' }],
     },

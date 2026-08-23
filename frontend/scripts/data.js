@@ -70,7 +70,7 @@ window.Store = (function () {
     sqlValidationConfig: mapSqlValidationConfig(r.sql_validation_config),
     groupBroadcast: {
       enabled: !!r.group_broadcast?.enabled,
-      hasWebhook: !!r.group_broadcast?.has_webhook,
+      webhookUrl: r.group_broadcast?.webhook_url || '',
       mentionTargets: r.group_broadcast?.mention_targets || [],
     },
     enabled: r.enabled, syncStatus: r.sync_status, syncError: r.sync_error,
@@ -262,8 +262,7 @@ window.Store = (function () {
       enabled: !!groupBroadcast.enabled,
       mention_targets: groupBroadcast.mentionTargets || [],
     };
-    if (groupBroadcast.webhookUrl === null) groupBroadcastPayload.webhook_url = null;
-    else if (groupBroadcast.webhookUrl) groupBroadcastPayload.webhook_url = groupBroadcast.webhookUrl;
+    groupBroadcastPayload.webhook_url = groupBroadcast.webhookUrl || null;
     return {
       name: data.name, description: data.description || '', dataset_id: data.datasetId,
       severity: data.severity || 'medium', logic: data.logic || 'AND',

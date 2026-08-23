@@ -19,7 +19,6 @@ from .models import (
     RuleRun,
     utcnow,
 )
-from .security import CredentialCipher
 
 
 RECORDS_PER_MESSAGE = 20
@@ -158,7 +157,7 @@ def create_anomaly_group(
             position=position,
         ))
 
-    if not rule.group_broadcast_enabled or not rule.group_webhook_encrypted:
+    if not rule.group_broadcast_enabled or not rule.group_webhook_url:
         return group
 
     pipeline = session.scalar(
@@ -180,7 +179,7 @@ def create_anomaly_group(
             detected_at=group.detected_at,
             part_index=part_index,
             total_parts=len(messages),
-            webhook_encrypted=rule.group_webhook_encrypted,
+            webhook_url=rule.group_webhook_url,
             payload=payload,
         )
         session.add(delivery)
@@ -211,7 +210,6 @@ def deliver_group_broadcasts(
         )
         .order_by(AnomalyGroupBroadcastDelivery.created_at, AnomalyGroupBroadcastDelivery.id)
     ))
-    cipher = CredentialCipher(settings.datasource_encryption_key)
     with httpx.Client(
         timeout=settings.feishu_http_timeout_seconds,
         transport=transport,
@@ -222,8 +220,7 @@ def deliver_group_broadcasts(
             delivery.last_error = None
             session.commit()
             try:
-                webhook_url = cipher.decrypt(delivery.webhook_encrypted)
-                response = client.post(webhook_url, json=delivery.payload)
+                response = client.post(delivery.webhook_url, json=delivery.payload)
                 if not response.is_success:
                     raise GroupWebhookDeliveryError(
                         f"飞书 webhook 返回 HTTP {response.status_code}"

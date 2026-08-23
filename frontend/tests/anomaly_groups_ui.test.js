@@ -57,8 +57,11 @@ test('anomaly group module renders summaries and links every member to record de
   await drawer.getByText('查看明细', { exact: true }).waitFor();
   const link = drawer.getByRole('link', { name: '查看明细' });
   assert.equal(await link.getAttribute('href'), '#records/record-1');
-  await link.click();
-  assert.deepEqual(await page.evaluate(() => window.openedRoutes), ['records/record-1']);
+  assert.equal(await link.getAttribute('target'), '_blank');
+  assert.equal(await link.getAttribute('rel'), 'noopener noreferrer');
+  await link.click({ modifiers: ['Control'] });
+  assert.deepEqual(await page.evaluate(() => window.openedRoutes), []);
+  assert.equal(await drawer.isVisible(), true);
 });
 
 test('monitor navigation places anomaly groups immediately after anomaly records', async t => {

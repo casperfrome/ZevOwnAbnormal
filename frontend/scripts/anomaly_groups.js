@@ -118,7 +118,7 @@ window.AnomalyGroupsModule = (function () {
                     <td class="text-mono">${escapeHtml(JSON.stringify(record.businessKey || {}))}</td>
                     <td>${UI.recordStatusBadge(record.status)}</td>
                     <td>${UI.severityBadge(record.severity)}</td>
-                    <td><a class="btn btn-ghost btn-sm group-record-link" href="#records/${encodeURIComponent(record.id)}" data-record-id="${escapeHtml(record.id)}">查看明细</a></td>
+                    <td><a class="btn btn-ghost btn-sm group-record-link" href="#records/${encodeURIComponent(record.id)}" target="_blank" rel="noopener noreferrer">查看明细</a></td>
                   </tr>
                 `).join('')}</tbody>
               </table></div>
@@ -130,12 +130,6 @@ window.AnomalyGroupsModule = (function () {
       footer: '<button class="btn btn-ghost" data-action="close">关闭</button>',
     });
     drawer.drawer.querySelector('[data-action="close"]').addEventListener('click', drawer.close);
-    drawer.drawer.querySelectorAll('.group-record-link').forEach(link => link.addEventListener('click', event => {
-      event.preventDefault();
-      const recordId = link.dataset.recordId;
-      drawer.close();
-      options?.navigate(`records/${recordId}`);
-    }));
     drawer.drawer.querySelectorAll('.page-btn[data-page]').forEach(button => button.addEventListener('click', () => {
       drawer.close();
       openDetail(groupId, Number(button.dataset.page));
