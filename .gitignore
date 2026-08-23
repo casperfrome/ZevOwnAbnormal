@@ -43,5 +43,8 @@ logs/
 tmp/
 .worktrees/
 
+# Local agent workflow artifacts
+/.superpowers/
+
 # Standalone local StarRocks temperature manager (intentionally untracked)
 /intransit-temperature-admin/
