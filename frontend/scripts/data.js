@@ -68,6 +68,11 @@ window.Store = (function () {
     validationTimeoutMinutes: r.validation_timeout_minutes ?? 1440,
     validationMethod: r.validation_method || 'pseudo',
     sqlValidationConfig: mapSqlValidationConfig(r.sql_validation_config),
+    groupBroadcast: {
+      enabled: !!r.group_broadcast?.enabled,
+      hasWebhook: !!r.group_broadcast?.has_webhook,
+      mentionTargets: r.group_broadcast?.mention_targets || [],
+    },
     enabled: r.enabled, syncStatus: r.sync_status, syncError: r.sync_error,
     lastRun: r.last_run || null, nextRun: r.next_run || null, anomalyCount: r.anomaly_count || 0,
     createdAt: r.created_at,
@@ -114,6 +119,18 @@ window.Store = (function () {
     };
   };
 
+  const mapAnomalyGroup = item => ({
+    groupId: item.group_id,
+    ruleId: item.rule_id,
+    ruleName: item.rule_name,
+    detectedAt: item.detected_at,
+    scannedRows: item.scanned_rows || 0,
+    matchedRows: item.matched_rows || 0,
+    newAnomalies: item.new_anomalies || 0,
+    statusCounts: item.status_counts || { pending: 0, processing: 0, timed_out: 0, resolved: 0 },
+    broadcastStatus: item.broadcast_status || 'disabled',
+  });
+
   function anomalyQuery(filters = {}, includePagination = false) {
     const entries = [
       ...(includePagination ? [
@@ -129,6 +146,38 @@ window.Store = (function () {
       ['sort_order', filters.sortOrder],
     ].filter(([, value]) => value !== null && value !== undefined && value !== '');
     return entries.map(([key, value]) => `${key}=${encodeURIComponent(value)}`).join('&');
+  }
+
+  function anomalyGroupQuery(filters = {}) {
+    return [
+      ['page', filters.page || 1],
+      ['page_size', filters.pageSize || 10],
+      ['search', filters.search],
+      ['rule_id', filters.ruleId],
+    ].filter(([, value]) => value !== null && value !== undefined && value !== '')
+      .map(([key, value]) => `${key}=${encodeURIComponent(value)}`).join('&');
+  }
+
+  async function loadAnomalyGroupsPage(filters = {}) {
+    const result = await request(`/anomaly-groups?${anomalyGroupQuery(filters)}`);
+    return {
+      items: (result.items || []).map(mapAnomalyGroup),
+      total: result.total || 0,
+      page: result.page || filters.page || 1,
+      pageSize: result.page_size || filters.pageSize || 10,
+    };
+  }
+
+  async function loadAnomalyGroup(groupId, filters = {}) {
+    const query = anomalyGroupQuery(filters);
+    const result = await request(`/anomaly-groups/${encodeURIComponent(groupId)}?${query}`);
+    return {
+      group: mapAnomalyGroup(result.group),
+      items: (result.items || []).map(mapRecord),
+      total: result.total || 0,
+      page: result.page || filters.page || 1,
+      pageSize: result.page_size || filters.pageSize || 20,
+    };
   }
 
   async function fetchRecordsPage(filters = {}) {
@@ -208,6 +257,13 @@ window.Store = (function () {
       ];
       if (data.notify.fieldSource) targets.push({ receive_id_type: data.notify.fieldIdType || 'open_id', source: 'field', field: data.notify.fieldSource });
     }
+    const groupBroadcast = data.groupBroadcast || { enabled: false, mentionTargets: [] };
+    const groupBroadcastPayload = {
+      enabled: !!groupBroadcast.enabled,
+      mention_targets: groupBroadcast.mentionTargets || [],
+    };
+    if (groupBroadcast.webhookUrl === null) groupBroadcastPayload.webhook_url = null;
+    else if (groupBroadcast.webhookUrl) groupBroadcastPayload.webhook_url = groupBroadcast.webhookUrl;
     return {
       name: data.name, description: data.description || '', dataset_id: data.datasetId,
       severity: data.severity || 'medium', logic: data.logic || 'AND',
@@ -231,11 +287,13 @@ window.Store = (function () {
           upper_value: data.sqlValidationConfig.trueCondition.upperValue ?? null,
         },
       } : null,
+      group_broadcast: groupBroadcastPayload,
     };
   }
 
   return {
     init, refresh, request, loadRecordsPage, peekRecordsPage,
+    loadAnomalyGroupsPage, loadAnomalyGroup,
     isSuperuser: () => state.currentUser?.is_superuser === true,
     getDatasources: () => [...state.datasources],
     getDatasource: id => state.datasources.find(item => item.id === id),

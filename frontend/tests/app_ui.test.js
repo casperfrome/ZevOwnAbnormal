@@ -20,6 +20,7 @@ async function mountApp(t, overrides = {}) {
     <div id="toast-container"></div>
     <aside id="sidebar">
       <div class="nav-item" data-route="records"></div>
+      <div class="nav-item" data-route="anomaly-groups"></div>
       <div class="nav-item" data-route="rules"></div>
       <div class="nav-item" data-route="datasets"></div>
       <div class="nav-item" data-route="datasources"></div>
@@ -58,6 +59,7 @@ async function mountApp(t, overrides = {}) {
       openItem: id => window.openedItems.push([name, id]),
     });
     window.RecordsModule = { render: content => { content.innerHTML = '<div>records</div>'; }, openDetail: id => window.openedItems.push(['records', id]) };
+    window.AnomalyGroupsModule = { render: content => { content.innerHTML = '<div>groups</div>'; }, openDetail: id => window.openedItems.push(['anomaly-groups', id]) };
     window.RulesModule = module('rules');
     window.DatasetModule = module('datasets');
     window.DatasourceModule = module('datasources');
@@ -65,6 +67,15 @@ async function mountApp(t, overrides = {}) {
   await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'app.js') });
   return page;
 }
+
+test('anomaly group deep links render the group module and open its detail', async t => {
+  const page = await mountApp(t);
+
+  await page.evaluate(() => App.navigate('anomaly-groups/run-1'));
+
+  assert.match(await page.evaluate(() => location.hash), /anomaly-groups\/run-1/);
+  assert.deepEqual(await page.evaluate(() => window.openedItems), [['anomaly-groups', 'run-1']]);
+});
 
 test('toolbar search reserves enough inline space for its icon at desktop and mobile widths', async t => {
   const page = await browserPage(t);

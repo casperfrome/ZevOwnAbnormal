@@ -454,6 +454,7 @@ def test_abort_marks_both_delivery_kinds_and_clears_external_queues(db_session):
         "aborted_jobs": 2,
         "aborted_notifications": 1,
         "aborted_validations": 1,
+        "aborted_group_broadcasts": 0,
         "stopped_ds_instances": 2,
         "deleted_ds_instances": 2,
         "cleared_kafka_partitions": 3,

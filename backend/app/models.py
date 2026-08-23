@@ -3,7 +3,8 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, ForeignKeyConstraint, Index, Integer, String, Text, UniqueConstraint, text
+from sqlalchemy.dialects import mysql
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -16,6 +17,9 @@ def new_id() -> str:
 def utcnow() -> datetime:
     """Return naive UTC for MySQL DATETIME without deprecated datetime.utcnow()."""
     return datetime.now(UTC).replace(tzinfo=None)
+
+
+PRECISE_DATETIME = DateTime().with_variant(mysql.DATETIME(fsp=6), "mysql")
 
 
 class TimestampMixin:
@@ -86,6 +90,16 @@ class Rule(Base, TimestampMixin):
         String(20), default="pseudo", server_default=text("'pseudo'"), nullable=False,
     )
     sql_validation_config: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    group_broadcast_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("0"), nullable=False,
+    )
+    group_webhook_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    group_mention_targets: Mapped[list[dict]] = mapped_column(
+        JSON,
+        default=list,
+        nullable=False,
+        server_default=text("('[]')"),
+    )
     enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     sync_status: Mapped[str] = mapped_column(String(30), default="pending", nullable=False)
     sync_error: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -105,7 +119,7 @@ class RuleRun(Base):
     matched_rows: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     new_anomalies: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    started_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(PRECISE_DATETIME, default=utcnow, nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
@@ -144,6 +158,68 @@ class AnomalyRecord(Base):
         server_default=text("('{}')"),
     )
     assignee: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+
+class AnomalyRecordGroup(Base):
+    __tablename__ = "anomaly_record_groups"
+    __table_args__ = (
+        UniqueConstraint("run_id", name="uq_anomaly_record_group_run"),
+        Index("ix_anomaly_record_groups_detected_at", "detected_at"),
+    )
+
+    rule_id: Mapped[str] = mapped_column(ForeignKey("rules.id"), primary_key=True)
+    detected_at: Mapped[datetime] = mapped_column(PRECISE_DATETIME, primary_key=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("rule_runs.id"), nullable=False)
+    rule_name: Mapped[str] = mapped_column(String(150), nullable=False)
+    scanned_rows: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    matched_rows: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    new_anomalies: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    broadcast_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+
+class AnomalyRecordGroupMember(Base):
+    __tablename__ = "anomaly_record_group_members"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["rule_id", "detected_at"],
+            ["anomaly_record_groups.rule_id", "anomaly_record_groups.detected_at"],
+            name="fk_anomaly_group_member_group",
+        ),
+        UniqueConstraint("rule_id", "detected_at", "position", name="uq_anomaly_group_member_position"),
+        Index("ix_anomaly_group_members_anomaly", "anomaly_id"),
+    )
+
+    rule_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    detected_at: Mapped[datetime] = mapped_column(PRECISE_DATETIME, primary_key=True)
+    anomaly_id: Mapped[str] = mapped_column(ForeignKey("anomaly_records.id"), primary_key=True)
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class AnomalyGroupBroadcastDelivery(Base, TimestampMixin):
+    __tablename__ = "anomaly_group_broadcast_deliveries"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["rule_id", "detected_at"],
+            ["anomaly_record_groups.rule_id", "anomaly_record_groups.detected_at"],
+            name="fk_anomaly_group_delivery_group",
+        ),
+        UniqueConstraint("rule_id", "detected_at", "part_index", name="uq_anomaly_group_delivery_part"),
+        Index("ix_anomaly_group_deliveries_retry", "status", "next_attempt_at", "updated_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    rule_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    detected_at: Mapped[datetime] = mapped_column(PRECISE_DATETIME, nullable=False)
+    part_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    total_parts: Mapped[int] = mapped_column(Integer, nullable=False)
+    webhook_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class AnomalyEvent(Base):
@@ -241,7 +317,7 @@ class AnomalyPushJob(Base, TimestampMixin):
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    anomaly_id: Mapped[str] = mapped_column(ForeignKey("anomaly_records.id"), nullable=False)
+    anomaly_id: Mapped[str | None] = mapped_column(ForeignKey("anomaly_records.id"), nullable=True)
     kind: Mapped[str] = mapped_column(String(20), nullable=False)
     delivery_id: Mapped[str] = mapped_column(String(36), nullable=False)
     generation: Mapped[int] = mapped_column(Integer, nullable=False)

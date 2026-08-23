@@ -10,10 +10,15 @@ from typing import Any
 from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
+from .anomaly_group_service import (
+    GroupWebhookDeliveryUncertainError,
+    deliver_group_broadcasts,
+)
 from .config import Settings
 from .execution_service import deliver_notifications
 from .models import (
     AnomalyEvent,
+    AnomalyGroupBroadcastDelivery,
     AnomalyPushJob,
     AnomalyPushPipelineState,
     AnomalyRecord,
@@ -26,8 +31,9 @@ from .validation_service import _eligible_delivery_predicate, deliver_validation
 
 logger = logging.getLogger(__name__)
 MESSAGE_VERSION = 1
-TERMINAL_JOB_STATUSES = {"sent", "failed", "aborted"}
+TERMINAL_JOB_STATUSES = {"sent", "failed", "uncertain", "aborted"}
 MAX_NOTIFICATION_DELIVERY_ATTEMPTS = 6
+MAX_GROUP_BROADCAST_DELIVERY_ATTEMPTS = 6
 DISPATCH_LEASE = timedelta(seconds=30)
 DS_CALLBACK_LEASE = timedelta(minutes=10)
 DELIVERED_VALIDATION_STATUSES = {"sent", "resolved", "timed_out", "update_failed"}
@@ -211,23 +217,88 @@ def queue_due_notification_push_jobs(
     return queued
 
 
+def queue_due_group_broadcast_push_jobs(
+    session: Session,
+    *,
+    limit: int = 50,
+    now: datetime | None = None,
+) -> int:
+    scan_time = now or utcnow()
+    pipeline = session.scalar(
+        select(AnomalyPushPipelineState)
+        .where(AnomalyPushPipelineState.id == 1)
+        .with_for_update()
+    )
+    if pipeline is None:
+        pipeline = AnomalyPushPipelineState(id=1, generation=1)
+        session.add(pipeline)
+        session.flush()
+    if pipeline.abort_in_progress:
+        session.commit()
+        return 0
+    deliveries = list(session.scalars(
+        select(AnomalyGroupBroadcastDelivery)
+        .where(
+            AnomalyGroupBroadcastDelivery.status == "failed",
+            AnomalyGroupBroadcastDelivery.attempts < MAX_GROUP_BROADCAST_DELIVERY_ATTEMPTS,
+        )
+        .order_by(AnomalyGroupBroadcastDelivery.updated_at, AnomalyGroupBroadcastDelivery.id)
+        .limit(limit)
+    ))
+    queued = 0
+    for delivery in deliveries:
+        job = session.scalar(select(AnomalyPushJob).where(
+            AnomalyPushJob.kind == "group_broadcast",
+            AnomalyPushJob.delivery_id == delivery.id,
+        ))
+        if job is None:
+            session.add(AnomalyPushJob(
+                anomaly_id=None,
+                kind="group_broadcast",
+                delivery_id=delivery.id,
+                generation=pipeline.generation,
+            ))
+            queued += 1
+        elif (
+            job.status == "failed"
+            and not job.cancel_requested
+            and (job.next_attempt_at is None or job.next_attempt_at <= scan_time)
+        ):
+            job.status = "pending_publish"
+            job.generation = pipeline.generation
+            job.last_error = None
+            queued += 1
+    session.commit()
+    return queued
+
+
 def _unpack_message(message):
     if isinstance(message, tuple):
         return message[0]
     return message.event
 
 
-def _completed_job_status(session: Session, job: AnomalyPushJob) -> str | None:
+def _job_delivery_status(session: Session, job: AnomalyPushJob) -> str | None:
     if job.kind == "notification":
         delivery = session.get(NotificationDelivery, job.delivery_id)
-        delivery_status = delivery.status if delivery is not None else None
-        if delivery_status == "sent":
-            return "sent"
-    else:
+        return delivery.status if delivery is not None else None
+    if job.kind == "validation":
         request = session.get(AnomalyValidationRequest, job.delivery_id)
-        delivery_status = request.delivery_status if request is not None else None
-        if delivery_status in DELIVERED_VALIDATION_STATUSES:
-            return "sent"
+        return request.delivery_status if request is not None else None
+    if job.kind == "group_broadcast":
+        delivery = session.get(AnomalyGroupBroadcastDelivery, job.delivery_id)
+        return delivery.status if delivery is not None else None
+    return None
+
+
+def _completed_job_status(session: Session, job: AnomalyPushJob) -> str | None:
+    delivery_status = _job_delivery_status(session, job)
+    if job.kind == "notification" and delivery_status == "sent":
+        return "sent"
+    if job.kind == "validation" and delivery_status in DELIVERED_VALIDATION_STATUSES:
+        return "sent"
+    if job.kind == "group_broadcast" and delivery_status in {"sent", "uncertain"}:
+        return delivery_status
     return "aborted" if delivery_status == "aborted" else None
 
 
@@ -236,7 +307,10 @@ def _reconcile_job(session: Session, job: AnomalyPushJob) -> bool:
     if completed_status is None:
         return False
     job.status = completed_status
-    job.last_error = None if completed_status == "sent" else "投递已中止"
+    if completed_status == "sent":
+        job.last_error = None
+    elif completed_status == "aborted":
+        job.last_error = "投递已中止"
     job.next_attempt_at = None
     return True
 
@@ -249,7 +323,7 @@ def reconcile_completed_push_jobs(session: Session, *, limit: int = 50) -> int:
         select(AnomalyPushJob).where(
             AnomalyPushJob.generation == pipeline.generation,
             AnomalyPushJob.cancel_requested.is_(False),
-            AnomalyPushJob.status.not_in(["sent", "aborted"]),
+            AnomalyPushJob.status.not_in(["sent", "uncertain", "aborted"]),
         ).order_by(AnomalyPushJob.updated_at, AnomalyPushJob.id).limit(limit)
     ))
     reconciled = sum(_reconcile_job(session, job) for job in jobs)
@@ -402,14 +476,10 @@ def requeue_stale_push_jobs(
             job.status = "pending_publish"
             job.last_error = "DolphinScheduler 回调租约过期，已重新排队"
         else:
-            if job.kind == "notification":
-                delivery = session.get(NotificationDelivery, job.delivery_id)
-                delivery_status = delivery.status if delivery is not None else None
-            else:
-                request = session.get(AnomalyValidationRequest, job.delivery_id)
-                delivery_status = request.delivery_status if request is not None else None
-            if delivery_status in ({"sent"} if job.kind == "notification" else DELIVERED_VALIDATION_STATUSES):
-                job.status = "sent"
+            delivery_status = _job_delivery_status(session, job)
+            completed_status = _completed_job_status(session, job)
+            if completed_status is not None:
+                job.status = completed_status
                 job.last_error = None
             elif delivery_status == "aborted":
                 job.status = "aborted"
@@ -420,6 +490,14 @@ def requeue_stale_push_jobs(
                 # after that delivery becomes safe to claim again.
                 job.status = "failed"
                 job.last_error = "等待互动卡片发送结果确认后重试"
+            elif job.kind == "group_broadcast" and delivery_status == "sending":
+                delivery = session.get(AnomalyGroupBroadcastDelivery, job.delivery_id)
+                if delivery is not None:
+                    delivery.status = "uncertain"
+                    delivery.next_attempt_at = None
+                    delivery.last_error = "群机器人发送租约过期，发送结果未知，已停止自动重试"
+                job.status = "uncertain"
+                job.last_error = "群机器人发送结果未知，已停止自动重试"
             else:
                 job.status = "pending_publish"
                 job.last_error = "检测到过期发送租约，已重新排队"
@@ -446,14 +524,29 @@ def _abort_delivery(session: Session, job: AnomalyPushJob) -> bool:
             request.delivery_status = "uncertain"
             request.next_attempt_at = None
             request.last_error = "管理员中止时飞书发送结果未知，已停止自动重试"
+    elif job.kind == "group_broadcast":
+        delivery = session.get(AnomalyGroupBroadcastDelivery, job.delivery_id)
+        if delivery is not None and delivery.status in {"pending", "failed"}:
+            delivery.status = "aborted"
+            delivery.next_attempt_at = None
+            delivery.last_error = "推送已由管理员中止"
+            return True
+        if delivery is not None and delivery.status == "sending":
+            delivery.status = "uncertain"
+            delivery.next_attempt_at = None
+            delivery.last_error = "管理员中止时群机器人发送结果未知，已停止自动重试"
     return False
 
 
-def _schedule_notification_retry(session: Session, job: AnomalyPushJob) -> None:
-    if job.kind != "notification":
+def _schedule_delivery_retry(session: Session, job: AnomalyPushJob) -> None:
+    if job.kind == "notification":
+        delivery = session.get(NotificationDelivery, job.delivery_id)
+        attempts = delivery.attempts if delivery is not None else job.publish_attempts
+    elif job.kind == "group_broadcast":
+        delivery = session.get(AnomalyGroupBroadcastDelivery, job.delivery_id)
+        attempts = delivery.attempts if delivery is not None else job.publish_attempts
+    else:
         return
-    delivery = session.get(NotificationDelivery, job.delivery_id)
-    attempts = delivery.attempts if delivery is not None else job.publish_attempts
     delay = min(2 ** max(attempts, 1), 300)
     job.next_attempt_at = utcnow() + timedelta(seconds=delay)
 
@@ -479,11 +572,27 @@ def execute_push_job(session: Session, settings: Settings, job_id: str) -> str:
     job.last_error = None
     session.commit()
     try:
-        failures = (
-            deliver_notifications(session, settings, delivery_ids=[job.delivery_id])
-            if job.kind == "notification"
-            else deliver_validation_requests(session, settings, request_ids=[job.delivery_id])
-        )
+        if job.kind == "notification":
+            failures = deliver_notifications(
+                session, settings, delivery_ids=[job.delivery_id],
+            )
+        elif job.kind == "validation":
+            failures = deliver_validation_requests(
+                session, settings, request_ids=[job.delivery_id],
+            )
+        elif job.kind == "group_broadcast":
+            failures = deliver_group_broadcasts(
+                session, settings, delivery_ids=[job.delivery_id],
+            )
+        else:
+            raise ValueError(f"不支持的异常推送类型：{job.kind}")
+    except GroupWebhookDeliveryUncertainError as exc:
+        job = session.get(AnomalyPushJob, job_id)
+        job.status = "uncertain"
+        job.last_error = str(exc)[:2000]
+        job.next_attempt_at = None
+        session.commit()
+        raise
     except Exception as exc:
         job = session.get(AnomalyPushJob, job_id)
         if job.cancel_requested:
@@ -493,17 +602,16 @@ def execute_push_job(session: Session, settings: Settings, job_id: str) -> str:
         else:
             job.status = "failed"
             job.last_error = str(exc)[:2000]
-            _schedule_notification_retry(session, job)
+            _schedule_delivery_retry(session, job)
         session.commit()
         raise
     job = session.get(AnomalyPushJob, job_id)
-    if job.kind == "notification":
-        delivery = session.get(NotificationDelivery, job.delivery_id)
-        delivery_status = delivery.status if delivery is not None else None
-    else:
-        request = session.get(AnomalyValidationRequest, job.delivery_id)
-        delivery_status = request.delivery_status if request is not None else None
-    delivered = delivery_status in ({"sent"} if job.kind == "notification" else DELIVERED_VALIDATION_STATUSES)
+    delivery_status = _job_delivery_status(session, job)
+    delivered = (
+        delivery_status == "sent"
+        if job.kind in {"notification", "group_broadcast"}
+        else delivery_status in DELIVERED_VALIDATION_STATUSES
+    )
     if job.cancel_requested and not delivered:
         job.status = "aborted"
         job.last_error = "推送在管理员中止期间发送失败，已取消后续重试"
@@ -512,7 +620,7 @@ def execute_push_job(session: Session, settings: Settings, job_id: str) -> str:
     elif not delivered:
         job.status = "failed"
         job.last_error = "飞书推送失败" if failures else "飞书投递尚未完成"
-        _schedule_notification_retry(session, job)
+        _schedule_delivery_retry(session, job)
         outcome = "failed"
     else:
         job.status = "sent"
@@ -580,6 +688,7 @@ def abort_pending_pushes(
     )))
     notification_count = 0
     validation_count = 0
+    group_broadcast_count = 0
     anomaly_ids: set[str] = set()
     for job in jobs:
         job.status = "aborted"
@@ -587,9 +696,12 @@ def abort_pending_pushes(
         if _abort_delivery(session, job):
             if job.kind == "notification":
                 notification_count += 1
-            else:
+            elif job.kind == "validation":
                 validation_count += 1
-        anomaly_ids.add(job.anomaly_id)
+            elif job.kind == "group_broadcast":
+                group_broadcast_count += 1
+        if job.anomaly_id is not None:
+            anomaly_ids.add(job.anomaly_id)
     for anomaly_id in anomaly_ids:
         session.add(AnomalyEvent(
             anomaly_id=anomaly_id,
@@ -618,6 +730,7 @@ def abort_pending_pushes(
         "aborted_jobs": len(jobs),
         "aborted_notifications": notification_count,
         "aborted_validations": validation_count,
+        "aborted_group_broadcasts": group_broadcast_count,
         "stopped_ds_instances": stopped,
         "deleted_ds_instances": deleted,
         "cleared_kafka_partitions": cleared,

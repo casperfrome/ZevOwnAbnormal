@@ -266,7 +266,9 @@ window.RulesModule = (function () {
       validationTimeoutMinutes: 1440,
       validationMethod: 'pseudo',
       sqlValidationConfig: null,
+      groupBroadcast: { enabled: false, hasWebhook: false, mentionTargets: [] },
     };
+    const groupBroadcast = data.groupBroadcast || { enabled: false, hasWebhook: false, mentionTargets: [] };
 
     const datasets = Store.getDatasets();
 
@@ -438,6 +440,30 @@ window.RulesModule = (function () {
             `, { help: '使用数据集结果中的字段值作为通知对象 ID' })}
           </div>
         </div>
+
+        <div class="form-section group-broadcast-config">
+          <div class="form-section-title">${Icon.send({ size: 14 })}群聊播报</div>
+          <div class="form-section-desc">每次规则成功执行后，将本批异常记录组汇总发送到飞书话题群</div>
+          <div class="validation-toggle-row">
+            <div>
+              <div class="cell-strong">启用群聊播报</div>
+              <div class="cell-muted">关闭时保留 webhook 与艾特目标配置</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="f-group-broadcast-enabled" ${groupBroadcast.enabled ? 'checked' : ''} aria-label="启用群聊播报" />
+              <span class="switch-slider"></span>
+            </label>
+          </div>
+          <div class="form-grid">
+            ${UI.field('话题群机器人 webhook', `
+              <input class="input mono" id="f-group-webhook" type="password" autocomplete="new-password" placeholder="${groupBroadcast.hasWebhook ? '已配置，留空将保留现有 webhook' : 'https://open.feishu.cn/open-apis/bot/v2/hook/...'}" />
+              ${groupBroadcast.hasWebhook ? `<label class="field-help" style="display:flex;align-items:center;gap:var(--space-2);"><input type="checkbox" id="f-group-webhook-clear" />清除已配置 webhook</label>` : ''}
+            `, { optional: true, span2: true, help: '仅支持飞书机器人 HTTPS webhook；已保存的地址不会回显' })}
+            ${UI.field('固定艾特用户 user_id', `<div class="tag-input" id="f-group-userids"><input type="text" placeholder="输入 user_id 后回车" id="f-group-userids-input" /></div>`, { optional: true, help: '可配置多个；保存时会自动收录尚未回车的内容' })}
+            ${UI.field('数据集字段 user_id', `<select class="select" id="f-group-fields" multiple size="4"><option value="">请先选择数据集…</option></select>`, { optional: true, help: '可多选；每条异常从所选字段读取 user_id' })}
+          </div>
+          <div class="field-error" id="f-group-broadcast-error" style="display:none;">${Icon.alert({ size: 12 })}<span></span></div>
+        </div>
       `,
       footer: `
         <button type="button" class="btn btn-ghost" data-action="cancel">取消</button>
@@ -460,6 +486,8 @@ window.RulesModule = (function () {
     let chatIds = (data.notificationTargets || []).filter(t => t.source === 'literal' && t.receive_id_type === 'chat_id').map(t => t.value);
     let validationUserIds = (data.validationTargets || []).filter(t => t.source === 'literal').map(t => t.value);
     let validationFields = (data.validationTargets || []).filter(t => t.source === 'field').map(t => t.field);
+    let groupUserIds = (groupBroadcast.mentionTargets || []).filter(t => t.source === 'literal').map(t => t.value);
+    let groupFields = (groupBroadcast.mentionTargets || []).filter(t => t.source === 'field').map(t => t.field);
     let validationMethod = data.validationMethod || 'pseudo';
     let sqlParameters = (data.sqlValidationConfig?.parameters || []).map(item => ({ ...item }));
 
@@ -533,6 +561,7 @@ window.RulesModule = (function () {
     const datasetSel = m.dialog.querySelector('#f-dataset');
     const fieldSourceSel = m.dialog.querySelector('#f-field-source');
     const validationFieldsSel = m.dialog.querySelector('#f-validation-fields');
+    const groupFieldsSel = m.dialog.querySelector('#f-group-fields');
     const keyFieldsTrigger = m.dialog.querySelector('#f-key-fields');
     const keyFieldsListbox = m.dialog.querySelector('#f-key-fields-listbox');
     const keyFieldsPicker = keyFieldsTrigger.closest('.key-field-picker');
@@ -666,6 +695,7 @@ window.RulesModule = (function () {
       if (!datasetId) {
         replaceFieldOptions(fieldSourceSel, [], [], '请选择字段…');
         replaceFieldOptions(validationFieldsSel, [], [], '请先选择数据集…');
+        replaceFieldOptions(groupFieldsSel, [], [], '请先选择数据集…');
         setKeyFieldOptions([], []);
         sqlParameters = sqlParameters.map(parameter => ({ ...parameter, field: '' }));
         renderSqlParameters();
@@ -682,6 +712,7 @@ window.RulesModule = (function () {
       renderSqlParameters();
       replaceFieldOptions(fieldSourceSel, ds.fields, [data.notify.fieldSource], '请选择字段…');
       replaceFieldOptions(validationFieldsSel, ds.fields, validationFields);
+      replaceFieldOptions(groupFieldsSel, ds.fields, groupFields);
       setKeyFieldOptions(ds.fields, initialKeyFields);
       fieldsPreview.innerHTML = `
         <div class="schedule-preview" style="background:var(--color-info-soft);border-color:var(--color-info-line);color:#0369A1;margin-top:var(--space-3);">
@@ -855,6 +886,15 @@ window.RulesModule = (function () {
     const commitPendingValidationTarget = wireTagInput(
       '#f-validation-userids', '#f-validation-userids-input', validationUserIds,
     );
+    const commitPendingGroupTarget = wireTagInput(
+      '#f-group-userids', '#f-group-userids-input', groupUserIds,
+    );
+    const groupWebhookInput = m.dialog.querySelector('#f-group-webhook');
+    const groupWebhookClear = m.dialog.querySelector('#f-group-webhook-clear');
+    groupWebhookClear?.addEventListener('change', () => {
+      groupWebhookInput.disabled = groupWebhookClear.checked;
+      if (groupWebhookClear.checked) groupWebhookInput.value = '';
+    });
 
     // ---------- Cancel / Test / Save ----------
     m.dialog.querySelector('[data-action="cancel"]').addEventListener('click', () => m.close());
@@ -949,6 +989,31 @@ window.RulesModule = (function () {
         return;
       }
 
+      commitPendingGroupTarget();
+      groupFields = [...groupFieldsSel.selectedOptions].map(option => option.value).filter(Boolean);
+      const groupBroadcastEnabled = m.dialog.querySelector('#f-group-broadcast-enabled').checked;
+      const groupWebhookUrl = groupWebhookInput.value.trim();
+      const clearGroupWebhook = !!groupWebhookClear?.checked;
+      const groupMentionTargets = [
+        ...groupUserIds.map(value => ({ source: 'literal', value })),
+        ...groupFields.map(field => ({ source: 'field', field })),
+      ];
+      const groupBroadcastError = m.dialog.querySelector('#f-group-broadcast-error');
+      let groupBroadcastMessage = '';
+      if (groupBroadcastEnabled && clearGroupWebhook) {
+        groupBroadcastMessage = '启用群聊播报时不能清除 webhook';
+      } else if (groupBroadcastEnabled && !groupWebhookUrl && !groupBroadcast.hasWebhook) {
+        groupBroadcastMessage = '启用群聊播报时必须配置 webhook';
+      } else if (groupBroadcastEnabled && !groupMentionTargets.length) {
+        groupBroadcastMessage = '启用群聊播报时，请至少配置一个艾特用户来源';
+      }
+      groupBroadcastError.querySelector('span').textContent = groupBroadcastMessage;
+      groupBroadcastError.style.display = groupBroadcastMessage ? 'flex' : 'none';
+      if (groupBroadcastMessage) {
+        m.dialog.querySelector('.group-broadcast-config').scrollIntoView({ block: 'center', behavior: 'smooth' });
+        return;
+      }
+
       const payload = {
         name,
         description: m.dialog.querySelector('#f-desc').value.trim(),
@@ -964,6 +1029,14 @@ window.RulesModule = (function () {
         validationTimeoutMinutes,
         validationMethod,
         sqlValidationConfig,
+        groupBroadcast: {
+          enabled: groupBroadcastEnabled,
+          hasWebhook: clearGroupWebhook ? false : !!groupBroadcast.hasWebhook,
+          ...(clearGroupWebhook
+            ? { webhookUrl: null }
+            : (groupWebhookUrl ? { webhookUrl: groupWebhookUrl } : {})),
+          mentionTargets: groupMentionTargets,
+        },
         logic,
         schedule: {
           frequency: freqSel.value,

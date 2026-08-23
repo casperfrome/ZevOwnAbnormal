@@ -6,6 +6,7 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from . import feishu as feishu_gateway
+from .anomaly_group_service import create_anomaly_group
 from .anomaly_service import persist_matches
 from .config import Settings
 from .feishu import FeishuClient
@@ -135,11 +136,14 @@ def execute_rule(session: Session, settings: Settings, rule_id: str, trigger_sou
             fields, rows = fetch_rule_rows(connection, rule.dataset.sql)
             field_types = {field["name"]: field["type"] for field in fields}
             matches = evaluate_rows(rows, rule.conditions, rule.logic, rule.anomaly_key_fields, field_types)
-            persisted = persist_matches(session, rule, matches)
+            persisted = persist_matches(session, rule, matches, commit=False)
             run.status = "success"
             run.scanned_rows = len(rows)
             run.matched_rows = len(matches)
             run.new_anomalies = persisted.new_count
+            create_anomaly_group(
+                session, settings, rule, run, persisted.records, matches,
+            )
         except Exception as exc:
             session.rollback()
             run = session.get(RuleRun, run.id)

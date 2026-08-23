@@ -192,7 +192,14 @@ test('editing an API-shaped condition removes the stale operator before saving',
     window.Store = {
       getRules: () => [rule], getRule: () => rule,
       getDatasets: () => [dataset], getDataset: () => dataset,
-      updateRule: async (_id, payload) => { window.updatedRule = payload; },
+      updateRule: async (_id, payload) => {
+        window.updatedRule = payload;
+        Object.assign(rule, payload);
+        rule.groupBroadcast = {
+          ...payload.groupBroadcast,
+          hasWebhook: payload.groupBroadcast.webhookUrl === null ? false : true,
+        };
+      },
     };
   });
   await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'rules.js') });
@@ -379,4 +386,85 @@ test('anomaly key picker supports accessible multi-selection and clears stale fi
   await trigger.click();
   assert.deepEqual(await listbox.locator('[role="option"] strong').allTextContents(), ['refund_id']);
   assert.deepEqual(pageErrors, []);
+});
+
+test('rule form preserves configured webhook and saves fixed plus field group mentions', async t => {
+  const browser = await chromium.launch({
+    headless: true,
+    executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+  });
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  await page.setContent('<!doctype html><html><body><div id="toast-container"></div><div id="actions"></div><div id="content"></div></body></html>');
+  await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'icons.js') });
+  await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'components.js') });
+  await page.evaluate(() => {
+    const dataset = {
+      id: 'dataset-1', name: 'Orders', rowCount: 2,
+      fields: [
+        { name: 'store_id', type: 'VARCHAR' },
+        { name: 'owner_user_id', type: 'VARCHAR' },
+        { name: 'backup_user_id', type: 'VARCHAR' },
+        { name: 'gmv', type: 'DECIMAL' },
+      ],
+    };
+    const rule = {
+      id: 'rule-1', name: 'GMV check', description: '', datasetId: dataset.id,
+      datasetName: dataset.name, severity: 'high', enabled: true, anomalyCount: 0,
+      lastRun: null, logic: 'AND', conditions: [{ field: 'gmv', op: 'gt', value: 10 }],
+      anomalyKeyFields: ['store_id'],
+      schedule: { frequency: 'day', interval: 1, time: '09:00', start: '2026-08-23', end: '' },
+      notify: { mode: 'manual', openIds: [], userIds: ['ordinary-user'], fieldSource: null },
+      notificationTargets: [{ receive_id_type: 'user_id', source: 'literal', value: 'ordinary-user' }],
+      validationEnabled: false, validationTargets: [], validationTimeoutMinutes: 1440,
+      validationMethod: 'pseudo', sqlValidationConfig: null,
+      groupBroadcast: {
+        enabled: true, hasWebhook: true,
+        mentionTargets: [
+          { source: 'literal', value: 'fixed-user' },
+          { source: 'field', field: 'owner_user_id' },
+        ],
+      },
+    };
+    window.updatedRule = null;
+    window.Store = {
+      getRules: () => [rule], getRule: () => rule,
+      getDatasets: () => [dataset], getDataset: () => dataset,
+      updateRule: async (_id, payload) => { window.updatedRule = payload; },
+    };
+  });
+  await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'rules.js') });
+  await page.evaluate(() => RulesModule.render(document.getElementById('content'), {
+    actionsEl: document.getElementById('actions'), navigate: () => {},
+  }));
+
+  await page.evaluate(() => RulesModule.openItem('rule-1'));
+  assert.equal(await page.locator('#f-group-broadcast-enabled').isChecked(), true);
+  assert.match(await page.locator('#f-group-webhook').getAttribute('placeholder'), /已配置/);
+  assert.deepEqual(await page.locator('#f-group-userids .tag-pill').allTextContents(), ['fixed-user']);
+  assert.deepEqual(await page.locator('#f-group-fields option:checked').allTextContents(), ['owner_user_id · VARCHAR']);
+
+  await page.fill('#f-group-userids-input', 'extra-user');
+  await page.selectOption('#f-group-fields', ['owner_user_id', 'backup_user_id']);
+  await page.click('#f-save');
+  await page.waitForTimeout(25);
+
+  assert.deepEqual(await page.evaluate(() => window.updatedRule.groupBroadcast), {
+    enabled: true,
+    hasWebhook: true,
+    mentionTargets: [
+      { source: 'literal', value: 'fixed-user' },
+      { source: 'literal', value: 'extra-user' },
+      { source: 'field', field: 'owner_user_id' },
+      { source: 'field', field: 'backup_user_id' },
+    ],
+  });
+
+  await page.evaluate(() => RulesModule.openItem('rule-1'));
+  assert.equal(await page.locator('#f-group-webhook-clear').isVisible(), true);
+  await page.uncheck('#f-group-broadcast-enabled');
+  await page.check('#f-group-webhook-clear');
+  await page.click('#f-save');
+  await page.waitForTimeout(25);
+  assert.equal(await page.evaluate(() => window.updatedRule.groupBroadcast.webhookUrl), null);
 });

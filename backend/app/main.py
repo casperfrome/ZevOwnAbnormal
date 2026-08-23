@@ -21,6 +21,7 @@ from .push_pipeline import (
     DolphinPushScheduler,
     consume_one,
     publish_pending_jobs,
+    queue_due_group_broadcast_push_jobs,
     queue_due_notification_push_jobs,
     queue_due_validation_push_jobs,
     reconcile_completed_push_jobs,
@@ -107,6 +108,9 @@ def run_push_pipeline_cycle(session_factory, settings: Settings, app_state) -> N
             session, limit=settings.validation_maintenance_batch_size,
         )
         queue_due_notification_push_jobs(
+            session, limit=settings.validation_maintenance_batch_size,
+        )
+        queue_due_group_broadcast_push_jobs(
             session, limit=settings.validation_maintenance_batch_size,
         )
         publish_pending_jobs(

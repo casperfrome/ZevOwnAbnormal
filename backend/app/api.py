@@ -7,7 +7,7 @@ import httpx
 import jwt
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
-from sqlalchemy import and_, case, exists, func, or_, select
+from sqlalchemy import and_, case, exists, func, or_, select, tuple_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -16,9 +16,12 @@ from .config import SESSION_COOKIE, Settings
 from .execution_service import RuleExecutionConflict, execute_rule
 from .models import (
     AnomalyEvent,
+    AnomalyGroupBroadcastDelivery,
     AnomalyPushJob,
     AnomalyPushPipelineState,
     AnomalyRecord,
+    AnomalyRecordGroup,
+    AnomalyRecordGroupMember,
     AnomalyValidationRequest,
     AnomalyValidationSubmission,
     Dataset,
@@ -340,6 +343,11 @@ def rule_dict(item: Rule) -> dict:
         "validation_timeout_minutes": item.validation_timeout_minutes,
         "validation_method": item.validation_method,
         "sql_validation_config": item.sql_validation_config,
+        "group_broadcast": {
+            "enabled": item.group_broadcast_enabled,
+            "has_webhook": bool(item.group_webhook_encrypted),
+            "mention_targets": item.group_mention_targets,
+        },
         "enabled": item.enabled,
         "sync_status": item.sync_status,
         "sync_error": item.sync_error,
@@ -371,6 +379,54 @@ def _validate_rule_sql_configuration(payload: RuleCreate, dataset: Dataset) -> N
         raise HTTPException(422, str(exc)) from exc
 
 
+def _validate_group_broadcast_configuration(
+    payload: RuleCreate,
+    dataset: Dataset,
+    *,
+    existing_webhook: str | None = None,
+) -> None:
+    if "group_broadcast" not in payload.model_fields_set:
+        return
+    config = payload.group_broadcast
+    webhook_was_supplied = "webhook_url" in config.model_fields_set
+    effective_webhook = config.webhook_url if webhook_was_supplied else existing_webhook
+    if config.enabled and not effective_webhook:
+        raise HTTPException(422, "启用群聊播报时必须配置 webhook")
+    fields = {
+        str(field.get("name"))
+        for field in (dataset.fields or [])
+        if field.get("name") is not None
+    }
+    missing = sorted({
+        target.field
+        for target in config.mention_targets
+        if target.source == "field" and target.field not in fields
+    })
+    if missing:
+        raise HTTPException(422, f"群聊播报数据集字段不存在：{'、'.join(missing)}")
+
+
+def _apply_group_broadcast_configuration(
+    item: Rule,
+    payload: RuleCreate,
+    settings: Settings,
+) -> None:
+    if "group_broadcast" not in payload.model_fields_set:
+        return
+    config = payload.group_broadcast
+    item.group_broadcast_enabled = config.enabled
+    item.group_mention_targets = [
+        target.model_dump(mode="json", exclude_none=True)
+        for target in config.mention_targets
+    ]
+    if "webhook_url" in config.model_fields_set:
+        item.group_webhook_encrypted = (
+            CredentialCipher(settings.datasource_encryption_key).encrypt(config.webhook_url)
+            if config.webhook_url
+            else None
+        )
+
+
 def run_dict(item: RuleRun) -> dict:
     return {
         "id": item.id, "rule_id": item.rule_id, "trigger_source": item.trigger_source,
@@ -378,6 +434,89 @@ def run_dict(item: RuleRun) -> dict:
         "new_anomalies": item.new_anomalies, "error_message": item.error_message,
         "started_at": item.started_at, "finished_at": item.finished_at,
     }
+
+
+def _group_broadcast_status(enabled: bool, statuses: list[str]) -> str:
+    if not enabled:
+        return "disabled"
+    if not statuses:
+        return "failed"
+    if "uncertain" in statuses:
+        return "uncertain"
+    if all(status == "pending" for status in statuses):
+        return "pending"
+    if "sending" in statuses or "pending" in statuses:
+        return "in_transit"
+    if all(status == "sent" for status in statuses):
+        return "sent"
+    if all(status == "aborted" for status in statuses):
+        return "aborted"
+    if "sent" in statuses and ({"failed", "aborted"} & set(statuses)):
+        return "partial_failed"
+    if "failed" in statuses:
+        return "failed"
+    if "aborted" in statuses:
+        return "aborted"
+    return "in_transit"
+
+
+def _group_summaries(session: Session, groups: list[AnomalyRecordGroup]) -> list[dict]:
+    if not groups:
+        return []
+    keys = [(group.rule_id, group.detected_at) for group in groups]
+    status_counts: dict[tuple[str, object], dict[str, int]] = {}
+    for rule_id, detected_at, record_status, count in session.execute(
+        select(
+            AnomalyRecordGroupMember.rule_id,
+            AnomalyRecordGroupMember.detected_at,
+            AnomalyRecord.status,
+            func.count(AnomalyRecord.id),
+        )
+        .join(AnomalyRecord, AnomalyRecord.id == AnomalyRecordGroupMember.anomaly_id)
+        .where(tuple_(
+            AnomalyRecordGroupMember.rule_id,
+            AnomalyRecordGroupMember.detected_at,
+        ).in_(keys))
+        .group_by(
+            AnomalyRecordGroupMember.rule_id,
+            AnomalyRecordGroupMember.detected_at,
+            AnomalyRecord.status,
+        )
+    ):
+        status_counts.setdefault((rule_id, detected_at), {})[record_status] = count
+    delivery_statuses: dict[tuple[str, object], list[str]] = {}
+    for rule_id, detected_at, delivery_status in session.execute(
+        select(
+            AnomalyGroupBroadcastDelivery.rule_id,
+            AnomalyGroupBroadcastDelivery.detected_at,
+            AnomalyGroupBroadcastDelivery.status,
+        ).where(tuple_(
+            AnomalyGroupBroadcastDelivery.rule_id,
+            AnomalyGroupBroadcastDelivery.detected_at,
+        ).in_(keys))
+    ):
+        delivery_statuses.setdefault((rule_id, detected_at), []).append(delivery_status)
+    result = []
+    for group in groups:
+        key = (group.rule_id, group.detected_at)
+        counts = status_counts.get(key, {})
+        result.append({
+            "group_id": group.run_id,
+            "rule_id": group.rule_id,
+            "rule_name": group.rule_name,
+            "detected_at": group.detected_at,
+            "scanned_rows": group.scanned_rows,
+            "matched_rows": group.matched_rows,
+            "new_anomalies": group.new_anomalies,
+            "status_counts": {
+                status: counts.get(status, 0)
+                for status in ("pending", "processing", "timed_out", "resolved")
+            },
+            "broadcast_status": _group_broadcast_status(
+                group.broadcast_enabled, delivery_statuses.get(key, []),
+            ),
+        })
+    return result
 
 
 def anomaly_dict(item: AnomalyRecord, delivery_status: str | None = None) -> dict:
@@ -619,7 +758,9 @@ def create_rule(payload: RuleCreate, session: Session = Depends(get_session), se
     if not dataset:
         raise HTTPException(404, "数据集不存在")
     _validate_rule_sql_configuration(payload, dataset)
-    item = Rule(**payload.model_dump(mode="json", exclude={"enabled"}), sync_status="pending", enabled=False)
+    _validate_group_broadcast_configuration(payload, dataset)
+    item = Rule(**payload.model_dump(mode="json", exclude={"enabled", "group_broadcast"}), sync_status="pending", enabled=False)
+    _apply_group_broadcast_configuration(item, payload, settings)
     session.add(item)
     try:
         session.commit()
@@ -645,7 +786,7 @@ def get_rule(
 
 
 @router.put("/rules/{rule_id}")
-def update_rule(rule_id: str, payload: RuleCreate, session: Session = Depends(get_session), _admin_username: str = Depends(get_current_admin)):
+def update_rule(rule_id: str, payload: RuleCreate, session: Session = Depends(get_session), settings: Settings = Depends(get_app_settings), _admin_username: str = Depends(get_current_admin)):
     item = session.get(Rule, rule_id)
     if not item or item.deleted_at:
         raise HTTPException(404, "规则不存在")
@@ -653,8 +794,12 @@ def update_rule(rule_id: str, payload: RuleCreate, session: Session = Depends(ge
     if not dataset:
         raise HTTPException(404, "数据集不存在")
     _validate_rule_sql_configuration(payload, dataset)
-    for key, value in payload.model_dump(mode="json", exclude={"enabled"}).items():
+    _validate_group_broadcast_configuration(
+        payload, dataset, existing_webhook=item.group_webhook_encrypted,
+    )
+    for key, value in payload.model_dump(mode="json", exclude={"enabled", "group_broadcast"}).items():
         setattr(item, key, value)
+    _apply_group_broadcast_configuration(item, payload, settings)
     item.sync_status = "pending"
     item.sync_error = None
     session.commit()
@@ -732,6 +877,74 @@ def get_rule_run(
     if not item:
         raise HTTPException(404, "执行批次不存在")
     return run_dict(item)
+
+
+@router.get("/anomaly-groups")
+def list_anomaly_groups(
+    page: int = 1,
+    page_size: int = 20,
+    search: str | None = None,
+    rule_id: str | None = None,
+    session: Session = Depends(get_session),
+    _reader: User = Depends(get_current_reader),
+):
+    query = select(AnomalyRecordGroup)
+    count_query = select(AnomalyRecordGroup.rule_id, AnomalyRecordGroup.detected_at)
+    if search:
+        query = query.where(AnomalyRecordGroup.rule_name.contains(search, autoescape=True))
+        count_query = count_query.where(AnomalyRecordGroup.rule_name.contains(search, autoescape=True))
+    if rule_id:
+        query = query.where(AnomalyRecordGroup.rule_id == rule_id)
+        count_query = count_query.where(AnomalyRecordGroup.rule_id == rule_id)
+    size = min(max(page_size, 1), 100)
+    start = max(page - 1, 0) * size
+    total = session.scalar(select(func.count()).select_from(count_query.subquery())) or 0
+    groups = list(session.scalars(
+        query.order_by(
+            AnomalyRecordGroup.detected_at.desc(), AnomalyRecordGroup.run_id.asc(),
+        ).limit(size).offset(start)
+    ))
+    return {
+        "items": _group_summaries(session, groups),
+        "total": total,
+        "page": page,
+        "page_size": size,
+    }
+
+
+@router.get("/anomaly-groups/{run_id}")
+def get_anomaly_group(
+    run_id: str,
+    page: int = 1,
+    page_size: int = 20,
+    session: Session = Depends(get_session),
+    _reader: User = Depends(get_current_reader),
+):
+    group = session.scalar(select(AnomalyRecordGroup).where(
+        AnomalyRecordGroup.run_id == run_id,
+    ))
+    if group is None:
+        raise HTTPException(404, "异常记录组不存在")
+    size = min(max(page_size, 1), 100)
+    start = max(page - 1, 0) * size
+    member_query = select(AnomalyRecord).join(
+        AnomalyRecordGroupMember,
+        AnomalyRecordGroupMember.anomaly_id == AnomalyRecord.id,
+    ).where(
+        AnomalyRecordGroupMember.rule_id == group.rule_id,
+        AnomalyRecordGroupMember.detected_at == group.detected_at,
+    )
+    total = session.scalar(select(func.count()).select_from(member_query.subquery())) or 0
+    items = list(session.scalars(
+        member_query.order_by(AnomalyRecordGroupMember.position).limit(size).offset(start)
+    ))
+    return {
+        "group": _group_summaries(session, [group])[0],
+        "items": [anomaly_dict(item) for item in items],
+        "total": total,
+        "page": page,
+        "page_size": size,
+    }
 
 
 def _anomaly_field_search_predicate(search: str, dialect_name: str):

@@ -1,4 +1,5 @@
 from typing import Literal
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -111,6 +112,45 @@ class ValidationTarget(BaseModel):
             raise ValueError("固定验证目标需要 value")
         if self.source == "field" and not self.field:
             raise ValueError("字段验证目标需要 field")
+        return self
+
+
+class GroupBroadcastConfig(BaseModel):
+    enabled: bool = False
+    webhook_url: str | None = None
+    mention_targets: list[ValidationTarget] = Field(default_factory=list)
+
+    @field_validator("webhook_url", mode="before")
+    @classmethod
+    def normalize_webhook(cls, value):
+        if not isinstance(value, str):
+            return value
+        normalized = value.strip()
+        if not normalized:
+            return None
+        parsed = urlparse(normalized)
+        hook_prefix = "/open-apis/bot/v2/hook/"
+        hook_token = (
+            parsed.path[len(hook_prefix):]
+            if parsed.path.startswith(hook_prefix)
+            else ""
+        )
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname != "open.feishu.cn"
+            or parsed.port not in (None, 443)
+            or parsed.username is not None
+            or parsed.password is not None
+            or not hook_token
+            or "/" in hook_token
+        ):
+            raise ValueError("群机器人 webhook 必须是飞书官方 HTTPS 地址")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_enabled_targets(self):
+        if self.enabled and not self.mention_targets:
+            raise ValueError("启用群聊播报时至少需要一个艾特来源")
         return self
 
 
@@ -233,6 +273,7 @@ class RuleCreate(RuleValidationConfig):
     anomaly_key_fields: list[str] = Field(min_length=1)
     schedule: RuleSchedule
     notification_targets: list[NotificationTarget] = Field(min_length=1)
+    group_broadcast: GroupBroadcastConfig = Field(default_factory=GroupBroadcastConfig)
     enabled: bool = False
 
 

@@ -82,6 +82,10 @@ test('validation rule fields and anomaly audit details map between API and UI co
         parameters: [{ name: '目标ID', field: 'owner_id' }],
         true_condition: { field: 'status', operator: 'eq', value: 'normal', upper_value: null },
       },
+      group_broadcast: {
+        enabled: true, has_webhook: true,
+        mention_targets: [{ source: 'literal', value: 'group-owner' }, { source: 'field', field: 'owner_id' }],
+      },
       enabled: true, sync_status: 'synced', sync_error: null, last_run: null, next_run: null,
       anomaly_count: 1, created_at: '2026-08-22T08:00:00',
     }],
@@ -140,6 +144,11 @@ test('validation rule fields and anomaly audit details map between API and UI co
             validation_timeout_minutes: body.validation_timeout_minutes,
             validation_method: body.validation_method,
             sql_validation_config: body.sql_validation_config,
+            group_broadcast: {
+              enabled: body.group_broadcast.enabled,
+              has_webhook: !!body.group_broadcast.webhook_url,
+              mention_targets: body.group_broadcast.mention_targets,
+            },
           }),
         };
       }
@@ -160,6 +169,11 @@ test('validation rule fields and anomaly audit details map between API and UI co
   assert.deepEqual(JSON.parse(JSON.stringify(rule.validationTargets)), [
     { source: 'literal', value: 'u_1' }, { source: 'field', field: 'owner_id' },
   ]);
+  assert.deepEqual(JSON.parse(JSON.stringify(rule.groupBroadcast)), {
+    enabled: true,
+    hasWebhook: true,
+    mentionTargets: [{ source: 'literal', value: 'group-owner' }, { source: 'field', field: 'owner_id' }],
+  });
   const listed = store.getRecord('record-1');
   assert.equal(listed.description, 'GMV anomaly');
   assert.equal(listed.validationDeadline, '2026-08-22T09:30:00');
@@ -196,6 +210,12 @@ test('validation rule fields and anomaly audit details map between API and UI co
       parameters: [{ name: '目标ID', field: 'owner_id' }],
       trueCondition: { field: 'status', operator: 'eq', value: 'normal', upperValue: null },
     },
+    groupBroadcast: {
+      enabled: true,
+      hasWebhook: false,
+      webhookUrl: 'https://open.feishu.cn/open-apis/bot/v2/hook/test-webhook',
+      mentionTargets: [{ source: 'literal', value: 'group-user' }, { source: 'field', field: 'owner_id' }],
+    },
     enabled: true,
   });
   const createRequest = requests.find(item => item.url === '/api/v1/rules' && item.options.method === 'POST');
@@ -211,6 +231,11 @@ test('validation rule fields and anomaly audit details map between API and UI co
   assert.deepEqual(body.validation_targets, [
     { source: 'literal', value: 'u_2' }, { source: 'field', field: 'owner_id' },
   ]);
+  assert.deepEqual(body.group_broadcast, {
+    enabled: true,
+    webhook_url: 'https://open.feishu.cn/open-apis/bot/v2/hook/test-webhook',
+    mention_targets: [{ source: 'literal', value: 'group-user' }, { source: 'field', field: 'owner_id' }],
+  });
 });
 
 test('updating an existing condition sends the edited operator instead of the stale API operator', async () => {
@@ -476,4 +501,47 @@ test('peeking an export page neither replaces cached records nor supersedes an i
   await pageRefresh;
 
   assert.equal(store.getRecords()[0].id, 'page-two-newest');
+});
+
+test('anomaly group pages and details map live status summaries and member records', async () => {
+  const requests = [];
+  const group = {
+    group_id: 'run-1', rule_id: 'rule-1', rule_name: 'GMV check', detected_at: '2026-08-23T09:00:00',
+    scanned_rows: 10, matched_rows: 1, new_anomalies: 1,
+    status_counts: { pending: 1, processing: 0, timed_out: 0, resolved: 0 },
+    broadcast_status: 'sent',
+  };
+  const context = {
+    window: {},
+    fetch: async url => {
+      requests.push(url);
+      if (url.startsWith('/api/v1/anomaly-groups/run-1')) return {
+        ok: true, status: 200, json: async () => ({
+          group,
+          items: [{
+            id: 'record-1', rule_id: 'rule-1', rule_name: 'GMV check', dataset_name: 'Orders',
+            severity: 'high', status: 'pending', business_key: { store_id: 1 }, row_details: { gmv: 999 },
+            matched_conditions: [{ field: 'gmv', operator: 'gt', actual: 999 }], hit_count: 1,
+            first_seen_at: '2026-08-23T09:00:00', last_seen_at: '2026-08-23T09:00:00', delivery_status: 'none',
+          }],
+          total: 1, page: 1, page_size: 20,
+        }),
+      };
+      return {
+        ok: true, status: 200,
+        json: async () => ({ items: [group], total: 1, page: 1, page_size: 10 }),
+      };
+    },
+  };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'scripts', 'data.js'), 'utf8'), context);
+
+  const page = await context.window.Store.loadAnomalyGroupsPage({ search: 'GMV', page: 1, pageSize: 10 });
+  const detail = await context.window.Store.loadAnomalyGroup('run-1', { page: 1, pageSize: 20 });
+
+  assert.equal(requests[0], '/api/v1/anomaly-groups?page=1&page_size=10&search=GMV');
+  assert.equal(requests[1], '/api/v1/anomaly-groups/run-1?page=1&page_size=20');
+  assert.equal(page.items[0].broadcastStatus, 'sent');
+  assert.equal(page.items[0].statusCounts.pending, 1);
+  assert.equal(detail.items[0].id, 'record-1');
+  assert.equal(detail.items[0].status, 'pending');
 });

@@ -64,7 +64,13 @@ def resolve_targets(targets: list[dict], row: dict[str, Any]) -> list[tuple[str,
     return resolved
 
 
-def persist_matches(session: Session, rule: Rule, matches: list[EvaluationMatch]) -> PersistResult:
+def persist_matches(
+    session: Session,
+    rule: Rule,
+    matches: list[EvaluationMatch],
+    *,
+    commit: bool = True,
+) -> PersistResult:
     now = utcnow()
     # Serialize generation assignment with the abort transaction. If an abort
     # already owns the singleton row this waits and observes the new generation;
@@ -142,5 +148,8 @@ def persist_matches(session: Session, rule: Rule, matches: list[EvaluationMatch]
             delivery_ids.append(delivery.id)
         new_count += 1
         affected.append(record)
-    session.commit()
+    if commit:
+        session.commit()
+    else:
+        session.flush()
     return PersistResult(new_count=new_count, delivery_ids=delivery_ids, records=affected)

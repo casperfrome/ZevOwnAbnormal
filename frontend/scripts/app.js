@@ -4,6 +4,7 @@
 (function () {
   const routes = {
     records:    { title: '异常记录',    desc: '系统检测到的所有数据异常事件', module: 'RecordsModule' },
+    'anomaly-groups': { title: '异常记录组', desc: '按规则执行批次汇总异常记录与群聊播报状态', module: 'AnomalyGroupsModule' },
     rules:      { title: '异常规则',    desc: '配置数据质量检测规则与通知策略', module: 'RulesModule' },
     datasets:   { title: '数据集',      desc: '基于 SQL 的监控数据视图', module: 'DatasetModule' },
     datasources:{ title: '数据源',      desc: '管理 MySQL 与 StarRocks 连接', module: 'DatasourceModule' },
@@ -71,7 +72,7 @@
     const parts = String(target || 'records').replace(/^#/, '').split('/');
     const route = routes[parts[0]] ? parts[0] : 'records';
     let detailId = null;
-    if (parts[0] === 'records' && parts[1]) {
+    if (['records', 'anomaly-groups'].includes(parts[0]) && parts[1]) {
       try { detailId = decodeURIComponent(parts.slice(1).join('/')); }
       catch (_) { detailId = parts.slice(1).join('/'); }
     }
@@ -80,11 +81,14 @@
 
   function navigate(target) {
     const { route, detailId } = parseRoute(target);
-    const hash = detailId ? `#records/${encodeURIComponent(detailId)}` : '#' + route;
+    const hash = detailId ? `#${route}/${encodeURIComponent(detailId)}` : '#' + route;
     history.replaceState(null, '', hash);
     renderRoute(route);
-    if (detailId && window.RecordsModule && typeof RecordsModule.openDetail === 'function') {
-      Promise.resolve().then(() => RecordsModule.openDetail(detailId));
+    if (detailId) {
+      const module = window[routes[route].module];
+      if (module && typeof module.openDetail === 'function') {
+        Promise.resolve().then(() => module.openDetail(detailId));
+      }
     }
     // Close mobile sidebar
     document.getElementById('sidebar').classList.remove('open');

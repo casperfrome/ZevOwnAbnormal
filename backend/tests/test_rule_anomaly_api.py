@@ -60,6 +60,114 @@ def test_rule_crud_exposes_key_fields_and_targets():
         assert len(client.get("/api/v1/rules").json()) == 1
 
 
+def test_rule_group_broadcast_config_is_validated_encrypted_and_never_returned():
+    """Removing encryption, secret-preserving updates, or field validation must fail this test."""
+    webhook = "https://open.feishu.cn/open-apis/bot/v2/hook/11111111-2222-3333-4444-555555555555"
+    with TestClient(create_app(testing=True)) as client:
+        dataset = create_dependencies(client)
+        with client.app.state.session_factory() as session:
+            item = session.get(Dataset, dataset["id"])
+            item.fields = [
+                {"name": "store_id", "type": "VARCHAR"},
+                {"name": "owner_user_id", "type": "VARCHAR"},
+                {"name": "gmv", "type": "DECIMAL"},
+            ]
+            session.commit()
+
+        payload = {
+            "name": "群聊播报规则",
+            "dataset_id": dataset["id"],
+            "conditions": [{"field": "gmv", "operator": "gt", "value": 100}],
+            "anomaly_key_fields": ["store_id"],
+            "schedule": {"frequency": "day", "interval": 1, "time": "09:00", "start_date": "2026-08-23"},
+            "notification_targets": [{"receive_id_type": "user_id", "source": "literal", "value": "owner"}],
+            "group_broadcast": {
+                "enabled": True,
+                "webhook_url": webhook,
+                "mention_targets": [
+                    {"source": "literal", "value": "fixed-user"},
+                    {"source": "field", "field": "owner_user_id"},
+                ],
+            },
+        }
+        created = client.post("/api/v1/rules", json=payload)
+
+        assert created.status_code == 201
+        assert created.json()["group_broadcast"] == {
+            "enabled": True,
+            "has_webhook": True,
+            "mention_targets": payload["group_broadcast"]["mention_targets"],
+        }
+        with client.app.state.session_factory() as session:
+            stored = session.get(Rule, created.json()["id"])
+            assert stored.group_webhook_encrypted
+            assert stored.group_webhook_encrypted != webhook
+
+        preserved = client.put(
+            f"/api/v1/rules/{created.json()['id']}",
+            json={
+                **payload,
+                "group_broadcast": {
+                    "enabled": True,
+                    "mention_targets": [{"source": "literal", "value": "replacement-user"}],
+                },
+            },
+        )
+        assert preserved.status_code == 200
+        assert preserved.json()["group_broadcast"]["has_webhook"] is True
+
+        invalid_host = client.post(
+            "/api/v1/rules",
+            json={
+                **payload,
+                "name": "非法 webhook",
+                "group_broadcast": {
+                    **payload["group_broadcast"],
+                    "webhook_url": "https://example.com/open-apis/bot/v2/hook/not-feishu",
+                },
+            },
+        )
+        invalid_field = client.post(
+            "/api/v1/rules",
+            json={
+                **payload,
+                "name": "非法字段",
+                "group_broadcast": {
+                    **payload["group_broadcast"],
+                    "mention_targets": [{"source": "field", "field": "missing_user_id"}],
+                },
+            },
+        )
+        invalid_bare_hook = client.post(
+            "/api/v1/rules",
+            json={
+                **payload,
+                "name": "缺少 hook 标识",
+                "group_broadcast": {
+                    **payload["group_broadcast"],
+                    "webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/",
+                },
+            },
+        )
+        assert invalid_host.status_code == 422
+        assert invalid_field.status_code == 422
+        assert invalid_bare_hook.status_code == 422
+
+        cleared = client.put(
+            f"/api/v1/rules/{created.json()['id']}",
+            json={
+                **payload,
+                "group_broadcast": {
+                    "enabled": False,
+                    "webhook_url": None,
+                    "mention_targets": [],
+                },
+            },
+        )
+        assert cleared.status_code == 200
+        assert cleared.json()["group_broadcast"]["has_webhook"] is False
+
+
 def test_sql_validation_rule_crud_validates_template_mappings_and_serializes_config():
     """Saving mutating SQL or a mapping to an unknown dataset field must fail this test."""
     with TestClient(create_app(testing=True)) as client:

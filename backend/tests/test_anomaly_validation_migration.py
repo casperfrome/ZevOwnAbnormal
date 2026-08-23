@@ -13,7 +13,7 @@ from sqlalchemy.dialects import mysql, sqlite
 from sqlalchemy.schema import CreateColumn
 
 from app.database import Base
-from app.models import Rule
+from app.models import AnomalyGroupBroadcastDelivery, AnomalyRecordGroup, Rule, RuleRun
 
 
 MIGRATION_PATH = (
@@ -31,6 +31,9 @@ PUSH_REPAIR_MIGRATION_PATH = MIGRATION_PATH.with_name(
 )
 SQL_VALIDATION_MIGRATION_PATH = MIGRATION_PATH.with_name(
     "20260822_0008_sql_validation.py"
+)
+ANOMALY_GROUP_MIGRATION_PATH = MIGRATION_PATH.with_name(
+    "20260823_0009_anomaly_record_groups.py"
 )
 
 
@@ -87,6 +90,16 @@ def load_push_repair_migration():
 def load_sql_validation_migration():
     spec = importlib.util.spec_from_file_location(
         "sql_validation_0008", SQL_VALIDATION_MIGRATION_PATH,
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_anomaly_group_migration():
+    spec = importlib.util.spec_from_file_location(
+        "anomaly_groups_0009", ANOMALY_GROUP_MIGRATION_PATH,
     )
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
@@ -457,3 +470,94 @@ def test_sql_validation_migration_adds_snapshots_and_backfills_existing_pseudo_r
             "SELECT validation_method_snapshot FROM anomaly_records WHERE id='legacy'"
         )).scalar_one() is None
     engine.dispose()
+
+
+def test_anomaly_group_migration_adds_rule_config_group_tables_and_nullable_push_target():
+    """Dropping the composite group identity or nullable group jobs must fail this test."""
+    migration = load_anomaly_group_migration()
+    engine = sa.create_engine("sqlite+pysqlite:///:memory:")
+    metadata = sa.MetaData()
+    sa.Table("rules", metadata, sa.Column("id", sa.String(36), primary_key=True))
+    sa.Table("rule_runs", metadata, sa.Column("id", sa.String(36), primary_key=True))
+    anomalies = sa.Table(
+        "anomaly_records", metadata, sa.Column("id", sa.String(36), primary_key=True),
+    )
+    sa.Table(
+        "anomaly_push_jobs", metadata,
+        sa.Column("id", sa.String(36), primary_key=True),
+        sa.Column("anomaly_id", sa.String(36), sa.ForeignKey(anomalies.c.id), nullable=False),
+        sa.Column("kind", sa.String(20), nullable=False),
+    )
+    metadata.create_all(engine)
+
+    with engine.begin() as connection:
+        migration.op = Operations(MigrationContext.configure(connection))
+        migration.upgrade()
+        inspector = sa.inspect(connection)
+        rule_columns = {column["name"]: column for column in inspector.get_columns("rules")}
+        push_columns = {column["name"]: column for column in inspector.get_columns("anomaly_push_jobs")}
+        group_pk = inspector.get_pk_constraint("anomaly_record_groups")["constrained_columns"]
+        tables = set(inspector.get_table_names())
+
+    assert {
+        "group_broadcast_enabled", "group_webhook_encrypted", "group_mention_targets",
+    } <= set(rule_columns)
+    assert rule_columns["group_broadcast_enabled"]["nullable"] is False
+    assert push_columns["anomaly_id"]["nullable"] is True
+    assert group_pk == ["rule_id", "detected_at"]
+    assert {"anomaly_record_group_members", "anomaly_group_broadcast_deliveries"} <= tables
+
+    with engine.begin() as connection:
+        migration.op = Operations(MigrationContext.configure(connection))
+        migration.downgrade()
+        inspector = sa.inspect(connection)
+        assert not {
+            "anomaly_record_groups", "anomaly_record_group_members",
+            "anomaly_group_broadcast_deliveries",
+        } & set(inspector.get_table_names())
+        assert {
+            "group_broadcast_enabled", "group_webhook_encrypted", "group_mention_targets",
+        }.isdisjoint({column["name"] for column in inspector.get_columns("rules")})
+        anomaly_id = next(
+            column for column in inspector.get_columns("anomaly_push_jobs")
+            if column["name"] == "anomaly_id"
+        )
+        assert anomaly_id["nullable"] is False
+    engine.dispose()
+
+
+def test_anomaly_group_json_default_and_nullable_push_target_compile_for_mysql_84():
+    migration = load_anomaly_group_migration()
+    dialect = mysql.dialect()
+    dialect.server_version_info = (8, 4, 10)
+
+    mention_column = migration._empty_list_column("group_mention_targets")
+    mention_ddl = str(CreateColumn(mention_column).compile(dialect=dialect))
+    output = io.StringIO()
+    context = MigrationContext.configure(
+        dialect=dialect,
+        opts={"as_sql": True, "output_buffer": output},
+    )
+    Operations(context).alter_column(
+        "anomaly_push_jobs", "anomaly_id",
+        existing_type=sa.String(36), nullable=True,
+    )
+
+    assert "JSON NOT NULL DEFAULT ('[]')" in mention_ddl
+    assert "DEFAULT '[]'" not in mention_ddl
+    assert "MODIFY anomaly_id VARCHAR(36) NULL" in output.getvalue()
+
+
+def test_anomaly_group_identity_keeps_microseconds_on_mysql_84():
+    """Same-rule runs inside one second need distinct persisted composite keys."""
+    migration = load_anomaly_group_migration()
+    dialect = mysql.dialect()
+    dialect.server_version_info = (8, 4, 10)
+
+    assert "DATETIME(6)" in str(migration._precise_datetime().compile(dialect=dialect))
+    for column in (
+        RuleRun.__table__.c.started_at,
+        AnomalyRecordGroup.__table__.c.detected_at,
+        AnomalyGroupBroadcastDelivery.__table__.c.detected_at,
+    ):
+        assert "DATETIME(6)" in str(column.type.compile(dialect=dialect))
