@@ -85,8 +85,11 @@ class DolphinSchedulerClient:
     def close(self):
         self.client.close()
 
-    def _call(self, method: str, path: str, **kwargs):
+    def _call(self, method: str, path: str, *, _allow_reauth: bool = True, **kwargs):
         response = self.client.request(method, path, **kwargs)
+        if response.status_code == 401 and _allow_reauth and path != "/login":
+            self.login()
+            response = self.client.request(method, path, **kwargs)
         response.raise_for_status()
         body = response.json()
         if body.get("code") != 0:
@@ -94,7 +97,15 @@ class DolphinSchedulerClient:
         return body.get("data")
 
     def login(self):
-        self._call("POST", "/login", params={"userName": self.settings.dolphinscheduler_username, "userPassword": self.settings.dolphinscheduler_password})
+        self._call(
+            "POST",
+            "/login",
+            params={
+                "userName": self.settings.dolphinscheduler_username,
+                "userPassword": self.settings.dolphinscheduler_password,
+            },
+            _allow_reauth=False,
+        )
 
     @staticmethod
     def _items(data):

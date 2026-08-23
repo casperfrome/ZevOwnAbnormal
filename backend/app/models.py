@@ -78,6 +78,7 @@ class Rule(Base, TimestampMixin):
     anomaly_key_fields: Mapped[list[str]] = mapped_column(JSON, nullable=False)
     schedule: Mapped[dict] = mapped_column(JSON, nullable=False)
     notification_targets: Mapped[list[dict]] = mapped_column(JSON, nullable=False)
+    private_message_template: Mapped[str | None] = mapped_column(Text, nullable=True)
     validation_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     validation_targets: Mapped[list[dict]] = mapped_column(
         JSON,
@@ -94,6 +95,7 @@ class Rule(Base, TimestampMixin):
         Boolean, default=False, server_default=text("0"), nullable=False,
     )
     group_webhook_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    group_message_template: Mapped[str | None] = mapped_column(Text, nullable=True)
     group_mention_targets: Mapped[list[dict]] = mapped_column(
         JSON,
         default=list,

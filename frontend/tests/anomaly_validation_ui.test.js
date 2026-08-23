@@ -1059,7 +1059,7 @@ test('abort push action is left of export, confirms danger, and prevents duplica
   });
 
   assert.deepEqual(await page.locator('#actions button').evaluateAll(items => items.map(item => item.id)), [
-    'rec-abort-push', 'rec-export', 'rec-refresh',
+    'rec-recover-push', 'rec-abort-push', 'rec-export', 'rec-refresh',
   ]);
   await page.click('#rec-abort-push');
   assert.match(await page.locator('[role="dialog"]').innerText(), /已发送消息无法撤回/);
@@ -1076,6 +1076,81 @@ test('abort push action is left of export, confirms danger, and prevents duplica
   await page.getByText('推送积压已中止', { exact: true }).waitFor();
   assert.equal(await page.locator('#rec-abort-push').isDisabled(), false);
   assert.equal(await page.evaluate(() => window.abortCalls), 1);
+  assert.deepEqual(pageErrors, []);
+});
+
+test('recover push action confirms scope, prevents duplicates, and reports recovery summary', async t => {
+  const { page, pageErrors } = await withPage(t, async page => {
+    await page.evaluate(() => {
+      window.recoverCalls = 0;
+      window.resolveRecovery = null;
+      window.Store = {
+        isSuperuser: () => true,
+        getStats: () => ({ pendingRecords: 0, processingRecords: 0, timedOutRecords: 0, resolvedToday: 0, criticalAnomalies: 0 }),
+        getRecords: () => [], getRules: () => [],
+        loadRecordsPage: async () => ({ items: [], total: 0, page: 1, pageSize: 10 }),
+        recoverAnomalyPushes: () => {
+          window.recoverCalls += 1;
+          return new Promise(resolve => { window.resolveRecovery = resolve; });
+        },
+        abortAnomalyPushes: async () => ({}),
+        refresh: async () => { throw new Error('refresh unavailable'); }, exportUrl: '/export',
+      };
+    });
+    await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'records.js') });
+    await page.evaluate(() => RecordsModule.render(document.getElementById('content'), {
+      actionsEl: document.getElementById('actions'), navigate: () => {},
+    }));
+  });
+
+  await page.click('#rec-recover-push');
+  assert.match(await page.locator('[role="dialog"]').innerText(), /只恢复可安全重试/);
+  await page.locator('[role="dialog"] [data-action="confirm"]').click();
+  await page.waitForFunction(() => window.recoverCalls === 1);
+  assert.equal(await page.locator('#rec-recover-push').isDisabled(), true);
+  assert.equal(await page.evaluate(() => window.recoverCalls), 1);
+  await page.evaluate(() => window.resolveRecovery({
+    status: 'completed', requeued_jobs: 3, skipped_jobs: 2,
+    requeued_by_kind: { notification: 1, validation: 1, group_broadcast: 1 }, errors: [],
+  }));
+  await page.getByText('失败推送已恢复', { exact: true }).waitFor();
+  assert.equal(await page.getByText('失败推送恢复失败', { exact: true }).count(), 0);
+  assert.equal(await page.locator('#rec-recover-push').isDisabled(), false);
+  assert.deepEqual(pageErrors, []);
+});
+
+test('record administrative actions fit the mobile viewport without clipping', async t => {
+  const { page, pageErrors } = await withPage(t, async page => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.addStyleTag({ path: path.join(frontendRoot, 'styles', 'base.css') });
+    await page.addStyleTag({ path: path.join(frontendRoot, 'styles', 'components.css') });
+    await page.addStyleTag({ path: path.join(frontendRoot, 'styles', 'layout.css') });
+    await page.evaluate(() => {
+      const actions = document.getElementById('actions');
+      actions.className = 'page-actions';
+      document.getElementById('content').innerHTML = '<div class="page"><div class="page-header" id="mobile-header"></div><div id="mobile-content"></div></div>';
+      document.getElementById('mobile-header').append(actions);
+      window.Store = {
+        isSuperuser: () => true,
+        getStats: () => ({ pendingRecords: 0, processingRecords: 0, timedOutRecords: 0, resolvedToday: 0, criticalAnomalies: 0 }),
+        getRecords: () => [], getRules: () => [],
+        loadRecordsPage: async () => ({ items: [], total: 0, page: 1, pageSize: 10 }),
+        recoverAnomalyPushes: async () => ({}), abortAnomalyPushes: async () => ({}),
+        refresh: async () => {}, exportUrl: '/export',
+      };
+    });
+    await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'records.js') });
+    await page.evaluate(() => RecordsModule.render(document.getElementById('mobile-content'), {
+      actionsEl: document.getElementById('actions'), navigate: () => {},
+    }));
+  });
+
+  assert.deepEqual(await page.locator('#actions').evaluate(element => {
+    const style = getComputedStyle(element);
+    return [style.display, style.gridTemplateColumns.split(' ').length];
+  }), ['grid', 2]);
+  assert.equal(await page.locator('#actions').evaluate(element => element.getBoundingClientRect().right <= innerWidth), true);
+  assert.equal(await page.getByRole('button', { name: '刷新' }).isVisible(), true);
   assert.deepEqual(pageErrors, []);
 });
 
@@ -1146,6 +1221,7 @@ test('abort push action is hidden from non-superadmin readers', async t => {
   });
 
   assert.equal(await page.locator('#rec-abort-push').count(), 0);
+  assert.equal(await page.locator('#rec-recover-push').count(), 0);
   assert.deepEqual(await page.locator('#actions button').evaluateAll(items => items.map(item => item.id)), [
     'rec-export', 'rec-refresh',
   ]);

@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from . import feishu as feishu_gateway
 from .config import SESSION_COOKIE, Settings
 from .execution_service import RuleExecutionConflict, execute_rule
+from .message_templates import MessageTemplateError, validate_message_template
 from .models import (
     AnomalyEvent,
     AnomalyGroupBroadcastDelivery,
@@ -33,7 +34,7 @@ from .models import (
     utcnow,
 )
 from .query_service import connect_to_datasource, execute_readonly_query
-from .push_pipeline import abort_pending_pushes, execute_push_job
+from .push_pipeline import abort_pending_pushes, execute_push_job, recover_failed_push_jobs
 from .schemas import (
     AnomalyStatusUpdate,
     BulkAnomalyStatusUpdate,
@@ -154,6 +155,44 @@ def abort_anomaly_pushes(
     if summary["status"] != "completed":
         return JSONResponse(status_code=502, content=summary)
     return summary
+
+
+@router.post("/anomaly-pushes/recover")
+def recover_anomaly_pushes(
+    request: Request,
+    session: Session = Depends(get_session),
+    _admin_username: str = Depends(get_current_admin),
+):
+    kafka = getattr(request.app.state, "kafka_gateway", None)
+    scheduler = getattr(request.app.state, "push_scheduler", None)
+    if kafka is None or scheduler is None:
+        raise HTTPException(503, "异常推送管线尚未就绪")
+
+    checks = {"kafka": "healthy", "dolphinscheduler": "healthy"}
+    errors = []
+    for stage, check in (
+        ("kafka", kafka.check_health),
+        ("dolphinscheduler", scheduler.recover),
+    ):
+        try:
+            check()
+        except Exception as exc:
+            checks[stage] = "unhealthy"
+            errors.append({"stage": stage, "message": str(exc)[:2000]})
+    if errors:
+        return JSONResponse(status_code=502, content={
+            "status": "partial_failed",
+            "checks": checks,
+            "requeued_jobs": 0,
+            "requeued_by_kind": {
+                "notification": 0, "validation": 0, "group_broadcast": 0,
+            },
+            "skipped_jobs": 0,
+            "errors": errors,
+        })
+
+    summary = recover_failed_push_jobs(session)
+    return {"status": "completed", "checks": checks, **summary, "errors": []}
 
 
 @router.post("/tests/feishu-message")
@@ -338,6 +377,7 @@ def rule_dict(item: Rule) -> dict:
         "anomaly_key_fields": item.anomaly_key_fields,
         "schedule": item.schedule,
         "notification_targets": item.notification_targets,
+        "private_message_template": item.private_message_template,
         "validation_enabled": item.validation_enabled,
         "validation_targets": item.validation_targets,
         "validation_timeout_minutes": item.validation_timeout_minutes,
@@ -347,6 +387,7 @@ def rule_dict(item: Rule) -> dict:
             "enabled": item.group_broadcast_enabled,
             "webhook_url": item.group_webhook_url,
             "mention_targets": item.group_mention_targets,
+            "message_template": item.group_message_template,
         },
         "enabled": item.enabled,
         "sync_status": item.sync_status,
@@ -406,6 +447,24 @@ def _validate_group_broadcast_configuration(
         raise HTTPException(422, f"群聊播报数据集字段不存在：{'、'.join(missing)}")
 
 
+def _validate_message_templates(payload: RuleCreate, dataset: Dataset) -> None:
+    fields = {
+        str(field.get("name"))
+        for field in (dataset.fields or [])
+        if field.get("name") is not None
+    }
+    templates = [(payload.private_message_template, "private")]
+    if "group_broadcast" in payload.model_fields_set:
+        templates.append((payload.group_broadcast.message_template, "group"))
+    for template, context in templates:
+        if template is None:
+            continue
+        try:
+            validate_message_template(template, fields, context)
+        except MessageTemplateError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+
 def _apply_group_broadcast_configuration(
     item: Rule,
     payload: RuleCreate,
@@ -421,6 +480,8 @@ def _apply_group_broadcast_configuration(
     ]
     if "webhook_url" in config.model_fields_set:
         item.group_webhook_url = config.webhook_url
+    if "message_template" in config.model_fields_set:
+        item.group_message_template = config.message_template
 
 
 def run_dict(item: RuleRun) -> dict:
@@ -755,6 +816,7 @@ def create_rule(payload: RuleCreate, session: Session = Depends(get_session), se
         raise HTTPException(404, "数据集不存在")
     _validate_rule_sql_configuration(payload, dataset)
     _validate_group_broadcast_configuration(payload, dataset)
+    _validate_message_templates(payload, dataset)
     item = Rule(**payload.model_dump(mode="json", exclude={"enabled", "group_broadcast"}), sync_status="pending", enabled=False)
     _apply_group_broadcast_configuration(item, payload, settings)
     session.add(item)
@@ -793,6 +855,7 @@ def update_rule(rule_id: str, payload: RuleCreate, session: Session = Depends(ge
     _validate_group_broadcast_configuration(
         payload, dataset, existing_webhook=item.group_webhook_url,
     )
+    _validate_message_templates(payload, dataset)
     for key, value in payload.model_dump(mode="json", exclude={"enabled", "group_broadcast"}).items():
         setattr(item, key, value)
     _apply_group_broadcast_configuration(item, payload, settings)
@@ -1160,6 +1223,36 @@ def get_anomaly(
         }
         for request in session.scalars(
             select(AnomalyValidationRequest).where(AnomalyValidationRequest.anomaly_id == item.id)
+        )
+    ]
+    group_delivery_ids = select(AnomalyGroupBroadcastDelivery.id).join(
+        AnomalyRecordGroupMember,
+        and_(
+            AnomalyRecordGroupMember.rule_id == AnomalyGroupBroadcastDelivery.rule_id,
+            AnomalyRecordGroupMember.detected_at == AnomalyGroupBroadcastDelivery.detected_at,
+        ),
+    ).where(AnomalyRecordGroupMember.anomaly_id == item.id)
+    body["push_jobs"] = [
+        {
+            "id": job.id,
+            "kind": job.kind,
+            "status": job.status,
+            "publish_attempts": job.publish_attempts,
+            "dispatch_attempts": job.dispatch_attempts,
+            "next_attempt_at": job.next_attempt_at,
+            "last_error": job.last_error,
+            "updated_at": job.updated_at,
+        }
+        for job in session.scalars(
+            select(AnomalyPushJob)
+            .where(or_(
+                AnomalyPushJob.anomaly_id == item.id,
+                and_(
+                    AnomalyPushJob.kind == "group_broadcast",
+                    AnomalyPushJob.delivery_id.in_(group_delivery_ids),
+                ),
+            ))
+            .order_by(AnomalyPushJob.created_at, AnomalyPushJob.id)
         )
     ]
     submission = session.scalar(

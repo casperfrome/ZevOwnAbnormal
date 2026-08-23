@@ -63,6 +63,7 @@ window.Store = (function () {
       start: r.schedule.start_date, end: r.schedule.end_date,
     },
     notify: targetsToNotify(r.notification_targets || []), notificationTargets: r.notification_targets || [],
+    privateMessageTemplate: r.private_message_template || '',
     validationEnabled: !!r.validation_enabled,
     validationTargets: r.validation_targets || [],
     validationTimeoutMinutes: r.validation_timeout_minutes ?? 1440,
@@ -72,6 +73,7 @@ window.Store = (function () {
       enabled: !!r.group_broadcast?.enabled,
       webhookUrl: r.group_broadcast?.webhook_url || '',
       mentionTargets: r.group_broadcast?.mention_targets || [],
+      messageTemplate: r.group_broadcast?.message_template || '',
     },
     enabled: r.enabled, syncStatus: r.sync_status, syncError: r.sync_error,
     lastRun: r.last_run || null, nextRun: r.next_run || null, anomalyCount: r.anomaly_count || 0,
@@ -99,6 +101,16 @@ window.Store = (function () {
     } : null,
     submittedAt: item.submitted_at,
   }) : null;
+  const mapPushJob = item => ({
+    id: item.id,
+    kind: item.kind,
+    status: item.status,
+    publishAttempts: item.publish_attempts || 0,
+    dispatchAttempts: item.dispatch_attempts || 0,
+    nextAttemptAt: item.next_attempt_at || null,
+    lastError: item.last_error || null,
+    updatedAt: item.updated_at || null,
+  });
   const mapRecord = r => {
     const first = (r.matched_conditions || [])[0] || {};
     return {
@@ -116,6 +128,7 @@ window.Store = (function () {
       deliveries: r.deliveries || [],
       validationRequests: (r.validation_requests || []).map(mapValidationRequest),
       validationSubmission: mapValidationSubmission(r.validation_submission),
+      pushJobs: (r.push_jobs || []).map(mapPushJob),
     };
   };
 
@@ -261,6 +274,7 @@ window.Store = (function () {
     const groupBroadcastPayload = {
       enabled: !!groupBroadcast.enabled,
       mention_targets: groupBroadcast.mentionTargets || [],
+      message_template: groupBroadcast.messageTemplate?.trim() || null,
     };
     groupBroadcastPayload.webhook_url = groupBroadcast.webhookUrl || null;
     return {
@@ -272,6 +286,7 @@ window.Store = (function () {
       schedule: { frequency: data.schedule.frequency, interval: Number(data.schedule.interval || 1), time: data.schedule.time || null,
         start_date: data.schedule.start || new Date().toISOString().slice(0, 10), end_date: data.schedule.end || null },
       notification_targets: targets, enabled: !!data.enabled,
+      private_message_template: data.privateMessageTemplate?.trim() || null,
       validation_enabled: !!data.validationEnabled,
       validation_targets: data.validationTargets || [],
       validation_timeout_minutes: Number(data.validationTimeoutMinutes ?? 1440),
@@ -306,6 +321,7 @@ window.Store = (function () {
       body: JSON.stringify({ receive_id_type: receiveIdType, receive_id: receiveId }),
     }),
     abortAnomalyPushes: () => request('/anomaly-pushes/abort', { method: 'POST' }),
+    recoverAnomalyPushes: () => request('/anomaly-pushes/recover', { method: 'POST' }),
 
     getDatasets: () => [...state.datasets],
     getDataset: id => state.datasets.find(item => item.id === id),

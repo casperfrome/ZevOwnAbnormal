@@ -463,6 +463,7 @@ test('rule form preserves configured webhook and saves fixed plus field group me
       { source: 'field', field: 'owner_user_id' },
       { source: 'field', field: 'backup_user_id' },
     ],
+    messageTemplate: null,
   });
 
   await page.evaluate(() => RulesModule.openItem('rule-1'));
@@ -471,4 +472,96 @@ test('rule form preserves configured webhook and saves fixed plus field group me
   await page.click('#f-save');
   await page.waitForTimeout(25);
   assert.equal(await page.evaluate(() => window.updatedRule.groupBroadcast.webhookUrl), null);
+});
+
+test('rule form inserts template parameters and links from nested drawers and validates manual URLs', async t => {
+  const browser = await chromium.launch({
+    headless: true,
+    executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+  });
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  await page.setContent('<!doctype html><html><body><div id="toast-container"></div><div id="actions"></div><div id="content"></div></body></html>');
+  await page.addStyleTag({ path: path.join(frontendRoot, 'styles', 'base.css') });
+  await page.addStyleTag({ path: path.join(frontendRoot, 'styles', 'components.css') });
+  await page.addStyleTag({ path: path.join(frontendRoot, 'styles', 'pages.css') });
+  await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'icons.js') });
+  await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'components.js') });
+  await page.evaluate(() => {
+    const dataset = {
+      id: 'dataset-1', name: '运输途中车辆温度', rowCount: 2,
+      fields: [
+        { name: '车牌号', type: 'VARCHAR' },
+        { name: 'frozen_temperature', type: 'DECIMAL' },
+      ],
+    };
+    const rule = {
+      id: 'rule-1', name: '冻库温度异常', description: '', datasetId: dataset.id,
+      datasetName: dataset.name, severity: 'high', enabled: true, anomalyCount: 0,
+      lastRun: null, logic: 'AND',
+      conditions: [{ field: 'frozen_temperature', op: 'gt', value: -10 }],
+      anomalyKeyFields: ['车牌号'],
+      schedule: { frequency: 'day', interval: 1, time: '09:00', start: '2026-08-23', end: '' },
+      notify: { mode: 'manual', openIds: [], userIds: ['owner'], fieldSource: null },
+      notificationTargets: [{ receive_id_type: 'user_id', source: 'literal', value: 'owner' }],
+      privateMessageTemplate: '异常记录：',
+      validationEnabled: false, validationTargets: [], validationTimeoutMinutes: 1440,
+      validationMethod: 'pseudo', sqlValidationConfig: null,
+      groupBroadcast: {
+        enabled: false, webhookUrl: '', mentionTargets: [], messageTemplate: '异常记录组：',
+      },
+    };
+    window.updatedRule = null;
+    window.Store = {
+      getRules: () => [rule], getRule: () => rule,
+      getDatasets: () => [dataset], getDataset: () => dataset,
+      updateRule: async (_id, payload) => { window.updatedRule = payload; },
+    };
+  });
+  await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'rules.js') });
+  await page.evaluate(() => RulesModule.render(document.getElementById('content'), {
+    actionsEl: document.getElementById('actions'), navigate: () => {},
+  }));
+  await page.evaluate(() => RulesModule.openItem('rule-1'));
+
+  const privateEditor = page.locator('#f-private-message-template');
+  await privateEditor.focus();
+  await privateEditor.evaluate(input => input.setSelectionRange(input.value.length, input.value.length));
+  await page.click('[data-template-picker="parameter"][data-template-context="private"]');
+  await page.click('.template-picker-option[data-template-value="{车牌号}"]');
+  await page.click('[data-template-picker="link"][data-template-context="private"]');
+  await page.click('.template-picker-option[data-template-value="[查看异常记录明细]({异常记录链接})"]');
+  assert.equal(
+    await privateEditor.inputValue(),
+    '异常记录：{车牌号}[查看异常记录明细]({异常记录链接})',
+  );
+
+  const groupEditor = page.locator('#f-group-message-template');
+  await groupEditor.focus();
+  await groupEditor.evaluate(input => input.setSelectionRange(input.value.length, input.value.length));
+  await page.click('[data-template-picker="parameter"][data-template-context="group"]');
+  await page.click('.template-picker-option[data-template-value="{车牌号列表}"]');
+  assert.equal(await groupEditor.inputValue(), '异常记录组：{车牌号列表}');
+
+  await privateEditor.fill('[不安全](http://example.com)');
+  await page.click('#f-save');
+  assert.match(await page.locator('#f-private-template-error').textContent(), /必须使用 HTTPS/);
+  assert.equal(await page.evaluate(() => window.updatedRule), null);
+
+  await privateEditor.fill('[错误目标]({车牌号})');
+  await page.click('#f-save');
+  assert.match(await page.locator('#f-private-template-error').textContent(), /仅支持系统深链/);
+  assert.equal(await page.evaluate(() => window.updatedRule), null);
+
+  await privateEditor.fill('异常记录：{车牌号}\n[查看]({异常记录链接})');
+  await page.click('#f-save');
+  await page.waitForTimeout(25);
+  assert.equal(
+    await page.evaluate(() => window.updatedRule.privateMessageTemplate),
+    '异常记录：{车牌号}\n[查看]({异常记录链接})',
+  );
+  assert.equal(
+    await page.evaluate(() => window.updatedRule.groupBroadcast.messageTemplate),
+    '异常记录组：{车牌号列表}',
+  );
 });

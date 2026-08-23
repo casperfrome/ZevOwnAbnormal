@@ -10,6 +10,7 @@ from .anomaly_group_service import create_anomaly_group
 from .anomaly_service import persist_matches
 from .config import Settings
 from .feishu import FeishuClient
+from .message_templates import render_private_markdown
 from .models import AnomalyRecord, NotificationDelivery, Rule, RuleRun, utcnow
 from .query_service import connect_to_datasource, fetch_rule_rows
 from .rule_engine import evaluate_rows
@@ -67,9 +68,27 @@ def _message(record: AnomalyRecord) -> str:
     )
 
 
+def _notification_card(record: AnomalyRecord, template: str, public_base_url: str) -> dict:
+    record_url = f"{public_base_url.rstrip('/')}/#records/{record.id}"
+    markdown = render_private_markdown(template, record.row_details, record_url)
+    header_templates = {
+        "critical": "red", "high": "orange", "medium": "yellow", "low": "blue",
+    }
+    return {
+        "schema": "2.0",
+        "header": {
+            "title": {"tag": "plain_text", "content": f"异常告警 · {record.rule_name}"},
+            "template": header_templates.get(record.severity, "orange"),
+        },
+        "body": {"elements": [{"tag": "markdown", "content": markdown}]},
+    }
+
+
 def deliver_notifications(session: Session, settings: Settings, delivery_ids: list[str] | None = None, rule_id: str | None = None) -> int:
-    query = select(NotificationDelivery, AnomalyRecord).join(
+    query = select(NotificationDelivery, AnomalyRecord, Rule).join(
         AnomalyRecord, NotificationDelivery.anomaly_id == AnomalyRecord.id
+    ).join(
+        Rule, AnomalyRecord.rule_id == Rule.id
     ).where(
         NotificationDelivery.status.in_(["pending", "failed"]),
         AnomalyRecord.status.in_(["pending", "processing"]),
@@ -90,19 +109,30 @@ def deliver_notifications(session: Session, settings: Settings, delivery_ids: li
     )
     failures = 0
     try:
-        for delivery, record in deliveries:
+        for delivery, record, rule in deliveries:
             for attempt in range(3):
                 delivery.attempts += 1
                 try:
-                    delivery.message_id = feishu_gateway.send_configured_text(
-                        settings.feishu_app_id,
-                        settings.feishu_app_secret,
-                        delivery.receive_id_type,
-                        delivery.recipient,
-                        _message(record),
-                        client=client,
-                        idempotency_key=delivery.id,
-                    )
+                    if rule.private_message_template:
+                        delivery.message_id = client.send_interactive(
+                            delivery.receive_id_type,
+                            delivery.recipient,
+                            _notification_card(
+                                record, rule.private_message_template,
+                                settings.sentinel_public_base_url,
+                            ),
+                            idempotency_key=delivery.id,
+                        )
+                    else:
+                        delivery.message_id = feishu_gateway.send_configured_text(
+                            settings.feishu_app_id,
+                            settings.feishu_app_secret,
+                            delivery.receive_id_type,
+                            delivery.recipient,
+                            _message(record),
+                            client=client,
+                            idempotency_key=delivery.id,
+                        )
                     delivery.status = "sent"
                     delivery.last_error = None
                     break

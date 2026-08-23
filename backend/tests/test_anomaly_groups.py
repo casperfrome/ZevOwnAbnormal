@@ -44,7 +44,11 @@ def _group_rule(session, settings, *, mention_targets):
     )
     dataset = Dataset(
         name="group-daily", datasource=datasource, sql="SELECT 1",
-        fields=[{"name": "owner_user_id", "type": "VARCHAR"}],
+        fields=[
+            {"name": "store_id", "type": "INTEGER"},
+            {"name": "gmv", "type": "DECIMAL"},
+            {"name": "owner_user_id", "type": "VARCHAR"},
+        ],
     )
     rule = Rule(
         name="群播规则", dataset=dataset, severity="high", logic="AND",
@@ -120,6 +124,52 @@ def test_group_creation_deduplicates_members_chunks_messages_and_mentions_first_
     assert len(list(db_session.scalars(select(AnomalyPushJob).where(
         AnomalyPushJob.kind == "group_broadcast"
     )))) == 2
+
+
+def test_custom_group_template_renders_each_chunk_list_and_keeps_first_part_mentions(db_session):
+    """Aggregating all chunks together or losing rich links and mentions must fail."""
+    settings = Settings(_env_file=None, sentinel_public_base_url="https://sentinel.example")
+    rule = _group_rule(
+        db_session, settings,
+        mention_targets=[{"source": "literal", "value": "fixed-user"}],
+    )
+    rule.group_message_template = (
+        "异常记录组：{store_id列表}\n"
+        "[查看记录组]({异常记录组链接})\n"
+        "[值班手册](https://docs.example/on-call)"
+    )
+    matches = _matches(21)
+    persisted = persist_matches(db_session, rule, matches)
+    run = RuleRun(
+        id="run-template", rule_id=rule.id, trigger_source="manual", status="success",
+        scanned_rows=21, matched_rows=21, new_anomalies=persisted.new_count,
+        started_at=DETECTED_AT, finished_at=DETECTED_AT,
+    )
+    db_session.add(run)
+    db_session.commit()
+
+    create_anomaly_group(db_session, settings, rule, run, persisted.records, matches)
+    db_session.commit()
+    deliveries = list(db_session.scalars(
+        select(AnomalyGroupBroadcastDelivery).order_by(AnomalyGroupBroadcastDelivery.part_index)
+    ))
+
+    assert len(deliveries) == 2
+    first = deliveries[0].payload["content"]["post"]["zh-CN"]["content"]
+    second = deliveries[1].payload["content"]["post"]["zh-CN"]["content"]
+    assert first[0] == [{"tag": "text", "text": "异常记录组：0、1、2、3、4、5、6、7、8、9、10、11、12、13、14、15、16、17、18、19"}]
+    assert second[0] == [{"tag": "text", "text": "异常记录组：20"}]
+    assert first[1] == [{
+        "tag": "a", "text": "查看记录组",
+        "href": "https://sentinel.example/#anomaly-groups/run-template",
+    }]
+    assert first[2] == [{
+        "tag": "a", "text": "值班手册", "href": "https://docs.example/on-call",
+    }]
+    assert [node["user_id"] for line in first for node in line if node.get("tag") == "at"] == [
+        "fixed-user",
+    ]
+    assert not [node for line in second for node in line if node.get("tag") == "at"]
 
 
 def test_zero_match_group_still_queues_one_message_without_field_mentions(db_session):
@@ -286,6 +336,57 @@ def test_failed_group_job_is_requeued_when_due(db_session, monkeypatch):
 
     assert queue_due_group_broadcast_push_jobs(db_session) == 1
     assert job.status == "pending_publish"
+
+
+def test_scheduler_failure_requeues_group_job_while_delivery_is_still_pending(db_session):
+    settings = Settings(_env_file=None)
+    delivery = _empty_group_delivery(db_session, settings)
+    job = db_session.scalar(select(AnomalyPushJob).where(
+        AnomalyPushJob.kind == "group_broadcast"
+    ))
+    job.status = "failed"
+    job.next_attempt_at = datetime(2020, 1, 1)
+    job.last_error = "401 Unauthorized"
+    db_session.commit()
+
+    assert delivery.status == "pending"
+    assert queue_due_group_broadcast_push_jobs(db_session) == 1
+    assert job.status == "pending_publish"
+
+
+def test_member_anomaly_detail_includes_group_broadcast_push_diagnostics():
+    app = create_app(testing=True)
+    with TestClient(app) as client:
+        with app.state.session_factory() as session:
+            settings = app.state.settings
+            rule = _group_rule(session, settings, mention_targets=[])
+            matches = _matches(1)
+            persisted = persist_matches(session, rule, matches)
+            run = RuleRun(
+                id="run-detail-diagnostics", rule_id=rule.id,
+                trigger_source="manual", status="success",
+                scanned_rows=1, matched_rows=1, new_anomalies=1,
+                started_at=DETECTED_AT, finished_at=DETECTED_AT,
+            )
+            session.add(run)
+            session.commit()
+            create_anomaly_group(session, settings, rule, run, persisted.records, matches)
+            session.commit()
+            anomaly_id = persisted.records[0].id
+            group_job = session.scalar(select(AnomalyPushJob).where(
+                AnomalyPushJob.kind == "group_broadcast"
+            ))
+            group_job.status = "failed"
+            group_job.last_error = "401 Unauthorized"
+            session.commit()
+            group_job_id = group_job.id
+
+        detail = client.get(f"/api/v1/anomalies/{anomaly_id}")
+
+    assert detail.status_code == 200
+    diagnostics = {job["id"]: job for job in detail.json()["push_jobs"]}
+    assert diagnostics[group_job_id]["kind"] == "group_broadcast"
+    assert diagnostics[group_job_id]["last_error"] == "401 Unauthorized"
 
 
 def test_abort_counts_group_broadcast_without_creating_anomaly_event(db_session):

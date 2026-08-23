@@ -97,6 +97,7 @@ def test_rule_group_broadcast_config_is_validated_stored_and_returned_as_plainte
             "enabled": True,
             "webhook_url": webhook,
             "mention_targets": payload["group_broadcast"]["mention_targets"],
+            "message_template": None,
         }
         with client.app.state.session_factory() as session:
             stored = session.get(Rule, created.json()["id"])
@@ -165,6 +166,84 @@ def test_rule_group_broadcast_config_is_validated_stored_and_returned_as_plainte
         )
         assert cleared.status_code == 200
         assert cleared.json()["group_broadcast"]["webhook_url"] is None
+
+
+def test_rule_message_templates_are_validated_stored_updated_and_cleared():
+    """Dropping either template or accepting stale dataset fields must fail this contract test."""
+    webhook = "https://open.feishu.cn/open-apis/bot/v2/hook/11111111-2222-3333-4444-555555555555"
+    with TestClient(create_app(testing=True)) as client:
+        dataset = create_dependencies(client)
+        with client.app.state.session_factory() as session:
+            item = session.get(Dataset, dataset["id"])
+            item.fields = [
+                {"name": "车牌号", "type": "VARCHAR"},
+                {"name": "frozen_temperature", "type": "DECIMAL"},
+            ]
+            session.commit()
+
+        payload = {
+            "name": "自定义推送规则",
+            "dataset_id": dataset["id"],
+            "conditions": [{"field": "frozen_temperature", "operator": "gt", "value": -10}],
+            "anomaly_key_fields": ["车牌号"],
+            "schedule": {
+                "frequency": "day", "interval": 1, "time": "09:00", "start_date": "2026-08-23",
+            },
+            "notification_targets": [
+                {"receive_id_type": "user_id", "source": "literal", "value": "owner"},
+            ],
+            "private_message_template": "异常记录：{车牌号}\n[查看]({异常记录链接})",
+            "group_broadcast": {
+                "enabled": True,
+                "webhook_url": webhook,
+                "mention_targets": [{"source": "literal", "value": "owner"}],
+                "message_template": "异常记录组：{车牌号列表}\n[查看]({异常记录组链接})",
+            },
+        }
+
+        created = client.post("/api/v1/rules", json=payload)
+
+        assert created.status_code == 201
+        assert created.json()["private_message_template"] == payload["private_message_template"]
+        assert created.json()["group_broadcast"]["message_template"] == payload["group_broadcast"]["message_template"]
+        with client.app.state.session_factory() as session:
+            stored = session.get(Rule, created.json()["id"])
+            assert stored.private_message_template == payload["private_message_template"]
+            assert stored.group_message_template == payload["group_broadcast"]["message_template"]
+
+        invalid_private = client.put(
+            f"/api/v1/rules/{created.json()['id']}",
+            json={**payload, "private_message_template": "{missing}"},
+        )
+        invalid_group = client.put(
+            f"/api/v1/rules/{created.json()['id']}",
+            json={
+                **payload,
+                "group_broadcast": {
+                    **payload["group_broadcast"],
+                    "message_template": "{车牌号}",
+                },
+            },
+        )
+        assert invalid_private.status_code == 422
+        assert "模板参数不存在" in invalid_private.json()["detail"]
+        assert invalid_group.status_code == 422
+        assert "仅支持字段列表参数" in invalid_group.json()["detail"]
+
+        cleared = client.put(
+            f"/api/v1/rules/{created.json()['id']}",
+            json={
+                **payload,
+                "private_message_template": None,
+                "group_broadcast": {
+                    **payload["group_broadcast"],
+                    "message_template": None,
+                },
+            },
+        )
+        assert cleared.status_code == 200
+        assert cleared.json()["private_message_template"] is None
+        assert cleared.json()["group_broadcast"]["message_template"] is None
 
 
 def test_sql_validation_rule_crud_validates_template_mappings_and_serializes_config():

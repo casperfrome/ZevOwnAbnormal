@@ -1,6 +1,6 @@
 # Sentinel 塔斯汀数据异常监控平台
 
-Sentinel 是一个基于 FastAPI 的数据异常监控平台。前端页面由 FastAPI 同源提供，平台元数据存储在 MySQL `app`，门店订单演示数据存储在 MySQL `tastien_prod`，经营指标数据存储在 StarRocks `tastien_ads`，规则调度由 DolphinScheduler 执行。
+Sentinel 是一个基于 FastAPI 的数据异常监控平台。前端页面由 FastAPI 同源提供，平台元数据存储在 MySQL `app`，门店订单演示数据存储在 MySQL `tastien_prod`，经营指标数据存储在 StarRocks `tastien_ads`，Kafka 承接异常推送任务，规则调度与推送任务编排由 DolphinScheduler 执行。DolphinScheduler 的界面、业务对象映射和操作方法见 [DolphinScheduler 使用指南](docs/dolphinscheduler-guide.md)。
 
 本文档面向 Windows 本地开发环境，所有命令均在项目根目录 `D:\260809` 下执行。
 
@@ -58,7 +58,7 @@ Copy-Item .env.example .env
 | 管理员 | `SUPERADMIN_USERNAME`、`SUPERADMIN_PASSWORD` | Sentinel 登录账号和密码 |
 | 飞书 | `FEISHU_APP_ID`、`FEISHU_APP_SECRET` | 使用飞书通知或长连接时必填 |
 | 服务地址 | `SENTINEL_PUBLIC_BASE_URL` | 卡片详情链接地址，真实验收时必须能从接收者设备访问 |
-| 服务地址 | `SENTINEL_API_BASE_URL` | 飞书长连接进程访问 FastAPI 的地址 |
+| 服务地址 | `SENTINEL_API_BASE_URL` | 飞书长连接进程和 DolphinScheduler Worker 回调 FastAPI 的地址；Docker Worker 使用时必须填写容器可访问的宿主机地址 |
 | 推送队列 | `KAFKA_BOOTSTRAP_SERVERS`、`KAFKA_ANOMALY_PUSH_TOPIC`、`KAFKA_ANOMALY_PUSH_GROUP` | 异常推送 Kafka 地址、专用 topic 与消费组 |
 | 调度平台 | `DOLPHINSCHEDULER_URL`、`DOLPHINSCHEDULER_USERNAME`、`DOLPHINSCHEDULER_PASSWORD` | DolphinScheduler API 连接配置 |
 
@@ -141,6 +141,71 @@ docker compose up -d --wait --wait-timeout 600
 
 长连接进程会读取根目录 `.env`，且不会覆盖终端中显式设置的环境变量。飞书开放平台需使用长连接订阅 `p2.card.action.trigger`。
 
+## Kafka
+
+### 定位与部署方式
+
+Kafka 是异常推送管线的任务缓冲层，不负责保存异常业务明细。异常与持久推送任务先在 MySQL 的同一个事务中落库；后台任务随后只把推送任务 ID、类型和管线代际写入 Kafka，再由消费端为每条消息启动 DolphinScheduler 的 `sentinel-anomaly-push` 工作流。这样即使 Kafka、DolphinScheduler 或飞书暂时不可用，异常记录和待发送任务仍可保留并在恢复后继续处理。
+
+本地环境使用 Kafka `4.3.1` 的单节点 KRaft 模式，Broker 和 Controller 位于同一容器，不依赖 ZooKeeper。数据存放在 Docker 卷 `kafka-data` 中：
+
+| 使用方 | Bootstrap Server | 说明 |
+| --- | --- | --- |
+| Windows 宿主机上的 Sentinel | `localhost:9092` | `.env.example` 中的默认地址 |
+| Docker 网络内的其他容器 | `kafka:29092` | 仅在 Compose 的 `infra` 网络内使用 |
+
+项目默认只使用一条专用推送通道：
+
+| 配置 | 默认值 | 用途 |
+| --- | --- | --- |
+| `KAFKA_ANOMALY_PUSH_TOPIC` | `sentinel-anomaly-push` | 保存待派发的异常通知、互动校验和群聊播报任务 ID |
+| `KAFKA_ANOMALY_PUSH_GROUP` | `sentinel-anomaly-push-dispatcher` | Sentinel 后台消费者的消费组 |
+
+消息不包含异常业务明细、飞书凭据或内部令牌；完整状态以 MySQL 中的持久推送任务为准。Kafka 消费位点只表示消息已经成功交给 DolphinScheduler，不等同于飞书已经发送成功。
+
+### 查看健康状态和积压
+
+以下命令均在项目根目录的 PowerShell 中执行。
+
+查看 Kafka 容器和健康状态：
+
+```powershell
+docker compose ps kafka
+docker compose exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 --list
+```
+
+查看专用 topic 的分区、副本和配置：
+
+```powershell
+docker compose exec kafka /opt/kafka/bin/kafka-topics.sh `
+  --bootstrap-server kafka:29092 `
+  --describe `
+  --topic sentinel-anomaly-push
+```
+
+查看消费组位点和积压量；输出中的 `LAG` 是尚未被该消费组确认的消息数：
+
+```powershell
+docker compose exec kafka /opt/kafka/bin/kafka-consumer-groups.sh `
+  --bootstrap-server kafka:29092 `
+  --describe `
+  --group sentinel-anomaly-push-dispatcher
+```
+
+如果修改过 `.env` 中的 topic 或消费组名称，请把命令中的默认值替换为实际配置。首次还没有消费者位点时，消费组查询可能提示组不存在，这不代表 Kafka 容器不健康。
+
+### Kafka 故障排查
+
+按以下顺序定位问题：
+
+1. `docker compose ps kafka` 确认容器为 `healthy`；否则运行 `docker compose logs --tail 200 kafka` 查看启动、磁盘和 KRaft 日志。
+2. 用 topic 列表命令确认 Broker 可访问，再检查 `.env` 中 `KAFKA_BOOTSTRAP_SERVERS` 是否为宿主机可访问的 `localhost:9092`。
+3. 确认 `sentinel-anomaly-push` 存在；Sentinel 启动后的推送后台循环会幂等创建该 topic。
+4. 查看消费组的 `LAG`。持续增长通常表示 Sentinel 推送循环未运行、DolphinScheduler 不可用，或工作流启动持续失败。
+5. 同时检查 Sentinel 日志中的“Kafka → DolphinScheduler 异常推送周期执行失败”，并按 [DolphinScheduler 使用指南](docs/dolphinscheduler-guide.md#故障排查) 查看工作流与任务实例。
+
+不要手工删除 topic、重置消费组位点或清空 `kafka-data` 卷来处理普通积压，这些操作可能导致重复派发或丢失尚未调度的消息。需要停止所有未发送任务时，使用 Sentinel 异常记录页的“中止推送”；需要在依赖恢复后重试失败任务时，使用页面上的恢复操作。
+
 ## 异常推送链路
 
 普通飞书通知和互动校验卡片统一使用以下链路：
@@ -153,6 +218,8 @@ docker compose up -d --wait --wait-timeout 600
 - Kafka 消息只保存任务 ID、类型和管线代际，不包含异常业务明细、飞书凭据或内部令牌。
 - 应用启动后会幂等创建 `sentinel-anomaly-push` topic 和同名 DolphinScheduler 共享工作流。规则执行成功表示异常及推送任务已经可靠入库，不表示飞书已即时送达。
 - 互动校验的截止时间仍从异常检出时开始计算；失败重试也会重新经过 Kafka 和 DolphinScheduler。
+
+DolphinScheduler 中两类工作流的命名、实例参数、日志查看和日常操作见 [DolphinScheduler 使用指南](docs/dolphinscheduler-guide.md)。
 
 异常记录页右上角的“中止推送”仅对超级管理员开放。确认后会中止并清除操作时尚未发送的专用 DolphinScheduler 实例和 Kafka 积压，并把 Sentinel 中对应投递标记为“已中止”。异常记录不会删除，已经发送或正在等待飞书远端结果的消息无法撤回。操作完成后，新异常会使用新代际继续正常推送。
 
@@ -167,6 +234,7 @@ docker compose up -d --wait --wait-timeout 600
 | 服务 | 地址 |
 | --- | --- |
 | Sentinel | <http://localhost:8000> |
+| Kafka Broker | `localhost:9092`（无 Web 管理界面） |
 | DolphinScheduler | <http://localhost:12345/dolphinscheduler/ui> |
 | StarRocks FE | <http://localhost:8030> |
 
@@ -193,6 +261,7 @@ docker compose down -v
 - `SENTINEL_PUBLIC_BASE_URL` 在飞书真实验收时不能使用仅服务端可见的 `localhost`。
 - 真实消息发送属于外部副作用，执行前必须再次确认接收者和发送范围。
 - 异常实时校验的迁移、安全诊断和人工验收步骤见 [异常实时校验部署与验收](docs/anomaly-validation-acceptance.md)。
+- DolphinScheduler 界面、工作流与项目业务关系、日志查看及故障处理见 [DolphinScheduler 使用指南](docs/dolphinscheduler-guide.md)。
 - 前端页面与交互说明见 [前端 README](frontend/README.md)。
 
 ## 测试

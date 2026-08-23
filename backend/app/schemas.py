@@ -119,6 +119,7 @@ class GroupBroadcastConfig(BaseModel):
     enabled: bool = False
     webhook_url: str | None = None
     mention_targets: list[ValidationTarget] = Field(default_factory=list)
+    message_template: str | None = Field(default=None, max_length=10000)
 
     @field_validator("webhook_url", mode="before")
     @classmethod
@@ -146,6 +147,14 @@ class GroupBroadcastConfig(BaseModel):
         ):
             raise ValueError("群机器人 webhook 必须是飞书官方 HTTPS 地址")
         return normalized
+
+    @field_validator("message_template", mode="before")
+    @classmethod
+    def normalize_message_template(cls, value):
+        if not isinstance(value, str):
+            return value
+        normalized = value.strip()
+        return normalized or None
 
     @model_validator(mode="after")
     def validate_enabled_targets(self):
@@ -273,8 +282,17 @@ class RuleCreate(RuleValidationConfig):
     anomaly_key_fields: list[str] = Field(min_length=1)
     schedule: RuleSchedule
     notification_targets: list[NotificationTarget] = Field(min_length=1)
+    private_message_template: str | None = Field(default=None, max_length=10000)
     group_broadcast: GroupBroadcastConfig = Field(default_factory=GroupBroadcastConfig)
     enabled: bool = False
+
+    @field_validator("private_message_template", mode="before")
+    @classmethod
+    def normalize_private_message_template(cls, value):
+        if not isinstance(value, str):
+            return value
+        normalized = value.strip()
+        return normalized or None
 
 
 class AnomalyStatusUpdate(BaseModel):

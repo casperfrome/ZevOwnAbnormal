@@ -156,7 +156,7 @@ window.DatasourceModule = (function () {
           <thead>
             <tr>
               <th class="sortable" data-sort="name" data-column-key="name" data-default-width="180"><span class="th-sort">名称 ${sortIcon('name')}</span></th>
-              <th data-column-key="type" data-default-width="110">类型</th>
+              <th data-column-key="type" data-default-width="140">类型</th>
               <th data-column-key="connection" data-default-width="220">连接信息</th>
               <th data-column-key="status" data-default-width="120">状态</th>
               <th class="sortable" data-sort="createdAt" data-column-key="created-at" data-default-width="180"><span class="th-sort">创建时间 ${sortIcon('createdAt')}</span></th>

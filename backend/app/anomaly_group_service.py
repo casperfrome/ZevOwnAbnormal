@@ -19,6 +19,7 @@ from .models import (
     RuleRun,
     utcnow,
 )
+from .message_templates import render_group_post_lines
 
 
 RECORDS_PER_MESSAGE = 20
@@ -78,6 +79,8 @@ def build_group_messages(
     records: list[AnomalyRecord],
     mention_user_ids: list[str],
     public_base_url: str,
+    message_template: str | None = None,
+    field_names: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     base_url = public_base_url.rstrip("/")
     chunks = [
@@ -89,15 +92,23 @@ def build_group_messages(
     messages: list[dict[str, Any]] = []
     for part_index, chunk in enumerate(chunks, start=1):
         suffix = f"（{part_index}/{total_parts}）" if total_parts > 1 else ""
-        lines: list[list[dict[str, str]]] = [
-            [_text(
-                f"规则：{group.rule_name}\n"
-                f"检测时间：{group.detected_at:%Y-%m-%d %H:%M:%S}\n"
-                f"扫描 {group.scanned_rows} 条，命中 {group.matched_rows} 条，新增 {group.new_anomalies} 条"
-            )],
-            [_link("查看异常记录组", group_url)],
-        ]
-        if chunk:
+        if message_template:
+            lines = render_group_post_lines(
+                message_template,
+                [record.row_details for record in chunk],
+                group_url,
+                field_names,
+            )
+        else:
+            lines = [
+                [_text(
+                    f"规则：{group.rule_name}\n"
+                    f"检测时间：{group.detected_at:%Y-%m-%d %H:%M:%S}\n"
+                    f"扫描 {group.scanned_rows} 条，命中 {group.matched_rows} 条，新增 {group.new_anomalies} 条"
+                )],
+                [_link("查看异常记录组", group_url)],
+            ]
+        if chunk and not message_template:
             for record in chunk:
                 status = STATUS_LABELS.get(record.status, record.status or "未知")
                 business_key = json.dumps(
@@ -107,7 +118,7 @@ def build_group_messages(
                     _text(f"[{status}] {business_key} "),
                     _link("查看明细", f"{base_url}/#records/{record.id}"),
                 ])
-        else:
+        elif not chunk and not message_template:
             lines.append([_text("本次未检测到异常")])
         if part_index == 1 and mention_user_ids:
             lines.append([_text("请关注："), *[
@@ -171,7 +182,16 @@ def create_anomaly_group(
         session.flush()
     mentions = resolve_group_mentions(rule.group_mention_targets or [], matches)
     messages = build_group_messages(
-        group, unique_records, mentions, settings.sentinel_public_base_url,
+        group,
+        unique_records,
+        mentions,
+        settings.sentinel_public_base_url,
+        rule.group_message_template,
+        {
+            str(field.get("name"))
+            for field in (rule.dataset.fields or [])
+            if field.get("name") is not None
+        },
     )
     for part_index, payload in enumerate(messages, start=1):
         delivery = AnomalyGroupBroadcastDelivery(

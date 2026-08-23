@@ -73,6 +73,7 @@ test('validation rule fields and anomaly audit details map between API and UI co
       conditions: [{ field: 'gmv', operator: 'gt', value: 100 }], anomaly_key_fields: ['owner_id'],
       schedule: { frequency: 'day', interval: 1, time: '09:00', start_date: '2026-08-22', end_date: null },
       notification_targets: [{ receive_id_type: 'open_id', source: 'literal', value: 'ou_1' }],
+      private_message_template: '异常记录：{owner_id}',
       validation_enabled: true,
       validation_targets: [{ source: 'literal', value: 'u_1' }, { source: 'field', field: 'owner_id' }],
       validation_timeout_minutes: 30,
@@ -86,6 +87,7 @@ test('validation rule fields and anomaly audit details map between API and UI co
         enabled: true,
         webhook_url: 'https://open.feishu.cn/open-apis/bot/v2/hook/saved-webhook',
         mention_targets: [{ source: 'literal', value: 'group-owner' }, { source: 'field', field: 'owner_id' }],
+        message_template: '异常记录组：{owner_id列表}',
       },
       enabled: true, sync_status: 'synced', sync_error: null, last_run: null, next_run: null,
       anomaly_count: 1, created_at: '2026-08-22T08:00:00',
@@ -145,10 +147,12 @@ test('validation rule fields and anomaly audit details map between API and UI co
             validation_timeout_minutes: body.validation_timeout_minutes,
             validation_method: body.validation_method,
             sql_validation_config: body.sql_validation_config,
+            private_message_template: body.private_message_template,
             group_broadcast: {
               enabled: body.group_broadcast.enabled,
               webhook_url: body.group_broadcast.webhook_url,
               mention_targets: body.group_broadcast.mention_targets,
+              message_template: body.group_broadcast.message_template,
             },
           }),
         };
@@ -170,10 +174,12 @@ test('validation rule fields and anomaly audit details map between API and UI co
   assert.deepEqual(JSON.parse(JSON.stringify(rule.validationTargets)), [
     { source: 'literal', value: 'u_1' }, { source: 'field', field: 'owner_id' },
   ]);
+  assert.equal(rule.privateMessageTemplate, '异常记录：{owner_id}');
   assert.deepEqual(JSON.parse(JSON.stringify(rule.groupBroadcast)), {
     enabled: true,
     webhookUrl: 'https://open.feishu.cn/open-apis/bot/v2/hook/saved-webhook',
     mentionTargets: [{ source: 'literal', value: 'group-owner' }, { source: 'field', field: 'owner_id' }],
+    messageTemplate: '异常记录组：{owner_id列表}',
   });
   const listed = store.getRecord('record-1');
   assert.equal(listed.description, 'GMV anomaly');
@@ -202,6 +208,7 @@ test('validation rule fields and anomaly audit details map between API and UI co
     conditions: [{ field: 'gmv', op: 'gt', value: 100 }], anomalyKeyFields: ['owner_id'],
     schedule: { frequency: 'day', interval: 1, time: '09:00', start: '2026-08-22', end: null },
     notificationTargets: [{ receive_id_type: 'open_id', source: 'literal', value: 'ou_1' }],
+    privateMessageTemplate: '异常记录：{owner_id}\n[查看]({异常记录链接})',
     validationEnabled: false,
     validationTargets: [{ source: 'literal', value: 'u_2' }, { source: 'field', field: 'owner_id' }],
     validationTimeoutMinutes: 43200,
@@ -215,6 +222,7 @@ test('validation rule fields and anomaly audit details map between API and UI co
       enabled: true,
       webhookUrl: 'https://open.feishu.cn/open-apis/bot/v2/hook/test-webhook',
       mentionTargets: [{ source: 'literal', value: 'group-user' }, { source: 'field', field: 'owner_id' }],
+      messageTemplate: '异常记录组：{owner_id列表}\n[查看]({异常记录组链接})',
     },
     enabled: true,
   });
@@ -231,10 +239,12 @@ test('validation rule fields and anomaly audit details map between API and UI co
   assert.deepEqual(body.validation_targets, [
     { source: 'literal', value: 'u_2' }, { source: 'field', field: 'owner_id' },
   ]);
+  assert.equal(body.private_message_template, '异常记录：{owner_id}\n[查看]({异常记录链接})');
   assert.deepEqual(body.group_broadcast, {
     enabled: true,
     webhook_url: 'https://open.feishu.cn/open-apis/bot/v2/hook/test-webhook',
     mention_targets: [{ source: 'literal', value: 'group-user' }, { source: 'field', field: 'owner_id' }],
+    message_template: '异常记录组：{owner_id列表}\n[查看]({异常记录组链接})',
   });
 });
 
@@ -501,6 +511,43 @@ test('peeking an export page neither replaces cached records nor supersedes an i
   await pageRefresh;
 
   assert.equal(store.getRecords()[0].id, 'page-two-newest');
+});
+
+test('recovery request and push diagnostics map to the UI contract', async () => {
+  const requests = [];
+  const context = {
+    window: {},
+    fetch: async (url, options = {}) => {
+      requests.push({ url, options });
+      return {
+        ok: true, status: 200,
+        json: async () => url.endsWith('/anomaly-pushes/recover')
+          ? { status: 'completed', requeued_jobs: 2 }
+          : {
+              id: 'record-1', rule_id: 'rule-1', rule_name: 'GMV', dataset_name: 'Orders',
+              severity: 'high', status: 'pending', business_key: {}, row_details: {},
+              matched_conditions: [], hit_count: 1, first_seen_at: '2026-08-23T12:00:00',
+              last_seen_at: '2026-08-23T12:00:00', push_jobs: [{
+                id: 'job-1', kind: 'validation', status: 'failed', publish_attempts: 7,
+                dispatch_attempts: 7, next_attempt_at: '2026-08-23T12:49:40',
+                last_error: '401 Unauthorized', updated_at: '2026-08-23T12:47:32',
+              }],
+            },
+      };
+    },
+  };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'scripts', 'data.js'), 'utf8'), context);
+
+  const result = await context.window.Store.recoverAnomalyPushes();
+  const record = await context.window.Store.loadRecord('record-1');
+
+  assert.equal(result.requeued_jobs, 2);
+  assert.deepEqual(requests.map(item => [item.url, item.options.method]), [
+    ['/api/v1/anomaly-pushes/recover', 'POST'],
+    ['/api/v1/anomalies/record-1', undefined],
+  ]);
+  assert.equal(record.pushJobs[0].lastError, '401 Unauthorized');
+  assert.equal(record.pushJobs[0].dispatchAttempts, 7);
 });
 
 test('anomaly group pages and details map live status summaries and member records', async () => {

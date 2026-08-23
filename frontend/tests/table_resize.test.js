@@ -10,7 +10,7 @@ async function openResizableTable(page) {
   await page.route('http://resizer.test/**', route => route.fulfill({
     contentType: 'text/html',
     body: `<!doctype html><html><body>
-      <div class="table-wrap">
+      <div class="table-wrap" style="width:260px;">
         <table class="data-table" data-table-id="test-records">
           <thead><tr>
             <th data-column-key="name" data-default-width="160" style="width:160px">Name</th>
@@ -88,6 +88,74 @@ test('resizable tables persist widths, enforce a minimum, and do not trigger hea
     UI.initResizableTables(table);
     return table.querySelectorAll('.column-resize-handle').length;
   }), 1);
+});
+
+test('tables fill wide containers, map drags 1:1, and reset on double-click', async t => {
+  const browser = await chromium.launch({ headless: true, executablePath });
+  t.after(() => browser.close());
+  const page = await browser.newPage({ viewport: { width: 1000, height: 800 } });
+  await page.route('http://resizer.test/**', route => route.fulfill({
+    contentType: 'text/html',
+    body: `<!doctype html><html><body>
+      <div class="table-wrap" style="width:600px;">
+        <table class="data-table" data-table-id="wide-records">
+          <thead><tr>
+            <th data-column-key="name" data-default-width="160">Name</th>
+            <th data-column-key="status" data-default-width="120">Status</th>
+          </tr></thead>
+          <tbody><tr><td>Record name</td><td>Pending</td></tr></tbody>
+        </table>
+      </div>
+    </body></html>`,
+  }));
+  await page.goto('http://resizer.test/');
+  await page.addStyleTag({ path: path.join(frontendRoot, 'styles', 'base.css') });
+  await page.addStyleTag({ path: path.join(frontendRoot, 'styles', 'components.css') });
+  await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'icons.js') });
+  await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'components.js') });
+  await page.evaluate(() => UI.initResizableTables(document));
+
+  // Defaults are smaller than the wrapper: the table fills it and stretches columns.
+  const table = page.locator('[data-table-id="wide-records"]');
+  const filled = await table.evaluate(node => ({
+    table: Math.round(node.getBoundingClientRect().width),
+    name: Math.round(node.querySelector('[data-column-key="name"]').getBoundingClientRect().width),
+  }));
+  assert.ok(Math.abs(filled.table - 600) <= 1, `expected table to fill the 600px wrapper, got ${filled.table}px`);
+  assert.ok(filled.name > 160, `expected the name column to stretch beyond its 160px default, got ${filled.name}px`);
+
+  // Dragging maps 1:1 to rendered pixels even while the table is stretched.
+  const handle = page.locator('[data-column-key="name"] .column-resize-handle');
+  const box = await handle.boundingBox();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2 + 50, box.y + box.height / 2);
+  await page.mouse.up();
+  const dragged = await table.evaluate(node => ({
+    table: Math.round(node.getBoundingClientRect().width),
+    name: Math.round(node.querySelector('[data-column-key="name"]').getBoundingClientRect().width),
+  }));
+  assert.ok(Math.abs(dragged.name - (filled.name + 50)) <= 1,
+    `expected drag to add exactly 50px (${filled.name} -> ${dragged.name})`);
+  assert.ok(dragged.table > 600, 'growing a column beyond the container should widen the table');
+
+  // Double-click resets the column to its default and clears the stored width.
+  await handle.dblclick();
+  const reset = await table.evaluate(node => ({
+    spec: node.querySelector('[data-column-key="name"]').style.width,
+    stored: JSON.parse(localStorage.getItem('sentinel.table-widths.v1') || '{}')['wide-records'] || {},
+  }));
+  assert.equal(reset.spec, '160px');
+  assert.equal('name' in reset.stored, false);
+
+  // Shrinking columns below the container keeps the table filled instead of leaving a gap.
+  const shrinkBox = await handle.boundingBox();
+  await page.mouse.move(shrinkBox.x + shrinkBox.width / 2, shrinkBox.y + shrinkBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(shrinkBox.x - 40, shrinkBox.y + shrinkBox.height / 2);
+  await page.mouse.up();
+  const shrunk = await table.evaluate(node => Math.round(node.getBoundingClientRect().width));
+  assert.ok(Math.abs(shrunk - 600) <= 1, `expected the table to keep filling the wrapper after shrinking, got ${shrunk}px`);
 });
 
 test('all primary lists and anomaly detail tables opt into the shared resizer', async t => {

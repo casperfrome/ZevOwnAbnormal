@@ -36,6 +36,70 @@ def test_client_error_identifies_failing_endpoint():
         client._call("GET", "/projects")
 
 
+def test_authenticated_call_relogs_and_replays_once_after_session_401():
+    calls = []
+
+    def handler(request):
+        calls.append((request.method, request.url.path))
+        if len(calls) == 1:
+            return httpx.Response(401)
+        if request.url.path.endswith("/login"):
+            return httpx.Response(200, json={"code": 0, "data": {"sessionId": "fresh"}})
+        return httpx.Response(200, json={"code": 0, "data": {"totalList": []}})
+
+    client = DolphinSchedulerClient(
+        Settings(_env_file=None), transport=httpx.MockTransport(handler),
+    )
+
+    assert client._call("GET", "/projects") == {"totalList": []}
+    assert calls == [
+        ("GET", "/dolphinscheduler/projects"),
+        ("POST", "/dolphinscheduler/login"),
+        ("GET", "/dolphinscheduler/projects"),
+    ]
+
+
+def test_authenticated_call_does_not_loop_when_replay_is_still_401():
+    calls = []
+
+    def handler(request):
+        calls.append((request.method, request.url.path))
+        if request.url.path.endswith("/login"):
+            return httpx.Response(200, json={"code": 0, "data": {"sessionId": "fresh"}})
+        return httpx.Response(401)
+
+    client = DolphinSchedulerClient(
+        Settings(_env_file=None), transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(httpx.HTTPStatusError):
+        client._call("GET", "/projects")
+    assert calls == [
+        ("GET", "/dolphinscheduler/projects"),
+        ("POST", "/dolphinscheduler/login"),
+        ("GET", "/dolphinscheduler/projects"),
+    ]
+
+
+def test_authenticated_call_does_not_recurse_when_relogin_fails():
+    calls = []
+
+    def handler(request):
+        calls.append((request.method, request.url.path))
+        return httpx.Response(401)
+
+    client = DolphinSchedulerClient(
+        Settings(_env_file=None), transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(httpx.HTTPStatusError):
+        client._call("GET", "/projects")
+    assert calls == [
+        ("GET", "/dolphinscheduler/projects"),
+        ("POST", "/dolphinscheduler/login"),
+    ]
+
+
 def test_existing_online_workflow_is_released_offline_before_update():
     client = DolphinSchedulerClient(Settings())
     calls = []

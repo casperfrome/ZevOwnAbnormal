@@ -129,3 +129,48 @@ def test_rule_delivery_uses_shared_configured_sender(monkeypatch):
     assert calls[0][:4] == ("cli", "secret", "open_id", "ou_owner")
     assert calls[0][5].__class__ is DirectClient
     assert calls[0][6] == delivery.id
+
+
+def test_custom_private_template_sends_an_interactive_card_with_the_delivery_idempotency_key(monkeypatch):
+    """Falling back to text or dropping the rendered record link must fail this delivery test."""
+    session, rule = build_session()
+    rule.private_message_template = "异常记录：{store_id}\nGMV：{gmv}\n[查看明细]({异常记录链接})"
+    session.commit()
+    match = EvaluationMatch(
+        row={"store_id": "S1", "gmv": 500},
+        business_key={"store_id": "S1"},
+        matched_conditions=[],
+    )
+    persist_matches(session, rule, [match])
+    delivery = session.scalar(select(NotificationDelivery))
+    cards = []
+
+    class CardClient:
+        def __init__(self, *_, **__): pass
+        def send_interactive(self, receive_id_type, recipient, card, *, idempotency_key=None):
+            cards.append((receive_id_type, recipient, card, idempotency_key))
+            return "om_card"
+        def close(self): pass
+
+    monkeypatch.setattr("app.execution_service.FeishuClient", CardClient)
+
+    failures = deliver_notifications(
+        session,
+        Settings(
+            _env_file=None,
+            feishu_app_id="cli",
+            feishu_app_secret="secret",
+            sentinel_public_base_url="https://sentinel.example/base/",
+        ),
+        rule_id=rule.id,
+    )
+
+    assert failures == 0
+    assert delivery.message_id == "om_card"
+    assert cards[0][0:2] == ("open_id", "ou_owner")
+    assert cards[0][3] == delivery.id
+    markdown = cards[0][2]["body"]["elements"][0]["content"]
+    assert markdown == (
+        f"异常记录：S1\nGMV：500\n"
+        f"[查看明细](https://sentinel.example/base/#records/{delivery.anomaly_id})"
+    )

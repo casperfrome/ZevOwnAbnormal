@@ -48,3 +48,6 @@ tmp/
 
 # Standalone local StarRocks temperature manager (intentionally untracked)
 /intransit-temperature-admin/
+
+# Local-only manual Feishu anomaly push utility (contains a webhook credential)
+/backend/scripts/manual_feishu_anomaly_group_push.py

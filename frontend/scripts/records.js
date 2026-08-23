@@ -13,14 +13,62 @@ window.RecordsModule = (function () {
 
   function renderActions(actionsEl) {
     const canAbort = typeof Store.isSuperuser === 'function' && Store.isSuperuser();
+    actionsEl.classList.add('record-actions');
     actionsEl.innerHTML = `
+      ${canAbort ? `<button class="btn btn-secondary btn-sm" id="rec-recover-push">${Icon.refresh({ size: 14 })}<span>恢复失败推送</span></button>` : ''}
       ${canAbort ? `<button class="btn btn-danger-ghost btn-sm" id="rec-abort-push">${Icon.pause({ size: 14 })}<span>中止推送</span></button>` : ''}
       <button class="btn btn-secondary btn-sm" id="rec-export">${Icon.download({ size: 14 })}<span>导出</span></button>
       <button class="btn btn-secondary btn-sm" id="rec-refresh">${Icon.refresh({ size: 14 })}<span>刷新</span></button>
     `;
+    actionsEl.querySelector('#rec-recover-push')?.addEventListener('click', recoverPushes);
     actionsEl.querySelector('#rec-abort-push')?.addEventListener('click', abortPushes);
     actionsEl.querySelector('#rec-export').addEventListener('click', exportRecords);
     actionsEl.querySelector('#rec-refresh').addEventListener('click', async () => { try { await Store.refresh(); UI.toast({ type: 'info', title: '已刷新' }); renderList(); renderStats(); renderTabs(); } catch (error) { UI.toast({ type: 'error', title: '刷新失败', desc: error.message }); } });
+  }
+
+  async function recoverPushes() {
+    const button = document.getElementById('rec-recover-push');
+    if (!button || button.disabled) return;
+    const confirmed = await UI.confirm({
+      title: '恢复所有失败推送？',
+      desc: '将先检查 Kafka 与 DolphinScheduler，只恢复可安全重试的失败任务；发送中、结果未知、已发送和已中止任务不会重发。',
+      confirmText: '检查并恢复',
+    });
+    if (!confirmed) return;
+    const original = button.innerHTML;
+    button.disabled = true;
+    button.innerHTML = '<span class="btn-spinner"></span><span>正在恢复…</span>';
+    try {
+      const result = await Store.recoverAnomalyPushes();
+      const kinds = result.requeued_by_kind || {};
+      UI.toast({
+        type: 'success',
+        title: '失败推送已恢复',
+        desc: `${result.requeued_jobs} 条已重排 · 通知 ${kinds.notification || 0} · 校验 ${kinds.validation || 0} · 群播 ${kinds.group_broadcast || 0} · 跳过 ${result.skipped_jobs || 0}`,
+      });
+      try {
+        await Store.refresh();
+        renderList();
+        renderStats();
+        renderTabs();
+      } catch (refreshError) {
+        UI.toast({
+          type: 'warning',
+          title: '推送已恢复，页面刷新失败',
+          desc: refreshError.message,
+        });
+      }
+    } catch (error) {
+      const stages = (error.payload?.errors || []).map(item => item.stage).join('、');
+      UI.toast({
+        type: 'error',
+        title: '失败推送恢复失败',
+        desc: stages ? `依赖检查失败：${stages}` : error.message,
+      });
+    } finally {
+      button.disabled = false;
+      button.innerHTML = original;
+    }
   }
 
   async function abortPushes() {
@@ -414,7 +462,7 @@ window.RecordsModule = (function () {
               <th class="sortable" data-sort="severity" data-column-key="severity" data-default-width="100"><span class="th-sort">严重程度 ${sortIcon('severity')}</span></th>
               <th data-column-key="rule" data-default-width="180">触发规则</th>
               <th data-column-key="field-value" data-default-width="200">异常字段 / 值</th>
-              <th data-column-key="status" data-default-width="90">状态</th>
+              <th data-column-key="status" data-default-width="112">状态</th>
               <th class="sortable" data-sort="occurredAt" data-column-key="occurred-at" data-default-width="170"><span class="th-sort">发生时间 ${sortIcon('occurredAt')}</span></th>
               <th data-column-key="assignee" data-default-width="90">处理人</th>
               <th data-column-key="actions" data-min-width="110" data-default-width="110" style="text-align:right;">操作</th>
@@ -686,6 +734,28 @@ window.RecordsModule = (function () {
                   <pre class="validation-submission-text">${escapeHtml(r.validationSubmission.submittedText)}</pre>
                 `}
               </div>` : ''}
+          </div>
+        </div>
+
+        <div class="section push-diagnostics" style="box-shadow:none;border:1px solid var(--color-line);margin-top:var(--space-4);">
+          <div class="section-header" style="padding: var(--space-4) var(--space-5);">
+            <div><div class="section-title">${Icon.activity({ size: 14 })} 推送任务诊断</div></div>
+          </div>
+          <div class="section-body">
+            ${(r.pushJobs || []).length ? `
+              <div class="results-wrap">
+                <table class="results-table" data-table-id="record-push-jobs">
+                  <thead><tr><th data-column-key="kind" data-default-width="110">类型</th><th data-column-key="status" data-default-width="110">状态</th><th data-column-key="attempts" data-default-width="130">发布 / 调度</th><th data-column-key="next-attempt" data-default-width="180">下次重试</th><th data-column-key="updated" data-default-width="180">更新时间</th><th data-column-key="error" data-default-width="320">最后错误</th></tr></thead>
+                  <tbody>${r.pushJobs.map(job => `<tr>
+                    <td>${escapeHtml(({ notification: '通知', validation: '实时校验', group_broadcast: '群播' })[job.kind] || job.kind)}</td>
+                    <td>${escapeHtml(job.status)}</td>
+                    <td>${job.publishAttempts} / ${job.dispatchAttempts}</td>
+                    <td class="text-mono">${escapeHtml(formatTime(job.nextAttemptAt))}</td>
+                    <td class="text-mono">${escapeHtml(formatTime(job.updatedAt))}</td>
+                    <td>${escapeHtml(job.lastError || '—')}</td>
+                  </tr>`).join('')}</tbody>
+                </table>
+              </div>` : '<div class="text-muted">当前异常没有持久推送任务</div>'}
           </div>
         </div>
 

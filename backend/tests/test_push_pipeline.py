@@ -22,6 +22,7 @@ from app.push_pipeline import (
     publish_pending_jobs,
     queue_due_notification_push_jobs,
     queue_due_validation_push_jobs,
+    recover_failed_push_jobs,
     requeue_stale_push_jobs,
 )
 from app.rule_engine import EvaluationMatch
@@ -274,6 +275,80 @@ def test_validation_dispatch_failure_waits_for_backoff_before_requeue(db_session
     db_session.commit()
     assert queue_due_validation_push_jobs(db_session) == 1
     assert job.status == "pending_publish"
+
+
+def test_manual_recovery_requeues_only_safe_current_generation_failures(db_session):
+    rule = _rule(db_session)
+    persist_matches(db_session, rule, [EvaluationMatch(
+        row={"store_id": "S1", "gmv": 500}, business_key={"store_id": "S1"},
+        matched_conditions=[],
+    )])
+    jobs = list(db_session.scalars(select(AnomalyPushJob).order_by(AnomalyPushJob.kind)))
+    notification = next(job for job in jobs if job.kind == "notification")
+    validation = next(job for job in jobs if job.kind == "validation")
+    notification.status = "failed"
+    notification.last_error = "401 Unauthorized"
+    notification.next_attempt_at = utcnow() - timedelta(seconds=1)
+    validation.status = "failed"
+    validation.last_error = "ambiguous send"
+    request = db_session.get(AnomalyValidationRequest, validation.delivery_id)
+    request.delivery_status = "uncertain"
+    db_session.commit()
+
+    summary = recover_failed_push_jobs(db_session)
+
+    assert summary == {
+        "requeued_jobs": 1,
+        "requeued_by_kind": {"notification": 1, "validation": 0, "group_broadcast": 0},
+        "skipped_jobs": 1,
+    }
+    assert notification.status == "pending_publish"
+    assert validation.status == "failed"
+
+
+def test_manual_recovery_respects_future_backoff(db_session):
+    rule = _rule(db_session)
+    rule.validation_enabled = False
+    persist_matches(db_session, rule, [EvaluationMatch(
+        row={"store_id": "S1", "gmv": 500}, business_key={"store_id": "S1"},
+        matched_conditions=[],
+    )])
+    job = db_session.scalar(select(AnomalyPushJob))
+    job.status = "failed"
+    job.next_attempt_at = utcnow() + timedelta(minutes=5)
+    db_session.commit()
+
+    summary = recover_failed_push_jobs(db_session)
+
+    assert summary["requeued_jobs"] == 0
+    assert summary["skipped_jobs"] == 1
+    assert job.status == "failed"
+
+
+def test_manual_recovery_skips_validation_for_resolved_anomaly(db_session):
+    rule = _rule(db_session)
+    persist_matches(db_session, rule, [EvaluationMatch(
+        row={"store_id": "S1", "gmv": 500}, business_key={"store_id": "S1"},
+        matched_conditions=[],
+    )])
+    job = db_session.scalar(select(AnomalyPushJob).where(
+        AnomalyPushJob.kind == "validation"
+    ))
+    anomaly = db_session.get(
+        __import__("app.models", fromlist=["AnomalyRecord"]).AnomalyRecord,
+        job.anomaly_id,
+    )
+    job.status = "failed"
+    job.next_attempt_at = utcnow() - timedelta(seconds=1)
+    anomaly.status = "resolved"
+    anomaly.active_fingerprint = None
+    db_session.commit()
+
+    summary = recover_failed_push_jobs(db_session)
+
+    assert summary["requeued_jobs"] == 0
+    assert summary["skipped_jobs"] == 1
+    assert job.status == "failed"
 
 
 def test_consumer_reconciles_already_delivered_job_without_starting_scheduler(db_session):

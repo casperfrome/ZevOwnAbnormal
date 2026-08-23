@@ -239,7 +239,7 @@ def queue_due_group_broadcast_push_jobs(
     deliveries = list(session.scalars(
         select(AnomalyGroupBroadcastDelivery)
         .where(
-            AnomalyGroupBroadcastDelivery.status == "failed",
+            AnomalyGroupBroadcastDelivery.status.in_(["pending", "failed"]),
             AnomalyGroupBroadcastDelivery.attempts < MAX_GROUP_BROADCAST_DELIVERY_ATTEMPTS,
         )
         .order_by(AnomalyGroupBroadcastDelivery.updated_at, AnomalyGroupBroadcastDelivery.id)
@@ -270,6 +270,80 @@ def queue_due_group_broadcast_push_jobs(
             queued += 1
     session.commit()
     return queued
+
+
+def recover_failed_push_jobs(
+    session: Session,
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    scan_time = now or utcnow()
+    pipeline = session.get(AnomalyPushPipelineState, 1)
+    failed_jobs = list(session.scalars(
+        select(AnomalyPushJob)
+        .where(AnomalyPushJob.status == "failed")
+        .order_by(AnomalyPushJob.updated_at, AnomalyPushJob.id)
+        .with_for_update()
+    ))
+    counts = {"notification": 0, "validation": 0, "group_broadcast": 0}
+    if pipeline is None or pipeline.abort_in_progress:
+        session.commit()
+        return {
+            "requeued_jobs": 0,
+            "requeued_by_kind": counts,
+            "skipped_jobs": len(failed_jobs),
+        }
+
+    for job in failed_jobs:
+        if (
+            job.generation != pipeline.generation
+            or job.cancel_requested
+            or (job.next_attempt_at is not None and job.next_attempt_at > scan_time)
+        ):
+            continue
+        retryable = False
+        if job.kind == "notification":
+            delivery = session.get(NotificationDelivery, job.delivery_id)
+            anomaly = session.get(AnomalyRecord, job.anomaly_id) if job.anomaly_id else None
+            retryable = bool(
+                delivery is not None
+                and delivery.status in {"pending", "failed"}
+                and delivery.attempts < MAX_NOTIFICATION_DELIVERY_ATTEMPTS
+                and anomaly is not None
+                and anomaly.status in {"pending", "processing"}
+            )
+        elif job.kind == "validation":
+            request = session.get(AnomalyValidationRequest, job.delivery_id)
+            anomaly = session.get(AnomalyRecord, job.anomaly_id) if job.anomaly_id else None
+            retryable = bool(
+                request is not None
+                and request.delivery_status in {"pending", "failed"}
+                and (request.next_attempt_at is None or request.next_attempt_at <= scan_time)
+                and anomaly is not None
+                and anomaly.status in {"pending", "processing", "timed_out"}
+            )
+        elif job.kind == "group_broadcast":
+            delivery = session.get(AnomalyGroupBroadcastDelivery, job.delivery_id)
+            retryable = bool(
+                delivery is not None
+                and delivery.status in {"pending", "failed"}
+                and delivery.attempts < MAX_GROUP_BROADCAST_DELIVERY_ATTEMPTS
+                and (delivery.next_attempt_at is None or delivery.next_attempt_at <= scan_time)
+            )
+        if not retryable:
+            continue
+        job.status = "pending_publish"
+        job.last_error = None
+        job.next_attempt_at = None
+        counts[job.kind] += 1
+
+    requeued = sum(counts.values())
+    session.commit()
+    return {
+        "requeued_jobs": requeued,
+        "requeued_by_kind": counts,
+        "skipped_jobs": len(failed_jobs) - requeued,
+    }
 
 
 def _unpack_message(message):
@@ -769,6 +843,13 @@ class ConfluentKafkaGateway:
             if "TOPIC_ALREADY_EXISTS" not in str(exc) and "already exists" not in str(exc).lower():
                 raise
 
+    def check_health(self) -> None:
+        with self._lock:
+            metadata = self.producer.list_topics(self.topic, timeout=10)
+            topic = metadata.topics.get(self.topic)
+            if topic is None or topic.error is not None:
+                raise RuntimeError(f"Kafka topic 不可用：{self.topic}")
+
     def publish(self, event: dict, key: str) -> tuple[int, int]:
         outcome: list[Any] = []
 
@@ -847,6 +928,10 @@ class DolphinPushScheduler:
     def start_push_job(self, job_id: str) -> None:
         with self._lock:
             self.client.start_push_job(job_id)
+
+    def recover(self) -> None:
+        with self._lock:
+            self.client.initialize_push_workflow()
 
     def clear_push_instances(self) -> tuple[int, int]:
         with self._lock:

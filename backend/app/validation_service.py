@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from .config import Settings
 from .feishu import FeishuClient, FeishuConfigurationError, FeishuDeliveryUncertainError, FeishuError
+from .message_templates import render_private_markdown
 from .models import (
     AnomalyEvent,
     AnomalyRecord,
@@ -101,6 +102,8 @@ def snapshot_validation(
         anomaly.validation_deadline = snapshot_time + timedelta(minutes=rule.validation_timeout_minutes)
         anomaly.validation_method_snapshot = rule.validation_method
         config_snapshot = deepcopy(rule.sql_validation_config or {})
+        if rule.private_message_template:
+            config_snapshot["private_message_template"] = rule.private_message_template
         if rule.validation_method == "sql":
             config_snapshot["datasource_id"] = rule.dataset.datasource_id
             config_snapshot["dataset_fields"] = [
@@ -147,14 +150,21 @@ def build_validation_card(anomaly: AnomalyRecord, public_base_url: str) -> dict:
         "resolved": "已解决",
     }
     state = state_names.get(anomaly.status, anomaly.status)
+    private_template = (anomaly.validation_config_snapshot or {}).get(
+        "private_message_template"
+    )
     facts = (
-        f"**异常描述：** {anomaly.description or '-'}\n"
-        f"**规则：** {anomaly.rule_name}\n"
-        f"**数据集：** {anomaly.dataset_name}\n"
-        f"**严重程度：** {anomaly.severity}\n"
-        f"**验证状态：** {state}\n"
-        f"**截止时间：** {_format_time(anomaly.validation_deadline)}\n"
-        f"[查看异常详情]({link})"
+        render_private_markdown(private_template, anomaly.row_details, link)
+        if private_template
+        else (
+            f"**异常描述：** {anomaly.description or '-'}\n"
+            f"**规则：** {anomaly.rule_name}\n"
+            f"**数据集：** {anomaly.dataset_name}\n"
+            f"**严重程度：** {anomaly.severity}\n"
+            f"**验证状态：** {state}\n"
+            f"**截止时间：** {_format_time(anomaly.validation_deadline)}\n"
+            f"[查看异常详情]({link})"
+        )
     )
     elements: list[dict] = [{"tag": "markdown", "content": facts}]
     if anomaly.status == "resolved":

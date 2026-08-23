@@ -51,6 +51,18 @@ window.UI = (function () {
     }
   };
 
+  const clearColumnWidth = (tableId, columnKey) => {
+    try {
+      const widths = readTableWidths();
+      if (!widths[tableId] || !(columnKey in widths[tableId])) return;
+      delete widths[tableId][columnKey];
+      if (!Object.keys(widths[tableId]).length) delete widths[tableId];
+      window.localStorage.setItem(TABLE_WIDTH_STORAGE_KEY, JSON.stringify(widths));
+    } catch (_) {
+      // Ignore storage failures; the in-memory width reset already took effect.
+    }
+  };
+
   const initResizableTable = (table) => {
     if (!table?.dataset?.tableId || table.dataset.resizableInitialized === 'true') return;
     const headers = [...(table.tHead?.rows?.[0]?.cells || [])];
@@ -60,14 +72,37 @@ window.UI = (function () {
     table.style.tableLayout = 'fixed';
     table.addEventListener('mouseover', event => {
       const cell = event.target.closest?.('tbody td');
-      if (!cell || !table.contains(cell) || cell.hasAttribute('title')) return;
-      if (cell.scrollWidth > cell.clientWidth) cell.title = cell.innerText.trim();
+      if (!cell || !table.contains(cell) || cell.hasAttribute('title') && cell.dataset.autoTitle !== '1') return;
+      if (cell.scrollWidth > cell.clientWidth) {
+        if (!cell.hasAttribute('title')) {
+          cell.title = cell.innerText.trim();
+          cell.dataset.autoTitle = '1';
+        }
+      } else if (cell.dataset.autoTitle === '1') {
+        cell.removeAttribute('title');
+        delete cell.dataset.autoTitle;
+      }
     });
     const stored = readTableWidths()[table.dataset.tableId] || {};
 
-    const updateTableWidth = () => {
+    // The table fills its container (CSS `width: 100%`) and only falls back to
+    // horizontal scrolling when the columns' combined minimum no longer fits.
+    const syncTableMinWidth = () => {
       const total = headers.reduce((sum, header) => sum + parseFloat(header.style.width || '0'), 0);
-      if (total > 0) table.style.width = `${Math.round(total)}px`;
+      table.style.width = '';
+      table.style.minWidth = total > 0 ? `${Math.round(total)}px` : '';
+    };
+
+    // When the container is wider than the column total the browser stretches
+    // columns proportionally, so rendered widths differ from the specified
+    // ones. Freezing the rendered widths before a drag keeps pointer deltas
+    // mapped 1:1 to visual changes.
+    const bakeRenderedWidths = () => {
+      // Measure every column first: writing widths one at a time would re-layout
+      // the table mid-loop and corrupt the remaining measurements.
+      const rendered = headers.map(header => Math.round(header.getBoundingClientRect().width));
+      headers.forEach((header, index) => { header.style.width = `${rendered[index]}px`; });
+      syncTableMinWidth();
     };
 
     headers.forEach((header, index) => {
@@ -87,13 +122,20 @@ window.UI = (function () {
       handle.setAttribute('role', 'separator');
       handle.setAttribute('aria-label', `调整${header.textContent.trim() || `第 ${index + 1} 列`}宽度`);
       handle.setAttribute('aria-orientation', 'vertical');
+      handle.title = '拖拽调整列宽 · 双击恢复默认';
       handle.tabIndex = 0;
       header.appendChild(handle);
 
       const applyWidth = width => {
         const nextWidth = Math.max(minWidth, Math.round(width));
         header.style.width = `${nextWidth}px`;
-        updateTableWidth();
+        syncTableMinWidth();
+        return nextWidth;
+      };
+
+      const resetWidth = () => {
+        const nextWidth = applyWidth(Number(header.dataset.defaultWidth) || minWidth);
+        clearColumnWidth(table.dataset.tableId, columnKey);
         return nextWidth;
       };
 
@@ -101,10 +143,12 @@ window.UI = (function () {
         if (event.button !== 0) return;
         event.preventDefault();
         event.stopPropagation();
+        try { handle.setPointerCapture(event.pointerId); } catch (_) { /* capture is best-effort */ }
         const startX = event.clientX;
         const startWidth = header.getBoundingClientRect().width;
         document.body.classList.add('is-resizing-column');
         let currentWidth = startWidth;
+        let baked = false;
         let finished = false;
         const cleanup = () => {
           if (finished) return;
@@ -114,11 +158,12 @@ window.UI = (function () {
           document.removeEventListener('pointercancel', cleanup);
           window.removeEventListener('blur', cleanup);
           document.body.classList.remove('is-resizing-column');
-          saveColumnWidth(table.dataset.tableId, columnKey, currentWidth);
+          if (baked) saveColumnWidth(table.dataset.tableId, columnKey, currentWidth);
         };
         const onMove = moveEvent => {
           if (moveEvent.pointerId !== event.pointerId) return;
           if (!table.isConnected) { cleanup(); return; }
+          if (!baked) { bakeRenderedWidths(); baked = true; }
           currentWidth = applyWidth(startWidth + moveEvent.clientX - startX);
         };
         document.addEventListener('pointermove', onMove);
@@ -130,16 +175,22 @@ window.UI = (function () {
         event.preventDefault();
         event.stopPropagation();
       });
+      handle.addEventListener('dblclick', event => {
+        event.preventDefault();
+        event.stopPropagation();
+        resetWidth();
+      });
       handle.addEventListener('keydown', event => {
         if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
         event.preventDefault();
         event.stopPropagation();
+        bakeRenderedWidths();
         const direction = event.key === 'ArrowRight' ? 1 : -1;
         const width = applyWidth(header.getBoundingClientRect().width + direction * (event.shiftKey ? 24 : 8));
         saveColumnWidth(table.dataset.tableId, columnKey, width);
       });
     });
-    updateTableWidth();
+    syncTableMinWidth();
   };
 
   const initResizableTables = (root = document) => {

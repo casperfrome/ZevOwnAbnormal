@@ -261,14 +261,15 @@ window.RulesModule = (function () {
       schedule: { frequency: 'day', interval: 1, time: '09:00', start: '2026-08-09', end: '' },
       enabled: true,
       notify: { type: 'feishu', openIds: [], userIds: [], fieldSource: null, mode: 'manual' },
+      privateMessageTemplate: '',
       validationEnabled: false,
       validationTargets: [],
       validationTimeoutMinutes: 1440,
       validationMethod: 'pseudo',
       sqlValidationConfig: null,
-      groupBroadcast: { enabled: false, webhookUrl: '', mentionTargets: [] },
+      groupBroadcast: { enabled: false, webhookUrl: '', mentionTargets: [], messageTemplate: '' },
     };
-    const groupBroadcast = data.groupBroadcast || { enabled: false, webhookUrl: '', mentionTargets: [] };
+    const groupBroadcast = data.groupBroadcast || { enabled: false, webhookUrl: '', mentionTargets: [], messageTemplate: '' };
 
     const datasets = Store.getDatasets();
 
@@ -439,6 +440,21 @@ window.RulesModule = (function () {
               </select>
             `, { help: '使用数据集结果中的字段值作为通知对象 ID' })}
           </div>
+          <div class="message-template-editor" data-template-context="private">
+            <div class="message-template-heading">
+              <div>
+                <div class="cell-strong">私聊推送内容</div>
+                <div class="cell-muted">普通告警与实时验证卡片共用；留空时保持系统默认内容</div>
+              </div>
+              <div class="message-template-actions">
+                <button type="button" class="btn btn-secondary btn-sm" data-template-picker="parameter" data-template-context="private">插入参数</button>
+                <button type="button" class="btn btn-secondary btn-sm" data-template-picker="link" data-template-context="private">插入超链接</button>
+              </div>
+            </div>
+            <textarea class="textarea mono message-template-input" id="f-private-message-template" rows="5" placeholder="例如：异常记录：{车牌号}">${escapeHtml(data.privateMessageTemplate || '')}</textarea>
+            <div class="message-template-hint">字段参数按单条异常记录渲染；支持直接输入合法模板。</div>
+            <div class="field-error" id="f-private-template-error" style="display:none;">${Icon.alert({ size: 12 })}<span></span></div>
+          </div>
         </div>
 
         <div class="form-section group-broadcast-config">
@@ -472,6 +488,21 @@ window.RulesModule = (function () {
               </div>
             `, { optional: true, help: '可多选；每条异常从所选字段读取 user_id' })}
           </div>
+          <div class="message-template-editor" data-template-context="group">
+            <div class="message-template-heading">
+              <div>
+                <div class="cell-strong">群聊播报内容</div>
+                <div class="cell-muted">字段按当前消息分段聚合、去重，并以“、”连接</div>
+              </div>
+              <div class="message-template-actions">
+                <button type="button" class="btn btn-secondary btn-sm" data-template-picker="parameter" data-template-context="group">插入参数</button>
+                <button type="button" class="btn btn-secondary btn-sm" data-template-picker="link" data-template-context="group">插入超链接</button>
+              </div>
+            </div>
+            <textarea class="textarea mono message-template-input" id="f-group-message-template" rows="5" placeholder="例如：异常记录组：{车牌号列表}">${escapeHtml(groupBroadcast.messageTemplate || '')}</textarea>
+            <div class="message-template-hint">群聊仅支持“字段列表”参数；留空时使用系统默认播报。</div>
+            <div class="field-error" id="f-group-template-error" style="display:none;">${Icon.alert({ size: 12 })}<span></span></div>
+          </div>
           <div class="field-error" id="f-group-broadcast-error" style="display:none;">${Icon.alert({ size: 12 })}<span></span></div>
         </div>
       `,
@@ -500,6 +531,125 @@ window.RulesModule = (function () {
     let groupFields = (groupBroadcast.mentionTargets || []).filter(t => t.source === 'field').map(t => t.field);
     let validationMethod = data.validationMethod || 'pseudo';
     let sqlParameters = (data.sqlValidationConfig?.parameters || []).map(item => ({ ...item }));
+
+    const templateEditor = context => m.dialog.querySelector(
+      context === 'private' ? '#f-private-message-template' : '#f-group-message-template',
+    );
+
+    function insertTemplateValue(editor, value, selection) {
+      const start = selection?.start ?? editor.selectionStart ?? editor.value.length;
+      const end = selection?.end ?? editor.selectionEnd ?? start;
+      editor.setRangeText(value, start, end, 'end');
+      editor.dispatchEvent(new Event('input', { bubbles: true }));
+      editor.focus();
+    }
+
+    function openTemplatePicker(context, kind) {
+      const editor = templateEditor(context);
+      const selection = { start: editor.selectionStart, end: editor.selectionEnd };
+      const ds = Store.getDataset(m.dialog.querySelector('#f-dataset').value);
+      const fields = ds?.fields || [];
+      const values = kind === 'parameter'
+        ? fields.map(field => ({
+            value: `{${field.name}${context === 'group' ? '列表' : ''}}`,
+            title: context === 'group' ? `${field.name}列表` : field.name,
+            meta: field.type || '字段',
+          }))
+        : [{
+            value: context === 'group'
+              ? '[查看异常记录组明细]({异常记录组链接})'
+              : '[查看异常记录明细]({异常记录链接})',
+            title: context === 'group' ? '异常记录组链接' : '异常记录链接',
+            meta: '系统深链',
+          }];
+      const picker = UI.drawer({
+        title: kind === 'parameter' ? '插入数据集参数' : '插入超链接',
+        subtitle: context === 'group' ? '用于群聊播报内容' : '用于私聊推送内容',
+        body: `
+          <div class="template-picker-list">
+            ${values.length ? values.map(item => `
+              <button type="button" class="template-picker-option" data-template-value="${escapeHtml(item.value)}">
+                <span><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(item.meta)}</small></span>
+                <code>${escapeHtml(item.value)}</code>
+              </button>
+            `).join('') : '<div class="template-picker-empty">请先选择包含字段的数据集</div>'}
+          </div>
+          ${kind === 'link' ? `
+            <div class="template-custom-link">
+              <div class="form-section-title">自定义 HTTPS 链接</div>
+              <label class="field-label" for="template-link-label">显示文字</label>
+              <input class="input" id="template-link-label" value="查看相关说明" />
+              <label class="field-label" for="template-link-url">链接地址</label>
+              <input class="input mono" id="template-link-url" placeholder="https://example.com/path" />
+              <div class="field-error" id="template-link-error" style="display:none;">${Icon.alert({ size: 12 })}<span></span></div>
+              <button type="button" class="btn btn-accent" id="template-link-insert">插入自定义链接</button>
+            </div>
+          ` : ''}
+        `,
+      });
+      picker.body.querySelectorAll('.template-picker-option').forEach(option => {
+        option.addEventListener('click', () => {
+          insertTemplateValue(editor, option.dataset.templateValue, selection);
+          picker.close();
+        });
+      });
+      picker.body.querySelector('#template-link-insert')?.addEventListener('click', () => {
+        const label = picker.body.querySelector('#template-link-label').value.trim();
+        const url = picker.body.querySelector('#template-link-url').value.trim();
+        const error = picker.body.querySelector('#template-link-error');
+        let message = '';
+        try {
+          const parsed = new URL(url);
+          if (parsed.protocol !== 'https:' || parsed.username || parsed.password) message = '自定义链接必须使用绝对 HTTPS 地址';
+        } catch (_) { message = '请输入有效的 HTTPS 地址'; }
+        if (!label) message = '请填写链接显示文字';
+        error.querySelector('span').textContent = message;
+        error.style.display = message ? 'flex' : 'none';
+        if (message) return;
+        insertTemplateValue(editor, `[${label}](${url})`, selection);
+        picker.close();
+      });
+    }
+
+    m.dialog.querySelectorAll('[data-template-picker]').forEach(button => {
+      button.addEventListener('click', () => {
+        openTemplatePicker(button.dataset.templateContext, button.dataset.templatePicker);
+      });
+    });
+
+    function validateTemplateInput(template, fields, context) {
+      if (!template.trim()) return '';
+      const masked = template.replaceAll('{{', '').replaceAll('}}', '');
+      const fieldNames = new Set(fields.map(field => field.name));
+      const placeholders = [...masked.matchAll(/\{([^{}]+)\}/g)].map(match => match[1]);
+      for (const name of placeholders) {
+        if (name === '异常记录链接') {
+          if (context === 'group') return '群聊模板不支持异常记录链接';
+          continue;
+        }
+        if (name === '异常记录组链接') {
+          if (context === 'private') return '私聊模板不支持异常记录组链接';
+          continue;
+        }
+        if (name.endsWith('列表')) {
+          if (context === 'private') return '私聊模板不支持字段列表参数';
+          if (!fieldNames.has(name.slice(0, -2))) return `模板参数不存在：${name}`;
+          continue;
+        }
+        if (context === 'group' && fieldNames.has(name)) return '群聊模板仅支持字段列表参数';
+        if (!fieldNames.has(name)) return `模板参数不存在：${name}`;
+      }
+      if (/\[[^\]\r\n]+\]\(http:\/\//i.test(template)) return '自定义链接必须使用 HTTPS';
+      const placeholderLinks = [...template.matchAll(/\[[^\]\r\n]+\]\(\{([^{}]+)\}\)/g)];
+      const expectedLink = context === 'private' ? '异常记录链接' : '异常记录组链接';
+      if (placeholderLinks.some(match => match[1] !== expectedLink)) return '超链接目标仅支持系统深链参数';
+      const linkStarts = [...template.matchAll(/\[[^\]\r\n]+\]\(/g)].length;
+      const completeLinks = [...template.matchAll(/\[[^\]\r\n]+\]\((?:\{[^{}]+\}|https:\/\/[^)\s]+)\)/g)].length;
+      if (linkStarts !== completeLinks) return '超链接格式不完整或不是有效的 HTTPS 地址';
+      const withoutPlaceholders = masked.replace(/\{[^{}]+\}/g, '');
+      if (withoutPlaceholders.includes('{') || withoutPlaceholders.includes('}')) return '模板参数花括号不完整';
+      return '';
+    }
 
     const sqlPanel = m.dialog.querySelector('#f-sql-validation-panel');
     const pseudoPanel = m.dialog.querySelector('#f-pseudo-validation-panel');
@@ -934,6 +1084,31 @@ window.RulesModule = (function () {
       const anomalyKeyFields = keyFieldControl.values();
       if (!anomalyKeyFields.length) { UI.toast({ type: 'warning', title: '请至少选择一个异常主键字段' }); return; }
 
+      const privateMessageTemplate = m.dialog.querySelector('#f-private-message-template').value.trim();
+      const groupMessageTemplate = m.dialog.querySelector('#f-group-message-template').value.trim();
+      const templateFields = ds?.fields || [];
+      const templateChecks = [
+        {
+          message: validateTemplateInput(privateMessageTemplate, templateFields, 'private'),
+          error: m.dialog.querySelector('#f-private-template-error'),
+          section: m.dialog.querySelector('[data-template-context="private"].message-template-editor'),
+        },
+        {
+          message: validateTemplateInput(groupMessageTemplate, templateFields, 'group'),
+          error: m.dialog.querySelector('#f-group-template-error'),
+          section: m.dialog.querySelector('[data-template-context="group"].message-template-editor'),
+        },
+      ];
+      templateChecks.forEach(check => {
+        check.error.querySelector('span').textContent = check.message;
+        check.error.style.display = check.message ? 'flex' : 'none';
+      });
+      const invalidTemplate = templateChecks.find(check => check.message);
+      if (invalidTemplate) {
+        invalidTemplate.section.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        return;
+      }
+
       commitPendingTargets.forEach(commit => commit());
       const notificationTargets = [
         ...openIds.map(value => ({ receive_id_type: 'open_id', source: 'literal', value })),
@@ -1028,6 +1203,7 @@ window.RulesModule = (function () {
         conditions: validConditions,
         anomalyKeyFields,
         notificationTargets,
+        privateMessageTemplate: privateMessageTemplate || null,
         validationEnabled,
         validationTargets,
         validationTimeoutMinutes,
@@ -1037,6 +1213,7 @@ window.RulesModule = (function () {
           enabled: groupBroadcastEnabled,
           webhookUrl: groupWebhookUrl || null,
           mentionTargets: groupMentionTargets,
+          messageTemplate: groupMessageTemplate || null,
         },
         logic,
         schedule: {

@@ -300,6 +300,9 @@ def test_sql_snapshot_is_immutable_and_card_only_exposes_processed_action():
         rule.validation_enabled = True
         rule.validation_targets = [{"source": "literal", "value": "user-1"}]
         rule.validation_method = "sql"
+        rule.private_message_template = (
+            "异常记录：{store_id}\nGMV：{gmv}\n[查看明细]({异常记录链接})"
+        )
         rule.sql_validation_config = {
             "query_template": "SELECT status FROM repair_state WHERE store_id='{门店ID}'",
             "parameters": [{"name": "门店ID", "field": "store_id"}],
@@ -307,6 +310,7 @@ def test_sql_snapshot_is_immutable_and_card_only_exposes_processed_action():
         }
         anomaly = make_anomaly(rule)
         anomaly.row_details["store_id"] = "S1"
+        anomaly.row_details["gmv"] = 500
         session.add(anomaly)
         session.flush()
 
@@ -326,6 +330,10 @@ def test_sql_snapshot_is_immutable_and_card_only_exposes_processed_action():
         assert anomaly.validation_config_snapshot["query_template"] == original_query
         assert anomaly.validation_config_snapshot["datasource_id"] == rule.dataset.datasource_id
         assert anomaly.validation_config_snapshot["dataset_fields"] == []
+        assert anomaly.validation_config_snapshot["private_message_template"] == rule.private_message_template
+        assert "异常记录：S1" in card_text
+        assert "GMV：500" in card_text
+        assert f"https://sentinel.example/#records/{anomaly.id}" in card_text
         assert "validation_text" not in card_text
         assert button["text"]["content"] == "已处理"
         assert button["behaviors"] == [{

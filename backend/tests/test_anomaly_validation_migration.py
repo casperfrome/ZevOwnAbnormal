@@ -39,6 +39,9 @@ ANOMALY_GROUP_MIGRATION_PATH = MIGRATION_PATH.with_name(
 PLAINTEXT_WEBHOOK_MIGRATION_PATH = MIGRATION_PATH.with_name(
     "20260823_0010_plaintext_group_webhooks.py"
 )
+MESSAGE_TEMPLATE_MIGRATION_PATH = MIGRATION_PATH.with_name(
+    "20260823_0011_message_templates.py"
+)
 
 
 def load_migration():
@@ -119,6 +122,43 @@ def load_plaintext_webhook_migration():
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
+
+
+def load_message_template_migration():
+    spec = importlib.util.spec_from_file_location(
+        "message_templates_0011", MESSAGE_TEMPLATE_MIGRATION_PATH,
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_message_template_migration_adds_nullable_columns_without_backfilling_legacy_rules():
+    """Making templates non-null or rewriting existing rules must fail this compatibility test."""
+    migration = load_message_template_migration()
+    engine = sa.create_engine("sqlite+pysqlite:///:memory:")
+    metadata = sa.MetaData()
+    rules = sa.Table(
+        "rules", metadata,
+        sa.Column("id", sa.String(36), primary_key=True),
+        sa.Column("name", sa.String(150), nullable=False),
+    )
+    metadata.create_all(engine)
+
+    with engine.begin() as connection:
+        connection.execute(rules.insert().values(id="legacy", name="旧规则"))
+        migration.op = Operations(MigrationContext.configure(connection))
+        migration.upgrade()
+        row = connection.execute(sa.text(
+            "SELECT private_message_template, group_message_template FROM rules WHERE id='legacy'"
+        )).one()
+        columns = {item["name"]: item for item in sa.inspect(connection).get_columns("rules")}
+
+    assert row == (None, None)
+    assert columns["private_message_template"]["nullable"] is True
+    assert columns["group_message_template"]["nullable"] is True
+    engine.dispose()
 
 
 def test_initial_migration_is_a_frozen_pre_validation_schema():
