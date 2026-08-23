@@ -378,8 +378,44 @@ def test_callback_failures_return_generic_error_response_without_breaking_future
     for response in (first, second):
         assert response.toast.type == "error"
         assert response.toast.content == "处理验证请求失败，请稍后重试"
-        assert response.card.type == "raw"
-        assert response.card.data["header"]["template"] == "red"
+        assert response.card is None
+
+
+def test_sdk_dispatcher_omits_card_when_gateway_failure_must_preserve_retry_button():
+    callback_gateway = configured_gateway(RecordingPost(error=OSError("connection refused")))
+    handler = (
+        lark.EventDispatcherHandler.builder("", "")
+        .register_p2_card_action_trigger(callback_gateway.handle)
+        .build()
+    )
+    request = lark.RawRequest()
+    request.uri = "/callback"
+    request.body = json.dumps({
+        "schema": "2.0",
+        "header": {"event_type": "card.action.trigger", "token": ""},
+        "event": {
+            "operator": {
+                "tenant_key": "tenant-1", "user_id": "user-42",
+                "open_id": "open-42", "union_id": "union-42",
+            },
+            "token": "event-token",
+            "action": {
+                "tag": "button", "name": "run_sql_validation",
+                "value": {"action": "run_sql_validation", "anomaly_id": "anomaly-9"},
+            },
+            "host": "im_message",
+            "delivery_type": "card",
+            "context": {"open_message_id": "om_987", "open_chat_id": "oc_987"},
+        },
+    }).encode()
+
+    response = handler.do(request)
+    callback_gateway.close()
+
+    assert response.status_code == 200
+    assert json.loads(response.content) == {
+        "toast": {"type": "error", "content": "处理验证请求失败，请稍后重试"},
+    }
 
 
 @pytest.mark.parametrize(

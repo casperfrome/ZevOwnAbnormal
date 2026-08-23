@@ -111,18 +111,6 @@ def normalize_card_action(event: P2CardActionTrigger) -> dict[str, str]:
 def _error_response() -> P2CardActionTriggerResponse:
     return P2CardActionTriggerResponse({
         "toast": {"type": "error", "content": ERROR_TOAST},
-        "card": {
-            "type": "raw",
-            "data": {
-                "schema": "2.0",
-                "config": {"update_multi": True},
-                "header": {
-                    "title": {"tag": "plain_text", "content": "验证请求失败"},
-                    "template": "red",
-                },
-                "body": {"elements": [{"tag": "markdown", "content": "请稍后重试。"}]},
-            },
-        },
     })
 
 
