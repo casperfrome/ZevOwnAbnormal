@@ -24,39 +24,86 @@ def _replace_columns(*, source: str, target: str, decrypt: bool) -> None:
         ("rules", "id", "group_" + source, "group_" + target, True),
         ("anomaly_group_broadcast_deliveries", "id", source, target, False),
     )
-    converted_by_table = []
+    migration_plans = []
     for table, key_column, source_column, target_column, nullable in targets:
-        rows = bind.execute(sa.text(
-            f"SELECT {key_column}, {source_column} FROM {table} "
-            f"WHERE {source_column} IS NOT NULL"
-        )).all()
+        columns = {
+            column["name"]: column
+            for column in sa.inspect(bind).get_columns(table)
+        }
+        source_exists = source_column in columns
+        target_exists = target_column in columns
+        if not source_exists and not target_exists:
+            raise RuntimeError(
+                f"{table} 缺少 webhook 源字段 {source_column} 和目标字段 {target_column}"
+            )
+
+        target_missing = f"{target_column} IS NULL" if target_exists else "1 = 1"
+        rows = []
+        if source_exists:
+            rows = bind.execute(sa.text(
+                f"SELECT {key_column}, {source_column} FROM {table} "
+                f"WHERE {source_column} IS NOT NULL AND {target_missing}"
+            )).all()
         converted_rows = [
             (row_id, cipher.decrypt(value) if decrypt else cipher.encrypt(value))
             for row_id, value in rows
         ]
-        converted_by_table.append(
-            (table, key_column, source_column, target_column, nullable, converted_rows)
+
+        if not nullable:
+            missing_required = bind.execute(sa.text(
+                f"SELECT COUNT(*) FROM {table} WHERE {target_missing}"
+                + (f" AND {source_column} IS NULL" if source_exists else "")
+            )).scalar_one()
+            if missing_required:
+                raise RuntimeError(
+                    f"{table}.{target_column} 有 {missing_required} 条记录无法从 {source_column} 补齐"
+                )
+
+        migration_plans.append(
+            {
+                "table": table,
+                "key_column": key_column,
+                "source_column": source_column,
+                "target_column": target_column,
+                "nullable": nullable,
+                "source_exists": source_exists,
+                "target_exists": target_exists,
+                "target_nullable": columns[target_column]["nullable"] if target_exists else True,
+                "rows": converted_rows,
+            }
         )
 
-    for table, key_column, source_column, target_column, nullable, rows in converted_by_table:
-        op.add_column(table, sa.Column(target_column, sa.Text(), nullable=True))
-        for row_id, converted in rows:
+    for plan in migration_plans:
+        table = plan["table"]
+        target_column = plan["target_column"]
+        if not plan["target_exists"]:
+            op.add_column(table, sa.Column(target_column, sa.Text(), nullable=True))
+        for row_id, converted in plan["rows"]:
             bind.execute(
                 sa.text(
                     f"UPDATE {table} SET {target_column} = :value "
-                    f"WHERE {key_column} = :row_id"
+                    f"WHERE {plan['key_column']} = :row_id"
                 ),
                 {"value": converted, "row_id": row_id},
             )
+
+        needs_not_null = not plan["nullable"] and plan["target_nullable"]
         if bind.dialect.name == "sqlite":
-            with op.batch_alter_table(table) as batch_op:
-                if not nullable:
-                    batch_op.alter_column(target_column, existing_type=sa.Text(), nullable=False)
-                batch_op.drop_column(source_column)
+            if needs_not_null or plan["source_exists"]:
+                with op.batch_alter_table(table) as batch_op:
+                    if needs_not_null:
+                        batch_op.alter_column(
+                            target_column, existing_type=sa.Text(), nullable=False,
+                        )
+                    if plan["source_exists"]:
+                        batch_op.drop_column(plan["source_column"])
         else:
-            if not nullable:
-                op.alter_column(target_column, existing_type=sa.Text(), nullable=False)
-            op.drop_column(table, source_column)
+            if needs_not_null:
+                op.alter_column(
+                    table, target_column, existing_type=sa.Text(), nullable=False,
+                )
+            if plan["source_exists"]:
+                op.drop_column(table, plan["source_column"])
 
 
 def upgrade():
