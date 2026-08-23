@@ -87,7 +87,7 @@ def normalize_card_action(event: P2CardActionTrigger) -> dict[str, str]:
 
     operator_user_id = data.operator.user_id or data.operator.open_id
     action_value = _mapping(data.action.value)
-    form_value = _mapping(data.action.form_value)
+    form_value = {} if data.action.form_value is None else _mapping(data.action.form_value)
     action_name = data.action.name
     validation_text = form_value.get("validation_text")
     if validation_text is None and isinstance(action_name, str):
@@ -156,6 +156,22 @@ def _validate_raw_card(card: dict[str, Any]) -> None:
         raise CallbackPayloadError("invalid card body elements")
 
 
+def _log_callback_failure(
+    phase: str,
+    error_type: str,
+    *,
+    http_status: int | None = None,
+) -> None:
+    metadata: dict[str, object] = {
+        "event": "feishu_card_callback_failed",
+        "phase": phase,
+        "error_type": error_type,
+    }
+    if http_status is not None:
+        metadata["http_status"] = http_status
+    logger.warning("feishu_card_callback_failed", extra=metadata)
+
+
 class CardActionGateway:
     """Handle one card action without allowing transport failures to escape."""
 
@@ -169,20 +185,30 @@ class CardActionGateway:
     def handle(self, event: P2CardActionTrigger) -> P2CardActionTriggerResponse:
         try:
             payload = normalize_card_action(event)
+        except Exception as exc:
+            _log_callback_failure("normalize", type(exc).__name__)
+            return _error_response()
+
+        try:
             response = self._client.post(
                 f"{self._settings.api_base_url}/api/internal/feishu/card-actions",
                 headers={"X-Internal-Token": self._settings.internal_token},
                 json=payload,
             )
-            if not 200 <= response.status_code < 300:
-                return _error_response()
+        except Exception as exc:
+            _log_callback_failure("internal_api", type(exc).__name__)
+            return _error_response()
+
+        if not 200 <= response.status_code < 300:
+            _log_callback_failure(
+                "internal_api",
+                "HTTPStatusError",
+                http_status=response.status_code,
+            )
+            return _error_response()
+
+        try:
             return _map_api_response(response.json())
         except Exception as exc:
-            logger.warning(
-                "feishu_card_callback_failed",
-                extra={
-                    "event": "feishu_card_callback_failed",
-                    "error_type": type(exc).__name__,
-                },
-            )
+            _log_callback_failure("response_mapping", type(exc).__name__)
             return _error_response()

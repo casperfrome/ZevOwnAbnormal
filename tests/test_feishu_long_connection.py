@@ -29,6 +29,8 @@ VALID_CARD = {
     "body": {"elements": [{"tag": "markdown", "content": "验证已提交"}]},
 }
 
+FORM_VALUE_UNSET = object()
+
 
 @pytest.fixture(autouse=True)
 def restore_internal_token_environment():
@@ -43,7 +45,7 @@ def restore_internal_token_environment():
 
 
 def complete_event(
-    *, user_id="user-42", open_id="open-42", form_value=None,
+    *, user_id="user-42", open_id="open-42", form_value=FORM_VALUE_UNSET,
     action_name="validation_form", action_value=None,
 ):
     """Build the same complete shape the SDK supplies to callback handlers."""
@@ -60,7 +62,10 @@ def complete_event(
                 "tag": "button",
                 "name": action_name,
                 "value": action_value or {"action": "submit_validation", "anomaly_id": "anomaly-9"},
-                "form_value": form_value or {"validation_form": {"validation_text": "  looks good  "}},
+                "form_value": (
+                    {"validation_form": {"validation_text": "  looks good  "}}
+                    if form_value is FORM_VALUE_UNSET else form_value
+                ),
                 "input_value": None,
                 "options": None,
                 "checked": None,
@@ -75,6 +80,12 @@ def complete_event(
             },
         },
     })
+
+
+def event_with_non_mapping_form_value():
+    event = complete_event()
+    event.event.action.form_value = []
+    return event
 
 
 class FakeResponse:
@@ -286,9 +297,10 @@ def test_sql_card_button_round_trips_without_a_validation_text_form():
     configured_gateway(post).handle(complete_event(
         action_name=button["name"],
         action_value=callback["value"],
-        form_value={"unused": ""},
+        form_value=None,
     ))
 
+    assert len(post.calls) == 1
     forwarded = post.calls[0][1]["json"]
     assert forwarded["action"] == "run_sql_validation"
     assert forwarded["validation_text"] == ""
@@ -370,20 +382,54 @@ def test_callback_failures_return_generic_error_response_without_breaking_future
         assert response.card.data["header"]["template"] == "red"
 
 
-def test_callback_exception_logs_only_structured_non_sensitive_metadata(caplog):
-    post = RecordingPost(error=OSError(
-        "connection refused internal-token anomaly-9 looks-good payload"
-    ))
+@pytest.mark.parametrize(
+    ("event", "post", "expected_phase", "expected_error_type", "expected_status"),
+    [
+        (
+            event_with_non_mapping_form_value(),
+            RecordingPost(FakeResponse(200, {})),
+            "normalize",
+            "CallbackPayloadError",
+            None,
+        ),
+        (
+            complete_event(),
+            RecordingPost(error=OSError("connection refused internal-token anomaly-9 looks-good payload")),
+            "internal_api",
+            "OSError",
+            None,
+        ),
+        (
+            complete_event(),
+            RecordingPost(FakeResponse(503, {"detail": "internal-token anomaly-9 payload"})),
+            "internal_api",
+            "HTTPStatusError",
+            503,
+        ),
+        (
+            complete_event(),
+            RecordingPost(FakeResponse(200, {"toast": {"type": "success"}})),
+            "response_mapping",
+            "CallbackPayloadError",
+            None,
+        ),
+    ],
+)
+def test_callback_failures_log_safe_phase_metadata(
+    caplog, event, post, expected_phase, expected_error_type, expected_status,
+):
     caplog.set_level("WARNING", logger="feishu_callback_gateway")
 
-    configured_gateway(post).handle(complete_event())
+    configured_gateway(post).handle(event)
 
     records = [record for record in caplog.records if record.name == "feishu_callback_gateway"]
     assert len(records) == 1
     record = records[0]
     assert record.getMessage() == "feishu_card_callback_failed"
     assert record.event == "feishu_card_callback_failed"
-    assert record.error_type == "OSError"
+    assert record.phase == expected_phase
+    assert record.error_type == expected_error_type
+    assert getattr(record, "http_status", None) == expected_status
     assert record.exc_info is None
     serialized = " ".join(str(value) for value in record.__dict__.values())
     for secret in ("internal-token", "anomaly-9", "looks-good", "payload"):
