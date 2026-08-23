@@ -273,7 +273,7 @@ test('records expose timed-out filtering and render escaped validation audit det
   assert.deepEqual(pageErrors, []);
 });
 
-test('record list and SQL validation detail translate internal operators for ordinary users', async t => {
+test('record list and anomaly detail hide expected conditions while SQL audit keeps its translated condition', async t => {
   const record = {
     id: 'record-operator', ruleId: 'rule-1', ruleName: 'Temperature check',
     datasetName: 'Cold chain', severity: 'high', status: 'pending',
@@ -314,13 +314,16 @@ test('record list and SQL validation detail translate internal operators for ord
 
   await page.locator('#rec-table tbody tr').waitFor();
   const listText = await page.locator('#rec-table').innerText();
-  assert.match(listText, /大于等于（≥）/);
-  assert.doesNotMatch(listText, /\bgte\b/);
+  assert.doesNotMatch(listText, /预期|大于等于（≥）|\bgte\b/);
+  assert.match(listText, /2026-08-23 17:00:00/);
 
   await page.evaluate(() => RecordsModule.openDetail('record-operator'));
   const detailText = await page.locator('.drawer').innerText();
   assert.match(detailText, /等于（=） normal/);
-  assert.doesNotMatch(detailText, /\beq\b|\bgte\b/);
+  assert.doesNotMatch(detailText, /实际值 \/ 预期值|大于等于（≥）|\beq\b|\bgte\b/);
+  assert.equal(await page.locator('.section-title').evaluateAll(nodes => nodes.every(node => (
+    node.firstElementChild?.tagName.toLowerCase() === 'svg'
+  ))), true);
   assert.deepEqual(pageErrors, []);
 });
 

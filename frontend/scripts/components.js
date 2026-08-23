@@ -11,8 +11,157 @@ window.UI = (function () {
 
   const formatTime = (s) => {
     if (!s) return '—';
-    return s;
+    const value = String(s).trim();
+    if (!/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/.test(value)) return value;
+    const hasOffset = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(value);
+    const normalized = value.replace(' ', 'T') + (hasOffset ? '' : 'Z');
+    const date = new Date(normalized);
+    if (Number.isNaN(date.getTime())) return value;
+    const parts = new Intl.DateTimeFormat('zh-CN', {
+      timeZone: 'Asia/Shanghai',
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+      hourCycle: 'h23',
+    }).formatToParts(date).reduce((result, part) => {
+      result[part.type] = part.value;
+      return result;
+    }, {});
+    return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
   };
+
+  const TABLE_WIDTH_STORAGE_KEY = 'sentinel.table-widths.v1';
+  const DEFAULT_MIN_COLUMN_WIDTH = 72;
+
+  const readTableWidths = () => {
+    try {
+      const parsed = JSON.parse(window.localStorage.getItem(TABLE_WIDTH_STORAGE_KEY) || '{}');
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch (_) {
+      return {};
+    }
+  };
+
+  const saveColumnWidth = (tableId, columnKey, width) => {
+    try {
+      const widths = readTableWidths();
+      widths[tableId] = { ...(widths[tableId] || {}), [columnKey]: width };
+      window.localStorage.setItem(TABLE_WIDTH_STORAGE_KEY, JSON.stringify(widths));
+    } catch (_) {
+      // Storage can be unavailable for local files or privacy-restricted contexts.
+    }
+  };
+
+  const initResizableTable = (table) => {
+    if (!table?.dataset?.tableId || table.dataset.resizableInitialized === 'true') return;
+    const headers = [...(table.tHead?.rows?.[0]?.cells || [])];
+    if (!headers.length) return;
+    table.dataset.resizableInitialized = 'true';
+    table.classList.add('resizable-table');
+    table.style.tableLayout = 'fixed';
+    table.addEventListener('mouseover', event => {
+      const cell = event.target.closest?.('tbody td');
+      if (!cell || !table.contains(cell) || cell.hasAttribute('title')) return;
+      if (cell.scrollWidth > cell.clientWidth) cell.title = cell.innerText.trim();
+    });
+    const stored = readTableWidths()[table.dataset.tableId] || {};
+
+    const updateTableWidth = () => {
+      const total = headers.reduce((sum, header) => sum + parseFloat(header.style.width || '0'), 0);
+      if (total > 0) table.style.width = `${Math.round(total)}px`;
+    };
+
+    headers.forEach((header, index) => {
+      const columnKey = header.dataset.columnKey || `column-${index}`;
+      const minWidth = Math.max(40, Number(header.dataset.minWidth) || DEFAULT_MIN_COLUMN_WIDTH);
+      const measuredWidth = header.getBoundingClientRect().width || Number.parseFloat(header.style.width) || 120;
+      const initialWidth = Math.max(
+        minWidth,
+        Number(stored[columnKey]) || Number(header.dataset.defaultWidth) || measuredWidth,
+      );
+      header.dataset.columnKey = columnKey;
+      header.style.width = `${Math.round(initialWidth)}px`;
+      header.style.minWidth = `${minWidth}px`;
+
+      const handle = document.createElement('span');
+      handle.className = 'column-resize-handle';
+      handle.setAttribute('role', 'separator');
+      handle.setAttribute('aria-label', `调整${header.textContent.trim() || `第 ${index + 1} 列`}宽度`);
+      handle.setAttribute('aria-orientation', 'vertical');
+      handle.tabIndex = 0;
+      header.appendChild(handle);
+
+      const applyWidth = width => {
+        const nextWidth = Math.max(minWidth, Math.round(width));
+        header.style.width = `${nextWidth}px`;
+        updateTableWidth();
+        return nextWidth;
+      };
+
+      handle.addEventListener('pointerdown', event => {
+        if (event.button !== 0) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const startX = event.clientX;
+        const startWidth = header.getBoundingClientRect().width;
+        document.body.classList.add('is-resizing-column');
+        let currentWidth = startWidth;
+        let finished = false;
+        const cleanup = () => {
+          if (finished) return;
+          finished = true;
+          document.removeEventListener('pointermove', onMove);
+          document.removeEventListener('pointerup', cleanup);
+          document.removeEventListener('pointercancel', cleanup);
+          window.removeEventListener('blur', cleanup);
+          document.body.classList.remove('is-resizing-column');
+          saveColumnWidth(table.dataset.tableId, columnKey, currentWidth);
+        };
+        const onMove = moveEvent => {
+          if (moveEvent.pointerId !== event.pointerId) return;
+          if (!table.isConnected) { cleanup(); return; }
+          currentWidth = applyWidth(startWidth + moveEvent.clientX - startX);
+        };
+        document.addEventListener('pointermove', onMove);
+        document.addEventListener('pointerup', cleanup);
+        document.addEventListener('pointercancel', cleanup);
+        window.addEventListener('blur', cleanup);
+      });
+      handle.addEventListener('click', event => {
+        event.preventDefault();
+        event.stopPropagation();
+      });
+      handle.addEventListener('keydown', event => {
+        if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const direction = event.key === 'ArrowRight' ? 1 : -1;
+        const width = applyWidth(header.getBoundingClientRect().width + direction * (event.shiftKey ? 24 : 8));
+        saveColumnWidth(table.dataset.tableId, columnKey, width);
+      });
+    });
+    updateTableWidth();
+  };
+
+  const initResizableTables = (root = document) => {
+    const tables = [];
+    if (root?.matches?.('table[data-table-id]')) tables.push(root);
+    root?.querySelectorAll?.('table[data-table-id]').forEach(table => tables.push(table));
+    tables.forEach(initResizableTable);
+  };
+
+  if (typeof document !== 'undefined' && typeof MutationObserver !== 'undefined') {
+    const startTableObserver = () => {
+      initResizableTables(document);
+      const observer = new MutationObserver(mutations => mutations.forEach(mutation => {
+        mutation.addedNodes.forEach(node => {
+          if (node.nodeType === 1) initResizableTables(node);
+        });
+      }));
+      observer.observe(document.body, { childList: true, subtree: true });
+    };
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', startTableObserver, { once: true });
+    else startTableObserver();
+  }
 
   const OPERATOR_LABELS = {
     eq: '等于（=）',
@@ -302,7 +451,7 @@ window.UI = (function () {
   };
 
   return {
-    escapeHtml, formatNumber, formatTime, operatorLabel,
+    escapeHtml, formatNumber, formatTime, operatorLabel, initResizableTables,
     toast, modal, confirm, drawer,
     statusBadge, recordStatusBadge, severityBadge, severityMeter, dsTypeBadge,
     emptyState, loadingState, renderPagination,

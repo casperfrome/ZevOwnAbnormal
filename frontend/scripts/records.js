@@ -3,7 +3,7 @@
    Features: list, detail drawer, filtering, sorting, status update, export
    ============================================================ */
 window.RecordsModule = (function () {
-  const { escapeHtml, operatorLabel } = UI;
+  const { escapeHtml, formatTime, operatorLabel } = UI;
   let state = {
     search: '', statusFilter: 'all', pushStatusFilter: 'all', severityFilter: 'all', ruleFilter: 'all',
     sortKey: 'occurredAt', sortDir: 'desc', page: 1, pageSize: 10,
@@ -406,18 +406,18 @@ window.RecordsModule = (function () {
 
     tableEl.innerHTML = `
       <div class="table-wrap record-desktop-table">
-        <table class="data-table">
+        <table class="data-table" data-table-id="records-list">
           <thead>
             <tr>
-              <th style="width:36px;"><label class="checkbox"><input type="checkbox" id="rec-select-all" ${pageItems.length > 0 && pageItems.every(r => state.selected.has(r.id)) ? 'checked' : ''} /><span class="checkbox-box">${Icon.check({ size: 12 })}</span></label></th>
-              <th>异常</th>
-              <th class="sortable" data-sort="severity"><span class="th-sort">严重程度 ${sortIcon('severity')}</span></th>
-              <th>触发规则</th>
-              <th>异常字段 / 值</th>
-              <th>状态</th>
-              <th class="sortable" data-sort="occurredAt"><span class="th-sort">发生时间 ${sortIcon('occurredAt')}</span></th>
-              <th>处理人</th>
-              <th style="text-align:right;">操作</th>
+              <th data-column-key="selection" data-min-width="64" data-default-width="64" style="width:64px;"><label class="checkbox"><input type="checkbox" id="rec-select-all" ${pageItems.length > 0 && pageItems.every(r => state.selected.has(r.id)) ? 'checked' : ''} /><span class="checkbox-box">${Icon.check({ size: 12 })}</span></label></th>
+              <th data-column-key="anomaly" data-default-width="180">异常</th>
+              <th class="sortable" data-sort="severity" data-column-key="severity" data-default-width="100"><span class="th-sort">严重程度 ${sortIcon('severity')}</span></th>
+              <th data-column-key="rule" data-default-width="180">触发规则</th>
+              <th data-column-key="field-value" data-default-width="200">异常字段 / 值</th>
+              <th data-column-key="status" data-default-width="90">状态</th>
+              <th class="sortable" data-sort="occurredAt" data-column-key="occurred-at" data-default-width="170"><span class="th-sort">发生时间 ${sortIcon('occurredAt')}</span></th>
+              <th data-column-key="assignee" data-default-width="90">处理人</th>
+              <th data-column-key="actions" data-min-width="110" data-default-width="110" style="text-align:right;">操作</th>
             </tr>
           </thead>
           <tbody>
@@ -437,12 +437,11 @@ window.RecordsModule = (function () {
                 <td>
                   <div class="cell-strong">${escapeHtml(r.ruleName)}</div>
                 </td>
-                <td>
+                <td class="record-single-line" title="${escapeHtml(`${r.field} = ${formatValue(r.value)}`)}">
                   <div class="cell-mono" style="color:var(--color-danger);font-weight:600;">${escapeHtml(r.field)} = ${escapeHtml(formatValue(r.value))}</div>
-                  <div class="cell-muted">预期：${escapeHtml(operatorLabel(r.expected))}</div>
                 </td>
                 <td>${UI.recordStatusBadge(r.status)}</td>
-                <td class="cell-muted">${escapeHtml(r.occurredAt)}</td>
+                <td class="cell-muted record-single-line" title="${escapeHtml(formatTime(r.occurredAt))}">${escapeHtml(formatTime(r.occurredAt))}</td>
                 <td>${r.assignee ? `<span class="cell-strong">${escapeHtml(r.assignee)}</span>` : '<span class="cell-muted">未分配</span>'}</td>
                 <td>
                   <div class="cell-actions">
@@ -467,10 +466,9 @@ window.RecordsModule = (function () {
             <span class="record-mobile-value">
               <span>${escapeHtml(r.field)}</span>
               <strong>${escapeHtml(formatValue(r.value))}</strong>
-              <small>预期 ${escapeHtml(operatorLabel(r.expected))}</small>
             </span>
             <span class="record-mobile-foot">
-              <span>${Icon.clock({ size: 13 })}${escapeHtml(r.occurredAt)}</span>
+              <span>${Icon.clock({ size: 13 })}${escapeHtml(formatTime(r.occurredAt))}</span>
               <span>${Icon.user({ size: 13 })}${escapeHtml(r.assignee || '未分配')}</span>
               ${Icon.chevronRight({ size: 15 })}
             </span>
@@ -606,7 +604,7 @@ window.RecordsModule = (function () {
 
     const d = UI.drawer({
       title: `异常详情 · ${r.id}`,
-      subtitle: `${r.ruleName} · ${r.occurredAt}`,
+      subtitle: `${r.ruleName} · ${formatTime(r.occurredAt)}`,
       size: 'lg',
       body: `
         <div class="flex items-center gap-2 mb-4">
@@ -630,17 +628,17 @@ window.RecordsModule = (function () {
               <div class="detail-label">数据集</div>
               <div class="detail-value">${escapeHtml(r.datasetName)}</div>
               <div class="detail-label">发生时间</div>
-              <div class="detail-value text-mono">${escapeHtml(r.occurredAt)}</div>
+              <div class="detail-value text-mono">${escapeHtml(formatTime(r.occurredAt))}</div>
               <div class="detail-label">处理人</div>
               <div class="detail-value">${r.assignee ? escapeHtml(r.assignee) : '<span class="text-muted">未分配</span>'}</div>
               <div class="detail-label">异常描述</div>
               <div class="detail-value">${r.description ? escapeHtml(r.description) : '<span class="text-muted">—</span>'}</div>
               <div class="detail-label">校验截止时间</div>
-              <div class="detail-value text-mono">${escapeHtml(r.validationDeadline || '—')}</div>
+              <div class="detail-value text-mono">${escapeHtml(formatTime(r.validationDeadline))}</div>
               <div class="detail-label">校验方式</div>
               <div class="detail-value">${r.validationMethod === 'sql' ? 'SQL 校验' : r.validationMethod === 'pseudo' ? '伪校验' : '—'}</div>
               <div class="detail-label">超时时间</div>
-              <div class="detail-value text-mono">${escapeHtml(r.timedOutAt || '—')}</div>
+              <div class="detail-value text-mono">${escapeHtml(formatTime(r.timedOutAt))}</div>
               <div class="detail-label">解决来源</div>
               <div class="detail-value text-mono">${escapeHtml(r.resolutionSource || '—')}</div>
               <div class="detail-label">解决人 user_id</div>
@@ -657,13 +655,13 @@ window.RecordsModule = (function () {
             ${(r.validationRequests || []).length ? `
               <div class="eyebrow mb-2">请求投递与关闭状态</div>
               <div class="results-wrap validation-request-table">
-                <table class="results-table">
-                  <thead><tr><th>验证人 user_id</th><th>状态</th><th>尝试</th><th>送达时间</th><th>message_id / 错误</th></tr></thead>
+                <table class="results-table" data-table-id="record-validation-requests">
+                  <thead><tr><th data-column-key="recipient" data-default-width="180">验证人 user_id</th><th data-column-key="status" data-default-width="100">状态</th><th data-column-key="attempts" data-default-width="80">尝试</th><th data-column-key="delivered-at" data-default-width="180">送达时间</th><th data-column-key="message" data-default-width="240">message_id / 错误</th></tr></thead>
                   <tbody>${r.validationRequests.map(item => `<tr>
                     <td class="text-mono">${escapeHtml(item.recipientUserId)}</td>
                     <td>${escapeHtml(deliveryStatusLabel(item.deliveryStatus))}</td>
                     <td>${item.deliveryAttempts}</td>
-                    <td class="text-mono">${escapeHtml(item.deliveredAt || '—')}</td>
+                    <td class="text-mono">${escapeHtml(formatTime(item.deliveredAt))}</td>
                     <td>${escapeHtml(item.messageId || item.lastError || '—')}</td>
                   </tr>`).join('')}</tbody>
                 </table>
@@ -673,7 +671,7 @@ window.RecordsModule = (function () {
                 <div class="eyebrow">生效提交</div>
                 <div class="detail-grid">
                   <div class="detail-label">提交人 user_id</div><div class="detail-value text-mono">${escapeHtml(r.validationSubmission.submittedByUserId)}</div>
-                  <div class="detail-label">提交时间</div><div class="detail-value text-mono">${escapeHtml(r.validationSubmission.submittedAt)}</div>
+                  <div class="detail-label">提交时间</div><div class="detail-value text-mono">${escapeHtml(formatTime(r.validationSubmission.submittedAt))}</div>
                   <div class="detail-label">验证类型 / 结果</div><div class="detail-value text-mono">${escapeHtml(r.validationSubmission.validatorType)} / ${escapeHtml(r.validationSubmission.result)}</div>
                 </div>
                 ${r.validationSubmission.validatorType === 'sql' && r.validationSubmission.resultDetail ? `
@@ -703,14 +701,15 @@ window.RecordsModule = (function () {
               </div>
               <div class="diff-arrow">${Icon.arrowRight({ size: 14 })}</div>
               <div>
-                <div class="cell-muted" style="font-family:var(--font-body);font-size:11px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:4px;">实际值 / 预期值</div>
-                <div><span class="diff-value-actual">${escapeHtml(formatValue(r.value))}</span> <span class="cell-muted" style="margin:0 6px;">|</span> <span class="diff-value-expected">${escapeHtml(operatorLabel(r.expected))}</span></div>
+                <div class="cell-muted" style="font-family:var(--font-body);font-size:11px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:4px;">实际值</div>
+                <div><span class="diff-value-actual">${escapeHtml(formatValue(r.value))}</span></div>
               </div>
             </div>
             <div style="margin-top: var(--space-4);">
               <div class="eyebrow mb-2">完整数据明细</div>
               <div class="results-wrap">
-                <table class="results-table">
+                <table class="results-table" data-table-id="record-row-details">
+                  <thead><tr><th data-column-key="field" data-default-width="200">字段</th><th data-column-key="value" data-default-width="320">值</th></tr></thead>
                   <tbody>
                     ${Object.entries(r.details || {}).map(([k, v]) => `
                       <tr><td style="font-weight:600;color:var(--color-ink);">${escapeHtml(k)}</td><td>${escapeHtml(formatValue(v))}</td></tr>
@@ -733,12 +732,12 @@ window.RecordsModule = (function () {
               <div class="detail-label">累计命中</div>
               <div class="detail-value">${r.hitCount} 次</div>
               <div class="detail-label">最后检出</div>
-              <div class="detail-value text-mono">${escapeHtml(r.lastSeenAt || r.occurredAt)}</div>
+              <div class="detail-value text-mono">${escapeHtml(formatTime(r.lastSeenAt || r.occurredAt))}</div>
             </div>
             ${(r.deliveries || []).length ? `
               <div class="results-wrap">
-                <table class="results-table">
-                  <thead><tr><th>接收者类型</th><th>接收者</th><th>状态</th><th>尝试次数</th><th>飞书 message_id / 错误</th></tr></thead>
+                <table class="results-table" data-table-id="record-deliveries">
+                  <thead><tr><th data-column-key="recipient-type" data-default-width="140">接收者类型</th><th data-column-key="recipient" data-default-width="180">接收者</th><th data-column-key="status" data-default-width="100">状态</th><th data-column-key="attempts" data-default-width="100">尝试次数</th><th data-column-key="message" data-default-width="260">飞书 message_id / 错误</th></tr></thead>
                   <tbody>${r.deliveries.map(item => `<tr>
                     <td>${escapeHtml(item.receive_id_type)}</td>
                     <td class="text-mono">${escapeHtml(item.recipient)}</td>
@@ -759,7 +758,7 @@ window.RecordsModule = (function () {
             <div class="timeline">
               ${(r.timeline || []).map(t => `
                 <div class="timeline-item ${t.type === 'success' ? 'success' : t.type === 'danger' ? 'danger' : t.type === 'warning' ? 'warning' : ''}">
-                  <div class="timeline-time">${escapeHtml(t.time)}</div>
+                  <div class="timeline-time">${escapeHtml(formatTime(t.time))}</div>
                   <div class="timeline-title">${escapeHtml(t.title)}</div>
                   ${t.desc ? `<div class="timeline-desc">${escapeHtml(t.desc)}</div>` : ''}
                 </div>

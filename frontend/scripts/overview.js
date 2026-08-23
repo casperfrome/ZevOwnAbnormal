@@ -2,7 +2,7 @@
    overview.js — Platform overview dashboard
    ============================================================ */
 window.OverviewModule = (function () {
-  const { escapeHtml } = UI;
+  const { escapeHtml, formatTime } = UI;
 
   function renderActions(actionsEl) {
     actionsEl.innerHTML = `
@@ -108,7 +108,7 @@ window.OverviewModule = (function () {
                     ${UI.severityMeter(r.severity)}
                     <div style="flex:1;min-width:0;">
                       <div class="cell-strong truncate">${escapeHtml(r.ruleName)}</div>
-                      <div class="cell-muted">${escapeHtml(r.occurredAt)} · ${escapeHtml(r.datasetName)}</div>
+                      <div class="cell-muted">${escapeHtml(formatTime(r.occurredAt))} · ${escapeHtml(r.datasetName)}</div>
                     </div>
                     ${UI.recordStatusBadge(r.status)}
                     ${Icon.chevronRight({ size: 14 })}

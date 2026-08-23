@@ -628,10 +628,15 @@
 }
 
 .section-title {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
   font-size: var(--text-md);
   font-weight: 600;
   letter-spacing: var(--tracking-tight);
 }
+
+.section-title > svg { flex: 0 0 auto; }
 
 .section-subtitle {
   font-size: var(--text-xs);

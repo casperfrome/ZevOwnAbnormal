@@ -187,7 +187,8 @@
 .results-wrap {
   border: 1px solid var(--color-line);
   border-radius: var(--radius-md);
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .results-table {

@@ -691,9 +691,71 @@
 .data-table tbody tr:hover { background: var(--color-surface-alt); }
 .data-table tbody tr:last-child td { border-bottom: none; }
 
+.resizable-table {
+  table-layout: fixed;
+}
+
+.resizable-table th,
+.resizable-table td {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.resizable-table thead th {
+  position: sticky;
+}
+
+.column-resize-handle {
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  right: 0;
+  width: 9px;
+  height: 100%;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.column-resize-handle::after {
+  content: '';
+  position: absolute;
+  top: 22%;
+  bottom: 22%;
+  left: 4px;
+  width: 1px;
+  border-radius: 1px;
+  background: transparent;
+  transition: background var(--duration-fast) var(--ease-out);
+}
+
+.column-resize-handle:hover::after,
+.column-resize-handle:focus-visible::after,
+.is-resizing-column .column-resize-handle::after {
+  background: var(--color-primary);
+}
+
+.is-resizing-column,
+.is-resizing-column * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
 .data-table .cell-strong { color: var(--color-ink); font-weight: 600; }
 .data-table .cell-mono { font-family: var(--font-mono); font-size: var(--text-xs); }
 .data-table .cell-muted { color: var(--color-ink-muted); font-size: var(--text-xs); }
+
+.record-desktop-table tbody td {
+  white-space: nowrap;
+}
+
+.record-desktop-table .record-single-line,
+.record-desktop-table .record-single-line > * {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 .data-table .row-action {
   display: inline-flex;

@@ -2,7 +2,7 @@
    datasource.js — Data Source Management module
    ============================================================ */
 window.DatasourceModule = (function () {
-  const { escapeHtml } = UI;
+  const { escapeHtml, formatTime } = UI;
   let state = { search: '', typeFilter: 'all', statusFilter: 'all', page: 1, pageSize: 8, sortKey: 'createdAt', sortDir: 'desc' };
 
   function renderActions(actionsEl) {
@@ -152,16 +152,16 @@ window.DatasourceModule = (function () {
 
     tableEl.innerHTML = `
       <div class="table-wrap">
-        <table class="data-table">
+        <table class="data-table" data-table-id="datasource-list">
           <thead>
             <tr>
-              <th class="sortable" data-sort="name"><span class="th-sort">名称 ${sortIcon('name')}</span></th>
-              <th>类型</th>
-              <th>连接信息</th>
-              <th>状态</th>
-              <th class="sortable" data-sort="createdAt"><span class="th-sort">创建时间 ${sortIcon('createdAt')}</span></th>
-              <th>最近检测</th>
-              <th style="text-align:right;">操作</th>
+              <th class="sortable" data-sort="name" data-column-key="name" data-default-width="180"><span class="th-sort">名称 ${sortIcon('name')}</span></th>
+              <th data-column-key="type" data-default-width="110">类型</th>
+              <th data-column-key="connection" data-default-width="220">连接信息</th>
+              <th data-column-key="status" data-default-width="120">状态</th>
+              <th class="sortable" data-sort="createdAt" data-column-key="created-at" data-default-width="180"><span class="th-sort">创建时间 ${sortIcon('createdAt')}</span></th>
+              <th data-column-key="last-checked" data-default-width="180">最近检测</th>
+              <th data-column-key="actions" data-min-width="140" data-default-width="140" style="text-align:right;">操作</th>
             </tr>
           </thead>
           <tbody>
@@ -177,8 +177,8 @@ window.DatasourceModule = (function () {
                   <div class="cell-muted">${escapeHtml(d.database)}</div>
                 </td>
                 <td>${renderStatusCell(d)}</td>
-                <td class="cell-muted">${escapeHtml(d.createdAt)}</td>
-                <td class="cell-muted">${escapeHtml(d.lastChecked || '—')}</td>
+                <td class="cell-muted">${escapeHtml(formatTime(d.createdAt))}</td>
+                <td class="cell-muted">${escapeHtml(formatTime(d.lastChecked))}</td>
                 <td>
                   <div class="cell-actions">
                     <button class="row-action" data-action="test" data-id="${d.id}" data-tooltip="测试连接" aria-label="测试连接">${Icon.zap({ size: 15 })}</button>

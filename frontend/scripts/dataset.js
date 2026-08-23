@@ -3,7 +3,7 @@
    Features: CRUD, SQL editor with syntax highlight + format + validate, results preview
    ============================================================ */
 window.DatasetModule = (function () {
-  const { escapeHtml } = UI;
+  const { escapeHtml, formatTime } = UI;
   let state = { search: '', datasourceFilter: 'all', view: 'list', currentDataset: null, page: 1, pageSize: 8 };
 
   // ---------- SQL syntax highlighter ----------
@@ -274,15 +274,15 @@ window.DatasetModule = (function () {
 
     tableEl.innerHTML = `
       <div class="table-wrap">
-        <table class="data-table">
+        <table class="data-table" data-table-id="dataset-list">
           <thead>
             <tr>
-              <th>数据集</th>
-              <th>数据源</th>
-              <th>字段</th>
-              <th>行数</th>
-              <th>更新时间</th>
-              <th style="text-align:right;">操作</th>
+              <th data-column-key="dataset" data-default-width="220">数据集</th>
+              <th data-column-key="datasource" data-default-width="180">数据源</th>
+              <th data-column-key="fields" data-default-width="260">字段</th>
+              <th data-column-key="rows" data-default-width="100">行数</th>
+              <th data-column-key="updated-at" data-default-width="180">更新时间</th>
+              <th data-column-key="actions" data-min-width="170" data-default-width="170" style="text-align:right;">操作</th>
             </tr>
           </thead>
           <tbody>
@@ -305,7 +305,7 @@ window.DatasetModule = (function () {
                   </div>
                 </td>
                 <td class="cell-mono">${UI.formatNumber(d.rowCount || 0)}</td>
-                <td class="cell-muted">${escapeHtml(d.updatedAt)}</td>
+                <td class="cell-muted">${escapeHtml(formatTime(d.updatedAt))}</td>
                 <td>
                   <div class="cell-actions">
                     <button class="row-action" data-action="query" data-id="${d.id}" data-tooltip="查询预览" aria-label="查询">${Icon.terminal({ size: 15 })}</button>
@@ -519,11 +519,11 @@ window.DatasetModule = (function () {
     return `
       <div class="results-wrap">
         <div style="overflow:auto;max-height:360px;">
-          <table class="results-table">
+          <table class="results-table" data-table-id="dataset-query-results">
             <thead>
               <tr>
-                <th style="width:48px;text-align:right;">#</th>
-                ${cols.map(c => `<th>${escapeHtml(c.name)}<span style="color:var(--color-ink-faint);font-weight:400;margin-left:6px;text-transform:none;letter-spacing:0;">${escapeHtml(c.type)}</span></th>`).join('')}
+                <th data-column-key="row-number" data-min-width="48" data-default-width="48" style="width:48px;text-align:right;">#</th>
+                ${cols.map(c => `<th data-column-key="${escapeHtml(c.name)}" data-default-width="160">${escapeHtml(c.name)}<span style="color:var(--color-ink-faint);font-weight:400;margin-left:6px;text-transform:none;letter-spacing:0;">${escapeHtml(c.type)}</span></th>`).join('')}
               </tr>
             </thead>
             <tbody>

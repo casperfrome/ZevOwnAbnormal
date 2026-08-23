@@ -32,3 +32,16 @@ test('operatorLabel translates every supported operator and hides unknown intern
   assert.equal(context.window.UI.operatorLabel('future_internal_code'), '未知条件');
   assert.equal(context.window.UI.operatorLabel(''), '未知条件');
 });
+
+test('formatTime renders backend UTC timestamps in Beijing time to seconds', () => {
+  const context = { window: {} };
+  vm.runInNewContext(
+    fs.readFileSync(path.join(__dirname, '..', 'scripts', 'components.js'), 'utf8'),
+    context,
+  );
+
+  assert.equal(context.window.UI.formatTime('2026-08-23T02:21:44'), '2026-08-23 10:21:44');
+  assert.equal(context.window.UI.formatTime('2026-08-23T02:21:44Z'), '2026-08-23 10:21:44');
+  assert.equal(context.window.UI.formatTime('2026-08-23T10:21:44+08:00'), '2026-08-23 10:21:44');
+  assert.equal(context.window.UI.formatTime(null), '—');
+});

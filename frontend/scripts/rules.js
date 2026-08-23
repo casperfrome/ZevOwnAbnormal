@@ -3,7 +3,7 @@
    Features: CRUD, condition builder, scheduling, Feishu notification
    ============================================================ */
 window.RulesModule = (function () {
-  const { escapeHtml } = UI;
+  const { escapeHtml, formatTime } = UI;
   let state = { search: '', statusFilter: 'all', page: 1, pageSize: 8 };
 
   function renderActions(actionsEl) {
@@ -136,17 +136,17 @@ window.RulesModule = (function () {
 
     tableEl.innerHTML = `
       <div class="table-wrap">
-        <table class="data-table">
+        <table class="data-table" data-table-id="rules-list">
           <thead>
             <tr>
-              <th style="width:36px;"></th>
-              <th>规则</th>
-              <th>关联数据集</th>
-              <th>严重程度</th>
-              <th>调度</th>
-              <th>最近执行</th>
-              <th>异常次数</th>
-              <th style="text-align:right;">操作</th>
+              <th data-column-key="enabled" data-min-width="80" data-default-width="80" style="width:80px;"></th>
+              <th data-column-key="rule" data-default-width="220">规则</th>
+              <th data-column-key="dataset" data-default-width="180">关联数据集</th>
+              <th data-column-key="severity" data-default-width="120">严重程度</th>
+              <th data-column-key="schedule" data-default-width="180">调度</th>
+              <th data-column-key="last-run" data-default-width="180">最近执行</th>
+              <th data-column-key="anomaly-count" data-default-width="110">异常次数</th>
+              <th data-column-key="actions" data-min-width="140" data-default-width="140" style="text-align:right;">操作</th>
             </tr>
           </thead>
           <tbody>
@@ -172,7 +172,7 @@ window.RulesModule = (function () {
                 <td>
                   ${renderScheduleCell(r)}
                 </td>
-                <td class="cell-muted">${escapeHtml(r.lastRun || '—')}</td>
+                <td class="cell-muted">${escapeHtml(formatTime(r.lastRun))}</td>
                 <td>
                   ${r.anomalyCount > 0
                     ? `<span class="badge ${r.anomalyCount > 5 ? 'danger' : 'accent'}">${r.anomalyCount}</span>`
