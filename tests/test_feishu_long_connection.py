@@ -88,6 +88,31 @@ def event_with_non_mapping_form_value():
     return event
 
 
+def malformed_normalization_event(case):
+    event = complete_event()
+    if case == "incomplete_event":
+        event.event.context = None
+    elif case == "invalid_action_value_type":
+        event.event.action.value = []
+    elif case == "invalid_form_value_type":
+        event.event.action.form_value = []
+    elif case == "missing_anomaly_id":
+        event.event.action.value = {"action": "submit_validation"}
+    elif case == "missing_operator_id":
+        event.event.operator.user_id = None
+        event.event.operator.open_id = None
+    elif case == "missing_message_id":
+        event.event.context.open_message_id = None
+    elif case == "missing_action":
+        event.event.action.name = None
+        event.event.action.value = {"anomaly_id": "anomaly-9"}
+    elif case == "invalid_validation_text_type":
+        event.event.action.form_value = {"validation_text": 123}
+    else:
+        raise AssertionError(f"unknown test case: {case}")
+    return event
+
+
 class FakeResponse:
     def __init__(self, status_code, body):
         self.status_code = status_code
@@ -345,6 +370,26 @@ def test_callback_rejects_non_text_validation_content():
         ))
 
 
+@pytest.mark.parametrize("reason_code", [
+    "incomplete_event",
+    "invalid_action_value_type",
+    "invalid_form_value_type",
+    "missing_anomaly_id",
+    "missing_operator_id",
+    "missing_message_id",
+    "missing_action",
+    "invalid_validation_text_type",
+])
+def test_callback_normalization_failures_expose_only_stable_reason_codes(reason_code):
+    gateway = importlib.import_module("feishu_callback_gateway")
+
+    with pytest.raises(gateway.CallbackPayloadError) as failure:
+        gateway.normalize_card_action(malformed_normalization_event(reason_code))
+
+    assert failure.value.reason_code == reason_code
+    assert str(failure.value) == reason_code
+
+
 def test_callback_accepts_every_successful_2xx_response():
     post = RecordingPost(FakeResponse(201, {
         "toast": {"type": "success", "content": "验证已提交"},
@@ -419,13 +464,17 @@ def test_sdk_dispatcher_omits_card_when_gateway_failure_must_preserve_retry_butt
 
 
 @pytest.mark.parametrize(
-    ("event", "post", "expected_phase", "expected_error_type", "expected_status"),
+    (
+        "event", "post", "expected_phase", "expected_error_type",
+        "expected_reason_code", "expected_status",
+    ),
     [
         (
             event_with_non_mapping_form_value(),
             RecordingPost(FakeResponse(200, {})),
             "normalize",
             "CallbackPayloadError",
+            "invalid_form_value_type",
             None,
         ),
         (
@@ -433,6 +482,7 @@ def test_sdk_dispatcher_omits_card_when_gateway_failure_must_preserve_retry_butt
             RecordingPost(error=OSError("connection refused internal-token anomaly-9 looks-good payload")),
             "internal_api",
             "OSError",
+            "unexpected_exception",
             None,
         ),
         (
@@ -440,6 +490,7 @@ def test_sdk_dispatcher_omits_card_when_gateway_failure_must_preserve_retry_butt
             RecordingPost(FakeResponse(503, {"detail": "internal-token anomaly-9 payload"})),
             "internal_api",
             "HTTPStatusError",
+            "non_2xx_response",
             503,
         ),
         (
@@ -447,12 +498,14 @@ def test_sdk_dispatcher_omits_card_when_gateway_failure_must_preserve_retry_butt
             RecordingPost(FakeResponse(200, {"toast": {"type": "success"}})),
             "response_mapping",
             "CallbackPayloadError",
+            "invalid_response_card_type",
             None,
         ),
     ],
 )
 def test_callback_failures_log_safe_phase_metadata(
-    caplog, event, post, expected_phase, expected_error_type, expected_status,
+    caplog, event, post, expected_phase, expected_error_type,
+    expected_reason_code, expected_status,
 ):
     caplog.set_level("WARNING", logger="feishu_callback_gateway")
 
@@ -461,15 +514,37 @@ def test_callback_failures_log_safe_phase_metadata(
     records = [record for record in caplog.records if record.name == "feishu_callback_gateway"]
     assert len(records) == 1
     record = records[0]
-    assert record.getMessage() == "feishu_card_callback_failed"
-    assert record.event == "feishu_card_callback_failed"
-    assert record.phase == expected_phase
-    assert record.error_type == expected_error_type
-    assert getattr(record, "http_status", None) == expected_status
+    expected_message = (
+        "feishu_card_callback_failed"
+        f" phase={expected_phase}"
+        f" error_type={expected_error_type}"
+        f" reason_code={expected_reason_code}"
+    )
+    if expected_status is not None:
+        expected_message += f" http_status={expected_status}"
+    assert record.getMessage() == expected_message
     assert record.exc_info is None
     serialized = " ".join(str(value) for value in record.__dict__.values())
     for secret in ("internal-token", "anomaly-9", "looks-good", "payload"):
         assert secret not in serialized
+
+
+def test_callback_failure_log_replaces_unapproved_reason_codes(caplog):
+    gateway = importlib.import_module("feishu_callback_gateway")
+    caplog.set_level("WARNING", logger="feishu_callback_gateway")
+
+    gateway._log_callback_failure(
+        "normalize",
+        "CallbackPayloadError",
+        reason_code="unapproved-sensitive-reason",
+    )
+
+    assert caplog.records[0].getMessage() == (
+        "feishu_card_callback_failed"
+        " phase=normalize"
+        " error_type=CallbackPayloadError"
+        " reason_code=unexpected_exception"
+    )
 
 
 def test_gateway_reuses_one_owned_httpx_client_and_closes_it():
