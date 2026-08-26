@@ -9,6 +9,8 @@
   min-height: 100vh;
 }
 
+.app-shell[hidden] { display: none !important; }
+
 /* ---------- Sidebar ---------- */
 .sidebar {
   background: var(--color-sidebar);

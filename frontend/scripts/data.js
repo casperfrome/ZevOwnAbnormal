@@ -2,23 +2,44 @@
 window.Store = (function () {
   const state = { datasources: [], datasets: [], rules: [], records: [], overview: null, currentUser: null };
   let recordsPageSequence = 0;
+  let unauthorizedHandler = null;
+  let authGeneration = 0;
+  let unauthorizedGeneration = null;
 
   async function request(path, options = {}) {
-    const response = await fetch('/api/v1' + path, {
-      credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
-      ...options,
-    });
+    const requestGeneration = authGeneration;
+    let response;
+    try {
+      response = await fetch('/api/v1' + path, {
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+        ...options,
+      });
+    } catch (error) {
+      if (!Number.isFinite(error.status)) error.status = 0;
+      throw error;
+    }
     if (!response.ok) {
       let detail = `${response.status} ${response.statusText}`;
       let payload = null;
       try { payload = await response.json(); detail = payload.detail || detail; } catch (_) {}
       const error = new Error(detail);
+      error.status = response.status;
       error.payload = payload;
+      if (response.status === 401 && path !== '/auth/login'
+        && requestGeneration === authGeneration && unauthorizedGeneration !== requestGeneration) {
+        unauthorizedGeneration = requestGeneration;
+        unauthorizedHandler?.(error);
+      }
       throw error;
     }
     if (response.status === 204) return null;
-    return response.json();
+    try {
+      return await response.json();
+    } catch (error) {
+      error.status = response.status;
+      throw error;
+    }
   }
 
   const mapDatasource = d => ({
@@ -254,6 +275,17 @@ window.Store = (function () {
     await refresh();
   }
 
+  async function login(username, password) {
+    const user = await request('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ username, password }),
+    });
+    authGeneration += 1;
+    unauthorizedGeneration = null;
+    state.currentUser = user;
+    return user;
+  }
+
   function dsPayload(data) {
     return { name: data.name, type: data.type, host: data.host, port: Number(data.port), database: data.database,
       username: data.username, password: data.password || '', ssl: !!data.ssl, description: data.description || '' };
@@ -306,7 +338,8 @@ window.Store = (function () {
   }
 
   return {
-    init, refresh, request, loadRecordsPage, peekRecordsPage,
+    init, login, refresh, request, loadRecordsPage, peekRecordsPage,
+    setUnauthorizedHandler: handler => { unauthorizedHandler = typeof handler === 'function' ? handler : null; },
     loadAnomalyGroupsPage, loadAnomalyGroup,
     isSuperuser: () => state.currentUser?.is_superuser === true,
     getDatasources: () => [...state.datasources],

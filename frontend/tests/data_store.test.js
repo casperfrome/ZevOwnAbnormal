@@ -5,6 +5,77 @@ const test = require('node:test');
 const vm = require('node:vm');
 
 
+test('login posts credentials, returns the authenticated user, and exposes an HTTP status for rejected credentials', async () => {
+  const requests = [];
+  const context = {
+    window: {},
+    fetch: async (url, options = {}) => {
+      requests.push({ url, options });
+      if (JSON.parse(options.body).password === 'wrong-password') {
+        return { ok: false, status: 401, statusText: 'Unauthorized', json: async () => ({ detail: '用户名或密码错误' }) };
+      }
+      return { ok: true, status: 200, json: async () => ({ id: 'user-1', username: 'admin', is_superuser: true }) };
+    },
+  };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'scripts', 'data.js'), 'utf8'), context);
+
+  const user = await context.window.Store.login('admin', 'correct-password');
+
+  assert.deepEqual(JSON.parse(JSON.stringify(user)), { id: 'user-1', username: 'admin', is_superuser: true });
+  assert.equal(requests[0].url, '/api/v1/auth/login');
+  assert.equal(requests[0].options.method, 'POST');
+  assert.deepEqual(JSON.parse(requests[0].options.body), { username: 'admin', password: 'correct-password' });
+  await assert.rejects(
+    () => context.window.Store.login('admin', 'wrong-password'),
+    error => error.status === 401 && error.message === '用户名或密码错误',
+  );
+});
+
+
+test('a 401 from a request started before a successful login does not notify the unauthorized handler', async () => {
+  let resolveStaleResponse;
+  let unauthorizedNotifications = 0;
+  const context = {
+    window: {},
+    fetch: async url => {
+      if (url === '/api/v1/overview') return new Promise(resolve => { resolveStaleResponse = resolve; });
+      if (url === '/api/v1/auth/login') return { ok: true, status: 200, json: async () => ({ id: 'user-1', username: 'admin', is_superuser: true }) };
+      throw new Error(`unexpected request ${url}`);
+    },
+  };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'scripts', 'data.js'), 'utf8'), context);
+  const store = context.window.Store;
+  store.setUnauthorizedHandler(() => { unauthorizedNotifications += 1; });
+
+  const staleRequest = store.request('/overview');
+  await store.login('admin', 'correct-password');
+  resolveStaleResponse({ ok: false, status: 401, statusText: 'Unauthorized', json: async () => ({ detail: '旧会话已失效' }) });
+
+  await assert.rejects(() => staleRequest, error => error.status === 401);
+  assert.equal(unauthorizedNotifications, 0);
+});
+
+
+test('concurrent current-session 401 responses notify the unauthorized handler only once', async () => {
+  const responses = [];
+  let unauthorizedNotifications = 0;
+  const context = {
+    window: {},
+    fetch: async () => new Promise(resolve => { responses.push(resolve); }),
+  };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'scripts', 'data.js'), 'utf8'), context);
+  const store = context.window.Store;
+  store.setUnauthorizedHandler(() => { unauthorizedNotifications += 1; });
+
+  const first = store.request('/overview');
+  const second = store.request('/rules');
+  responses.forEach(resolve => resolve({ ok: false, status: 401, statusText: 'Unauthorized', json: async () => ({ detail: '登录已失效' }) }));
+
+  await Promise.all([assert.rejects(() => first), assert.rejects(() => second)]);
+  assert.equal(unauthorizedNotifications, 1);
+});
+
+
 test('sendFeishuTestMessage posts the selected target to the system test endpoint', async () => {
   const requests = [];
   const context = {

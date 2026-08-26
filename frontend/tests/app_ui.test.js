@@ -14,11 +14,11 @@ async function browserPage(t, viewport = { width: 1280, height: 720 }) {
   return page;
 }
 
-async function mountApp(t, overrides = {}) {
+async function mountApp(t, scenario = {}, initialHash = '') {
   const page = await browserPage(t);
   await page.setContent(`<!doctype html><html><body>
     <div id="toast-container"></div>
-    <aside id="sidebar">
+    <div class="app-shell"><aside id="sidebar">
       <div class="nav-item" data-route="records"></div>
       <div class="nav-item" data-route="anomaly-groups"></div>
       <div class="nav-item" data-route="rules"></div>
@@ -30,19 +30,36 @@ async function mountApp(t, overrides = {}) {
     <span id="nav-anomaly-count"></span>
     <button id="global-search-trigger" aria-label="打开全局搜索"></button>
     <button id="global-search-mobile-trigger" aria-label="打开全局搜索"></button>
-    <main id="page-root"></main>
+    <main id="page-root"></main></div>
   </body></html>`);
   await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'icons.js') });
   await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'components.js') });
-  await page.evaluate(custom => {
+  await page.evaluate(testScenario => {
     const record = {
       id: 'record-1', ruleId: 'rule-1', ruleName: '门店 GMV 异常', datasetName: '门店日经营',
       severity: 'critical', status: 'pending', occurredAt: '2026-08-22 10:00', field: 'gmv', value: 999,
     };
+    let initCalls = 0;
     window.searchRecordQueries = [];
     window.openedItems = [];
+    window.loginAttempts = 0;
+    window.releasePendingLogin = null;
     window.Store = {
-      init: async () => {},
+      init: async () => {
+        initCalls += 1;
+        window.initCalls = initCalls;
+        const status = testScenario.initStatuses?.[initCalls - 1];
+        if (status) throw Object.assign(new Error(status === 401 ? 'Unauthorized' : 'service unavailable'), { status });
+      },
+      login: async () => {
+        window.loginAttempts += 1;
+        if (testScenario.pendingLogin401) {
+          await new Promise(resolve => { window.releasePendingLogin = resolve; });
+          throw Object.assign(new Error('用户名或密码错误'), { status: 401 });
+        }
+        return { id: 'user-1', username: 'admin', is_superuser: true };
+      },
+      setUnauthorizedHandler: handler => { window.unauthorizedHandler = handler; },
       getStats: () => ({ pendingRecords: 1, processingRecords: 0, timedOutRecords: 0, resolvedToday: 0 }),
       getRecords: () => [record],
       getRules: () => [{ id: 'rule-1', name: '门店 GMV 异常', description: '监控营业额' }],
@@ -52,7 +69,6 @@ async function mountApp(t, overrides = {}) {
         window.searchRecordQueries.push({ ...query });
         return { items: query.search.includes('GMV') ? [record] : [], total: 1, page: 1, pageSize: 5 };
       },
-      ...custom,
     };
     const module = name => ({
       render: content => { content.innerHTML = `<div>${name}</div>`; },
@@ -63,10 +79,93 @@ async function mountApp(t, overrides = {}) {
     window.RulesModule = module('rules');
     window.DatasetModule = module('datasets');
     window.DatasourceModule = module('datasources');
-  }, overrides);
+  }, scenario);
+  if (initialHash) await page.evaluate(hash => history.replaceState(null, '', hash), initialHash);
   await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'app.js') });
   return page;
 }
+
+test('an initial authentication 401 hides the business shell and presents an accessible login form', async t => {
+  const page = await mountApp(t, { initStatuses: [401] });
+
+  await page.getByRole('heading', { name: '登录 Sentinel' }).waitFor();
+  await page.addStyleTag({ path: path.join(frontendRoot, 'styles', 'base.css') });
+  await page.addStyleTag({ path: path.join(frontendRoot, 'styles', 'layout.css') });
+  await page.addStyleTag({ path: path.join(frontendRoot, 'styles', 'components.css') });
+  await page.addStyleTag({ path: path.join(frontendRoot, 'styles', 'pages.css') });
+  assert.equal(await page.locator('.app-shell').isHidden(), true);
+  assert.equal(await page.getByRole('textbox', { name: '用户名' }).count(), 1);
+  assert.equal(await page.getByLabel('密码').getAttribute('type'), 'password');
+  assert.equal(await page.getByRole('button', { name: '登录' }).count(), 1);
+});
+
+test('a later unauthorized API response returns the app to the login form', async t => {
+  const page = await mountApp(t);
+  await page.getByText('records', { exact: true }).waitFor();
+
+  await page.evaluate(() => window.unauthorizedHandler(Object.assign(new Error('登录已失效'), { status: 401 })));
+
+  await page.getByRole('heading', { name: '登录 Sentinel' }).waitFor();
+  assert.equal(await page.locator('.app-shell').isHidden(), true);
+});
+
+test('an unauthorized transition closes business overlays and blocks the global-search shortcut', async t => {
+  const page = await mountApp(t);
+  await page.getByText('records', { exact: true }).waitFor();
+  await page.keyboard.press('Control+K');
+  await page.getByRole('dialog', { name: '全局搜索' }).waitFor();
+  await page.evaluate(() => UI.modal({ title: '编辑数据源', body: '敏感业务内容' }));
+  assert.equal(await page.locator('.modal-backdrop').count(), 1);
+  assert.equal(await page.evaluate(() => document.body.style.overflow), 'hidden');
+
+  await page.evaluate(() => window.unauthorizedHandler(Object.assign(new Error('登录已失效'), { status: 401 })));
+
+  await page.getByRole('heading', { name: '登录 Sentinel' }).waitFor();
+  assert.equal(await page.locator('.command-backdrop').count(), 0);
+  assert.equal(await page.locator('.modal-backdrop, .drawer-backdrop').count(), 0);
+  assert.equal(await page.evaluate(() => document.body.style.overflow), '');
+  await page.keyboard.press('Control+K');
+  assert.equal(await page.locator('.command-backdrop').count(), 0);
+});
+
+test('a non-authentication startup failure stays on the backend connection failure surface', async t => {
+  const page = await mountApp(t, { initStatuses: [503] });
+
+  await page.getByRole('heading', { name: '后端连接失败' }).waitFor();
+  assert.equal(await page.locator('.login-screen').count(), 0);
+  assert.match(await page.getByRole('alert').textContent(), /service unavailable/);
+});
+
+test('the login form keeps invalid credentials inline and prevents duplicate pending submissions', async t => {
+  const page = await mountApp(t, { initStatuses: [401], pendingLogin401: true });
+
+  await page.getByRole('heading', { name: '登录 Sentinel' }).waitFor();
+  await page.getByLabel('用户名').fill('admin');
+  await page.getByLabel('密码').fill('wrong');
+  await page.getByRole('button', { name: '登录' }).click();
+  await page.getByRole('button', { name: '正在登录…' }).waitFor();
+  await page.getByRole('button', { name: '正在登录…' }).click({ force: true });
+  assert.equal(await page.evaluate(() => window.loginAttempts), 1);
+
+  await page.evaluate(() => window.releasePendingLogin());
+  await page.getByRole('alert').waitFor();
+  assert.match(await page.getByRole('alert').textContent(), /用户名或密码错误/);
+  assert.equal(await page.getByLabel('用户名').inputValue(), 'admin');
+  assert.equal(await page.getByLabel('密码').inputValue(), 'wrong');
+});
+
+test('a successful Enter login reloads the session and restores the original route', async t => {
+  const page = await mountApp(t, { initStatuses: [401] }, '#rules');
+  await page.getByRole('heading', { name: '登录 Sentinel' }).waitFor();
+  await page.getByLabel('用户名').fill('admin');
+  await page.getByLabel('密码').fill('correct');
+  await page.getByLabel('密码').press('Enter');
+
+  await page.getByText('rules', { exact: true }).waitFor();
+  assert.equal(await page.locator('.login-screen').count(), 0);
+  assert.equal(await page.evaluate(() => location.hash), '#rules');
+  assert.equal(await page.evaluate(() => window.initCalls), 2);
+});
 
 test('anomaly group deep links render the group module and open its detail', async t => {
   const page = await mountApp(t);

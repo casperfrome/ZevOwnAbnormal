@@ -14,6 +14,140 @@
 
   const pageRoot = document.getElementById('page-root');
   const breadcrumb = document.getElementById('breadcrumb');
+  const appShell = document.querySelector('.app-shell');
+  let loginScreen = null;
+  let failureScreen = null;
+  let loginReturnHash = location.hash || '#records';
+  let closeGlobalSearch = () => {};
+
+  function businessShellIsVisible() {
+    return !appShell || !appShell.hidden;
+  }
+
+  function setBusinessShellVisible(visible) {
+    if (!appShell) return;
+    appShell.hidden = !visible;
+    appShell.setAttribute('aria-hidden', String(!visible));
+  }
+
+  function dismissBusinessOverlays() {
+    closeGlobalSearch();
+    document.querySelectorAll('.modal-backdrop, .drawer-backdrop').forEach(backdrop => {
+      const close = backdrop.querySelector('.modal-close');
+      if (close) close.click();
+      else backdrop.remove();
+    });
+    document.body.style.overflow = '';
+  }
+
+  function removeStandaloneScreen() {
+    loginScreen?.remove();
+    failureScreen?.remove();
+    loginScreen = null;
+    failureScreen = null;
+  }
+
+  function showBackendFailure(error) {
+    setBusinessShellVisible(false);
+    loginScreen?.remove();
+    loginScreen = null;
+    if (failureScreen) return;
+    failureScreen = document.createElement('main');
+    failureScreen.className = 'backend-failure-screen';
+    failureScreen.innerHTML = `
+      <section class="backend-failure-card" aria-labelledby="backend-failure-title">
+        <div class="login-brand-mark" aria-hidden="true">!</div>
+        <p class="login-eyebrow">SENTINEL / CONNECTION</p>
+        <h1 id="backend-failure-title">后端连接失败</h1>
+        <p role="alert">${UI.escapeHtml(error.message || '无法连接到 Sentinel 后端服务')}</p>
+      </section>
+    `;
+    document.body.appendChild(failureScreen);
+  }
+
+  function showLogin() {
+    loginReturnHash = location.hash || loginReturnHash || '#records';
+    dismissBusinessOverlays();
+    setBusinessShellVisible(false);
+    failureScreen?.remove();
+    failureScreen = null;
+    if (loginScreen) {
+      loginScreen.querySelector('#login-username')?.focus();
+      return;
+    }
+
+    loginScreen = document.createElement('main');
+    loginScreen.className = 'login-screen';
+    loginScreen.innerHTML = `
+      <section class="login-card" aria-labelledby="login-title">
+        <div class="login-brand-mark" aria-hidden="true">S</div>
+        <p class="login-eyebrow">SENTINEL / ANOMALY</p>
+        <h1 id="login-title">登录 Sentinel</h1>
+        <p class="login-intro">使用您的 Sentinel 账号继续管理异常监控。</p>
+        <form id="login-form" novalidate>
+          <div class="field">
+            <label class="field-label" for="login-username">用户名</label>
+            <input class="input" id="login-username" name="username" type="text" autocomplete="username" required aria-required="true" />
+          </div>
+          <div class="field">
+            <label class="field-label" for="login-password">密码</label>
+            <input class="input" id="login-password" name="password" type="password" autocomplete="current-password" required aria-required="true" aria-describedby="login-error" />
+          </div>
+          <div class="login-error" id="login-error" role="alert" hidden></div>
+          <button class="btn btn-accent btn-lg login-submit" type="submit">登录</button>
+        </form>
+      </section>
+    `;
+    document.body.appendChild(loginScreen);
+
+    const form = loginScreen.querySelector('#login-form');
+    const username = loginScreen.querySelector('#login-username');
+    const password = loginScreen.querySelector('#login-password');
+    const submit = loginScreen.querySelector('.login-submit');
+    const errorEl = loginScreen.querySelector('#login-error');
+    let pending = false;
+
+    form.addEventListener('submit', async event => {
+      event.preventDefault();
+      if (pending) return;
+      const usernameValue = username.value.trim();
+      const passwordValue = password.value;
+      if (!usernameValue || !passwordValue) {
+        errorEl.textContent = '请输入用户名和密码';
+        errorEl.hidden = false;
+        (!usernameValue ? username : password).focus();
+        return;
+      }
+
+      pending = true;
+      errorEl.hidden = true;
+      submit.disabled = true;
+      submit.innerHTML = '<span class="btn-spinner"></span>正在登录…';
+      form.setAttribute('aria-busy', 'true');
+      try {
+        await Store.login(usernameValue, passwordValue);
+        await Store.init();
+        removeStandaloneScreen();
+        setBusinessShellVisible(true);
+        navigate((loginReturnHash || '#records').replace(/^#/, ''));
+      } catch (error) {
+        if (error.status === 401) {
+          errorEl.textContent = error.message || '用户名或密码错误';
+          errorEl.hidden = false;
+        } else {
+          showBackendFailure(error);
+        }
+      } finally {
+        pending = false;
+        if (loginScreen) {
+          submit.disabled = false;
+          submit.textContent = '登录';
+          form.removeAttribute('aria-busy');
+        }
+      }
+    });
+    username.focus();
+  }
 
   function setActiveNav(route) {
     document.querySelectorAll('.nav-item').forEach(el => {
@@ -147,6 +281,7 @@
       restoreFocus = null;
       focusTarget?.focus();
     }
+    closeGlobalSearch = closeSearch;
 
     function setSelected(index) {
       if (resultItems.length === 0) return;
@@ -280,6 +415,7 @@
     }
 
     function openSearch() {
+      if (!businessShellIsVisible()) return;
       if (panel) {
         input?.focus();
         return;
@@ -365,6 +501,7 @@
 
   // Expose before loading so modules can navigate after async requests.
   window.App = { navigate, parseRoute };
+  Store.setUnauthorizedHandler?.(showLogin);
 
   // ---------- Initial route ----------
   const initial = (location.hash || '#records').slice(1);
@@ -372,7 +509,7 @@
   Store.init()
     .then(() => navigate(initial))
     .catch(error => {
-      pageRoot.innerHTML = UI.emptyState({ icon: Icon.alert({ size: 24 }), iconCls: 'danger', title: '后端连接失败', desc: error.message });
-      UI.toast({ type: 'error', title: '无法加载平台数据', desc: error.message });
+      if (error.status === 401) showLogin();
+      else showBackendFailure(error);
     });
 })();
