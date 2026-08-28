@@ -1,9 +1,12 @@
 $ErrorActionPreference = 'Stop'
-$PythonExe = 'D:\PythonVEnv\FirstVEnv\Scripts\python.exe'
+$PythonExe = 'D:\PythonVenv\Scripts\python.exe'
+$env:PYTHONUTF8 = '1'
+$env:PYTHONIOENCODING = 'utf-8'
 Push-Location $PSScriptRoot
 try {
-    & $PythonExe -m alembic -c alembic.ini upgrade head
-    & $PythonExe -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    & $PythonExe -u -m scripts.start_services
+    $ServiceExitCode = $LASTEXITCODE
 } finally {
     Pop-Location
 }
+exit $ServiceExitCode

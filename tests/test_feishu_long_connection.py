@@ -810,8 +810,9 @@ def test_required_environment_values_are_trimmed(monkeypatch):
     assert launcher.get_required_env("FEISHU_APP_ID") == "app-id"
 
 
-def test_launcher_registers_callback_handler_before_starting_websocket(monkeypatch):
+def test_launcher_registers_callback_handler_before_starting_websocket(monkeypatch, tmp_path):
     launcher = importlib.import_module("飞书长连接启动")
+    monkeypatch.setattr(launcher, 'ENV_FILE', tmp_path / '.env')
     registered = []
     started = []
 
@@ -864,3 +865,62 @@ def test_launcher_registers_callback_handler_before_starting_websocket(monkeypat
     assert registered[0].__self__.__class__ is Gateway
     assert started == [True]
     assert closed == [True]
+
+
+def test_optional_launcher_skips_missing_credentials_even_with_conflicting_tokens(tmp_path, monkeypatch, capsys):
+    launcher = importlib.import_module('飞书长连接启动')
+    monkeypatch.setattr(launcher, 'ENV_FILE', tmp_path / '.env')
+    monkeypatch.delenv('FEISHU_APP_ID', raising=False)
+    monkeypatch.delenv('FEISHU_APP_SECRET', raising=False)
+    monkeypatch.setenv('SENTINEL_INTERNAL_TOKEN', 'one')
+    monkeypatch.setenv('INTERNAL_EXECUTION_TOKEN', 'two')
+    assert launcher.run_cli(optional=True) == 0
+    assert '未配置' in capsys.readouterr().out
+
+
+def test_optional_launcher_reports_invalid_config_without_secrets(tmp_path, monkeypatch, capsys):
+    launcher = importlib.import_module('飞书长连接启动')
+    monkeypatch.setattr(launcher, 'ENV_FILE', tmp_path / '.env')
+    monkeypatch.setenv('FEISHU_APP_ID', 'app-id')
+    monkeypatch.delenv('FEISHU_APP_SECRET', raising=False)
+    monkeypatch.setenv('SENTINEL_INTERNAL_TOKEN', 'private-one')
+    monkeypatch.setenv('INTERNAL_EXECUTION_TOKEN', 'private-two')
+    assert launcher.run_cli(optional=True) == 1
+    output = capsys.readouterr().out
+    assert '失败' in output
+    assert 'private-' not in output
+
+
+def test_sdk_connection_logs_report_actual_state_without_connection_url():
+    import logging
+    from scripts.runtime_support import FeishuLogFilter
+    log_filter = FeishuLogFilter()
+    for raw, expected in [
+        ('connected to wss://example.test/ws?secret=private', '连接成功'),
+        ('disconnected to wss://example.test/ws?secret=private', '连接断开'),
+        ('connect failed, err: private', '连接失败'),
+    ]:
+        record = logging.makeLogRecord({'msg': raw, 'args': ()})
+        log_filter.filter(record)
+        assert expected in record.getMessage()
+        assert 'private' not in record.getMessage()
+        assert 'wss://' not in record.getMessage()
+
+
+def test_standalone_launcher_skips_existing_instance_without_connecting(tmp_path, monkeypatch, capsys):
+    from scripts.runtime_support import ProcessLock
+    launcher = importlib.import_module('飞书长连接启动')
+    monkeypatch.setattr(launcher, 'ENV_FILE', tmp_path / '.env')
+    for name, value in {'FEISHU_APP_ID': 'app-id', 'FEISHU_APP_SECRET': 'app-secret',
+                        'SENTINEL_API_BASE_URL': 'http://127.0.0.1:8000',
+                        'SENTINEL_INTERNAL_TOKEN': 'internal'}.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv('INTERNAL_EXECUTION_TOKEN', raising=False)
+    lock = ProcessLock(tmp_path / 'tmp' / 'feishu.lock')
+    assert lock.acquire()
+    monkeypatch.setattr(launcher.lark.ws.Client, 'start', lambda _: pytest.fail('must not connect twice'))
+    try:
+        assert launcher.run_cli(optional=True) == 20
+        assert '跳过重复启动' in capsys.readouterr().out
+    finally:
+        lock.close()

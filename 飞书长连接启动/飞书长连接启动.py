@@ -1,10 +1,13 @@
 """Start a Feishu event long connection via the Lark SDK."""
 
 import os
+import argparse
+import logging
+import sys
 from pathlib import Path
 
 import lark_oapi as lark
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 
 from feishu_callback_gateway import (
     CardActionGateway,
@@ -14,6 +17,8 @@ from feishu_callback_gateway import (
 
 
 ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
+sys.path.insert(0, str(ENV_FILE.parent / 'backend'))
+from scripts.runtime_support import FeishuLogFilter, ProcessLock, install_break_handler
 
 
 def load_repository_env() -> None:
@@ -50,7 +55,7 @@ def get_required_env(name: str) -> str:
     return value.strip()
 
 
-def main() -> None:
+def main() -> int:
     load_repository_env()
     app_id = get_required_env("FEISHU_APP_ID")
     app_secret = get_required_env("FEISHU_APP_SECRET")
@@ -69,12 +74,44 @@ def main() -> None:
         log_level=lark.LogLevel.INFO,
     )
 
-    print("Establishing Feishu long connection. Press Ctrl+C to stop.")
+    lock = ProcessLock(ENV_FILE.parent / 'tmp' / 'feishu.lock')
+    if not lock.acquire():
+        callback_gateway.close()
+        print('飞书长连接已运行，跳过重复启动', flush=True)
+        return 20
+    log_filter = FeishuLogFilter()
+    sdk_logger = logging.getLogger('Lark')
+    sdk_logger.addFilter(log_filter)
+    print("飞书正在连接，等待连接成功确认。按 Ctrl+C 停止。", flush=True)
     try:
         client.start()
     finally:
         callback_gateway.close()
+        sdk_logger.removeFilter(log_filter)
+        lock.close()
+    return 0
+
+
+def run_cli(*, optional: bool = False) -> int:
+    install_break_handler()
+    try:
+        if optional:
+            values = dotenv_values(ENV_FILE)
+            credentials = [os.environ.get(name, values.get(name) or '').strip()
+                           for name in ('FEISHU_APP_ID', 'FEISHU_APP_SECRET')]
+            if not any(credentials):
+                print('飞书未配置，跳过长连接；后端继续运行', flush=True)
+                return 0
+        return main()
+    except KeyboardInterrupt:
+        print('飞书长连接已停止', flush=True)
+        return 0
+    except Exception as exc:
+        print(f'飞书启动或运行失败，请检查配置与网络；后端继续运行 error_type={type(exc).__name__}', flush=True)
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--optional', action='store_true', help='Skip when Feishu credentials are absent')
+    sys.exit(run_cli(optional=parser.parse_args().optional))
