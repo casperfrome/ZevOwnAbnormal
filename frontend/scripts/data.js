@@ -69,6 +69,7 @@ window.Store = (function () {
     };
   };
   const mapSqlValidationConfig = config => config ? ({
+    datasourceId: config.datasource_id,
     queryTemplate: config.query_template || '',
     parameters: (config.parameters || []).map(item => ({ name: item.name, field: item.field })),
     trueCondition: {
@@ -383,6 +384,7 @@ window.Store = (function () {
       deadline_seconds: Number(data.deadlineSeconds ?? (data.validationTimeoutMinutes ?? 1440) * 60),
       validation_method: data.validationMethod || 'pseudo',
       sql_validation_config: data.validationMethod === 'sql' && data.sqlValidationConfig ? {
+        datasource_id: data.sqlValidationConfig.datasourceId,
         query_template: data.sqlValidationConfig.queryTemplate,
         parameters: (data.sqlValidationConfig.parameters || []).map(item => ({ name: item.name, field: item.field })),
         true_condition: {

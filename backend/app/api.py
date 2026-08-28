@@ -461,7 +461,7 @@ def _sync_rule(item: Rule, settings: Settings, session: Session) -> None:
     sync_rule_record(item, settings, session)
 
 
-def _validate_rule_sql_configuration(payload: RuleCreate, dataset: Dataset) -> None:
+def _validate_rule_sql_configuration(payload: RuleCreate, dataset: Dataset, session: Session) -> None:
     fields = _dataset_field_names(dataset)
     if payload.repeat_push_enabled and {"__detected_at", "__occurrence_id"} & set(payload.anomaly_key_fields):
         raise HTTPException(422, "异常主键不能使用系统保留字段 __detected_at、__occurrence_id")
@@ -474,6 +474,11 @@ def _validate_rule_sql_configuration(payload: RuleCreate, dataset: Dataset) -> N
                 raise HTTPException(422, f"比较目标字段不存在：{getattr(condition, f'{name}_field')}")
     if payload.validation_method != "sql" or payload.sql_validation_config is None:
         return
+    datasource = session.get(Datasource, payload.sql_validation_config.datasource_id)
+    if datasource is None:
+        raise HTTPException(404, "校验数据源不存在")
+    # MySQL primary-key lookups may be case-insensitive; JSON references are not.
+    payload.sql_validation_config.datasource_id = datasource.id
     fields = _dataset_field_names(dataset)
     try:
         validate_sql_validation_config(
@@ -799,6 +804,22 @@ def delete_datasource(datasource_id: str, session: Session = Depends(get_session
         raise HTTPException(404, "数据源不存在")
     if item.datasets:
         raise HTTPException(409, "数据源已被数据集引用")
+    # Historical snapshots may contain UUID case aliases inherited from datasets.
+    rule_reference = select(Rule.id).where(
+        Rule.deleted_at.is_(None),
+        Rule.validation_method == "sql",
+        func.lower(Rule.sql_validation_config["datasource_id"].as_string()) == item.id.lower(),
+    ).exists()
+    if session.scalar(select(rule_reference)):
+        raise HTTPException(409, "数据源已被规则的 SQL 校验引用")
+    snapshot_reference = select(AnomalyRecord.id).join(Rule, Rule.id == AnomalyRecord.rule_id).where(
+        Rule.deleted_at.is_(None),
+        AnomalyRecord.status.in_(("pending", "processing", "timed_out")),
+        AnomalyRecord.validation_method_snapshot == "sql",
+        func.lower(AnomalyRecord.validation_config_snapshot["datasource_id"].as_string()) == item.id.lower(),
+    ).exists()
+    if session.scalar(select(snapshot_reference)):
+        raise HTTPException(409, "数据源已被未完成异常的 SQL 校验引用")
     session.delete(item)
     session.commit()
 
@@ -966,7 +987,7 @@ def create_rule(payload: RuleCreate, session: Session = Depends(get_session), se
     dataset = session.get(Dataset, payload.dataset_id)
     if not dataset:
         raise HTTPException(404, "数据集不存在")
-    _validate_rule_sql_configuration(payload, dataset)
+    _validate_rule_sql_configuration(payload, dataset, session)
     _validate_group_broadcast_configuration(payload, dataset)
     _validate_message_templates(payload, dataset)
     item = Rule(**payload.model_dump(mode="json", exclude={"enabled", "group_broadcast"}), sync_status="pending", enabled=False)
@@ -1003,7 +1024,7 @@ def update_rule(rule_id: str, payload: RuleCreate, session: Session = Depends(ge
     dataset = session.get(Dataset, payload.dataset_id)
     if not dataset:
         raise HTTPException(404, "数据集不存在")
-    _validate_rule_sql_configuration(payload, dataset)
+    _validate_rule_sql_configuration(payload, dataset, session)
     _validate_group_broadcast_configuration(
         payload, dataset, existing_webhook=item.group_webhook_url, existing=item,
     )

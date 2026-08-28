@@ -334,6 +334,7 @@ test('validation rule fields and anomaly audit details map between API and UI co
   assert.equal(rule.deadlineSeconds, 1800);
   assert.equal(rule.validationMethod, 'sql');
   assert.equal(rule.sqlValidationConfig.queryTemplate, "SELECT status FROM repair_state WHERE owner_id='{目标ID}'");
+  assert.equal(rule.sqlValidationConfig.datasourceId, undefined, 'loading legacy SQL configuration must preserve the absent datasource');
   assert.deepEqual(JSON.parse(JSON.stringify(rule.validationTargets)), [
     { source: 'literal', value: 'u_1' }, { source: 'field', field: 'owner_id' },
   ]);
@@ -379,6 +380,7 @@ test('validation rule fields and anomaly audit details map between API and UI co
     validationTimeoutMinutes: 43200,
     validationMethod: 'sql',
     sqlValidationConfig: {
+      datasourceId: 'source-2',
       queryTemplate: "SELECT status FROM repair_state WHERE owner_id='{目标ID}'",
       parameters: [{ name: '目标ID', field: 'owner_id' }],
       trueCondition: { field: 'status', operator: 'eq', value: 'normal', upperValue: null },
@@ -397,6 +399,7 @@ test('validation rule fields and anomaly audit details map between API and UI co
   assert.equal(body.deadline_seconds, 2592000);
   assert.equal(body.validation_method, 'sql');
   assert.deepEqual(body.sql_validation_config, {
+    datasource_id: 'source-2',
     query_template: "SELECT status FROM repair_state WHERE owner_id='{目标ID}'",
     parameters: [{ name: '目标ID', field: 'owner_id' }],
     true_condition: { field: 'status', operator: 'eq', value: 'normal', upper_value: null, value_source: 'literal', value_field: null, upper_value_source: 'literal', upper_value_field: null },
@@ -779,7 +782,7 @@ test('rule operands, repeat push and split group broadcasts round-trip through t
   const result = await store.addRule({
     name: 'fields', schedule: {}, repeatPushEnabled: true,
     conditions: [{ field: 'actual', op: 'between', value_source: 'field', value_field: 'low', value: null, upper_value_source: 'field', upper_value_field: 'high' }],
-    validationMethod: 'sql', sqlValidationConfig: { queryTemplate: 'select actual, low', parameters: [], trueCondition: { field: 'actual', operator: 'gt', valueSource: 'field', valueField: 'low' } },
+    validationMethod: 'sql', sqlValidationConfig: { datasourceId: 'source-2', queryTemplate: 'select actual, low', parameters: [], trueCondition: { field: 'actual', operator: 'gt', valueSource: 'field', valueField: 'low' } },
     groupBroadcast: { webhookUrl: 'https://example.com/hook', situation: { enabled: true, mentionTargets: [] }, timeout: { enabled: true, mentionTargets: [{ source: 'literal', value: 'handler' }], messageTemplate: '{actual列表}' } },
   });
   const payload = JSON.parse(requests.at(-1).options.body);
@@ -792,6 +795,25 @@ test('rule operands, repeat push and split group broadcasts round-trip through t
   assert.equal(result.sqlValidationConfig.trueCondition.valueSource, 'field');
   assert.equal(result.sqlValidationConfig.trueCondition.valueField, 'low');
   assert.equal(result.groupBroadcast.timeout.messageTemplate, '{actual列表}');
+});
+
+test('SQL datasource identity survives create and update API round trips independently of the dataset', async () => {
+  const requests = [];
+  const context = { window: {}, fetch: async (url, options = {}) => {
+    requests.push({ url, options });
+    return { ok: true, status: 200, json: async () => ({ id: 'rule-1', ...JSON.parse(options.body || '{}') }) };
+  } };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'scripts', 'data.js'), 'utf8'), context);
+  const store = context.window.Store;
+  const input = { datasetId: 'dataset-1', schedule: {}, validationMethod: 'sql', sqlValidationConfig: {
+    datasourceId: 'source-2', queryTemplate: 'SELECT status', parameters: [], trueCondition: { field: 'status', operator: 'eq', value: 'normal' },
+  } };
+  const created = await store.addRule(input);
+  assert.equal(JSON.parse(requests[0].options.body).sql_validation_config.datasource_id, 'source-2');
+  assert.equal(created.sqlValidationConfig.datasourceId, 'source-2');
+  const updated = await store.updateRule('rule-1', { ...created, sqlValidationConfig: { ...created.sqlValidationConfig, datasourceId: 'source-3' } });
+  assert.equal(JSON.parse(requests[1].options.body).sql_validation_config.datasource_id, 'source-3');
+  assert.equal(updated.sqlValidationConfig.datasourceId, 'source-3');
 });
 
 test('group statuses and SQL field audit details retain resolved values when mapped', async () => {

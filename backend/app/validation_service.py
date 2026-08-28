@@ -106,7 +106,8 @@ def snapshot_validation(
         if rule.private_message_template:
             config_snapshot["private_message_template"] = rule.private_message_template
         if rule.validation_method == "sql":
-            config_snapshot["datasource_id"] = rule.dataset.datasource_id
+            # Only legacy rules without an explicit selection inherit the dataset source.
+            config_snapshot.setdefault("datasource_id", rule.dataset.datasource_id)
             config_snapshot["dataset_fields"] = [
                 str(field.get("name"))
                 for field in (rule.dataset.fields or [])

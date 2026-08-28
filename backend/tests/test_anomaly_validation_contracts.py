@@ -145,6 +145,7 @@ def test_validation_schema_requires_complete_enabled_target_configuration():
 def test_validation_schema_enforces_exactly_one_validation_method_configuration():
     """Allowing pseudo and SQL validation configuration on one rule must fail this test."""
     sql_config = {
+        "datasource_id": "validation-source",
         "query_template": "SELECT status FROM test_table WHERE id='{目标ID}'",
         "parameters": [{"name": "目标ID", "field": "target_id"}],
         "true_condition": {"field": "status", "operator": "eq", "value": "normal"},

@@ -325,6 +325,7 @@ def test_sql_validation_rule_crud_validates_template_mappings_and_serializes_con
             "validation_targets": [{"source": "literal", "value": "validator-1"}],
             "validation_method": "sql",
             "sql_validation_config": {
+                "datasource_id": dataset["datasource_id"],
                 "query_template": "SELECT status FROM repair_state WHERE store_id='{门店ID}'",
                 "parameters": [{"name": "门店ID", "field": "store_id"}],
                 "true_condition": {"field": "status", "operator": "eq", "value": "normal"},

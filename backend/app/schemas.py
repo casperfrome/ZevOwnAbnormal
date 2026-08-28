@@ -310,13 +310,14 @@ class SqlTrueCondition(ComparisonOperands):
         return value.strip() if isinstance(value, str) else value
 
 class SqlValidationConfig(BaseModel):
+    datasource_id: str = Field(min_length=1)
     query_template: str = Field(min_length=1, max_length=20000)
     parameters: list[SqlValidationParameter] = Field(default_factory=list)
     true_condition: SqlTrueCondition
 
-    @field_validator("query_template", mode="before")
+    @field_validator("datasource_id", "query_template", mode="before")
     @classmethod
-    def normalize_query_template(cls, value):
+    def normalize_sql_text(cls, value):
         return value.strip() if isinstance(value, str) else value
 
     @model_validator(mode="after")

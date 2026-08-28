@@ -224,6 +224,7 @@ test('rule field selectors preserve hostile names and types as inert option text
       window.ruleXss = 0;
       window.Store = {
         getRules: () => [], getDatasets: () => [datasetValue],
+        getDatasources: () => [], getDatasource: () => undefined,
         getDataset: id => id === datasetValue.id ? datasetValue : null,
       };
     }, dataset);
@@ -269,6 +270,7 @@ test('rule form saves real-time validation targets and reports an inline error w
       window.createdRule = null;
       window.Store = {
         getRules: () => [], getDatasets: () => [dataset],
+        getDatasources: () => [], getDatasource: () => undefined,
         getDataset: id => id === dataset.id ? dataset : null,
         addRule: async payload => { window.createdRule = payload; },
       };
@@ -344,6 +346,7 @@ test('disabled real-time validation preserves configured targets when editing', 
       window.savedRule = null;
       window.Store = {
         getRules: () => [rule], getRule: () => rule, getDatasets: () => [dataset], getDataset: () => dataset,
+        getDatasources: () => [], getDatasource: () => undefined,
         updateRule: async (_id, payload) => { window.savedRule = payload; },
       };
     }, { dataset, rule });
@@ -1350,9 +1353,11 @@ test('record administrative actions fit the mobile viewport without clipping', a
 test('rule form configures one SQL validation method with mapped anomaly fields', async t => {
   const { page, pageErrors } = await withPage(t, async page => {
     await page.evaluate(dataset => {
+      const datasource = { id: 'source-1', name: 'Repair database', type: 'mysql', status: 'online' };
       window.createdRule = null;
       window.Store = {
         getRules: () => [], getDatasets: () => [dataset],
+        getDatasources: () => [datasource], getDatasource: id => id === datasource.id ? datasource : undefined,
         getDataset: id => id === dataset.id ? dataset : null,
         addRule: async payload => { window.createdRule = payload; },
       };
@@ -1381,6 +1386,7 @@ test('rule form configures one SQL validation method with mapped anomaly fields'
   await page.getByRole('tab', { name: '实时校验', exact: true }).click();
   await page.click('[data-validation-method="sql"]');
   assert.equal(await page.locator('#f-sql-validation-panel').isVisible(), true);
+  await page.selectOption('#f-sql-datasource', 'source-1');
   await page.fill('#f-validation-sql', "SELECT current_amount FROM repair_state WHERE order_id='{订单ID}'");
   await page.click('#f-add-sql-parameter');
   const mapping = page.locator('.sql-parameter-row').last();
@@ -1395,6 +1401,7 @@ test('rule form configures one SQL validation method with mapped anomaly fields'
   const created = await page.evaluate(() => window.createdRule);
   assert.equal(created.validationMethod, 'sql');
   assert.deepEqual(created.sqlValidationConfig, {
+    datasourceId: 'source-1',
     queryTemplate: "SELECT current_amount FROM repair_state WHERE order_id='{订单ID}'",
     parameters: [{ name: '订单ID', field: 'order_id' }],
     trueCondition: { field: 'current_amount', operator: 'lt', value: 100, upperValue: null, valueSource: 'literal', valueField: null, upperValueSource: 'literal', upperValueField: null },

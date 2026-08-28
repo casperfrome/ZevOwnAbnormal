@@ -7,7 +7,10 @@ const { chromium } = require('./browser');
 
 const frontendRoot = path.join(__dirname, '..');
 
-async function openTabbedRule(t, { editing = true, viewport = { width: 1280, height: 900 }, rulePatch = {} } = {}) {
+async function openTabbedRule(t, { editing = true, viewport = { width: 1280, height: 900 }, rulePatch = {}, datasources = [
+  { id: 'source-1', name: '订单库', type: 'mysql', status: 'online' },
+  { id: 'source-2', name: '校验仓库', type: 'starrocks', status: 'offline' },
+] } = {}) {
   const browser = await chromium.launch({ headless: true });
   t.after(() => browser.close());
   const page = await browser.newPage({ viewport });
@@ -22,8 +25,8 @@ async function openTabbedRule(t, { editing = true, viewport = { width: 1280, hei
   for (const file of ['icons', 'components']) {
     await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', `${file}.js`) });
   }
-  await page.evaluate(rulePatch => {
-    const dataset = { id: 'dataset-1', name: '订单数据', rowCount: 2, fields: [
+  await page.evaluate(({ rulePatch, datasources }) => {
+    const dataset = { id: 'dataset-1', name: '订单数据', datasourceId: 'source-1', rowCount: 2, fields: [
       { name: 'order_id', type: 'VARCHAR' }, { name: 'amount', type: 'DECIMAL' },
       { name: 'owner_id', type: 'VARCHAR' }, { name: 'limit', type: 'DECIMAL' },
     ] };
@@ -39,12 +42,14 @@ async function openTabbedRule(t, { editing = true, viewport = { width: 1280, hei
     };
     Object.assign(rule, rulePatch);
     window.savedRule = null;
+    const datasets = [dataset, { ...dataset, id: 'dataset-2', name: '另一个数据集', datasourceId: 'source-2' }];
     window.Store = {
-      getRules: () => [rule], getRule: () => rule, getDatasets: () => [dataset], getDataset: () => dataset,
+      getRules: () => [rule], getRule: () => rule, getDatasets: () => datasets, getDataset: id => datasets.find(item => item.id === id),
+      getDatasources: () => datasources, getDatasource: id => datasources.find(item => item.id === id),
       addRule: async payload => { window.savedRule = payload; },
       updateRule: async (_id, payload) => { window.savedRule = payload; },
     };
-  }, rulePatch);
+  }, { rulePatch, datasources });
   await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'rules.js') });
   await page.evaluate(() => RulesModule.render(document.getElementById('content'), {
     actionsEl: document.getElementById('actions'), navigate: () => {},
@@ -323,11 +328,106 @@ test('saving opens the hidden tab containing an error and focuses its input', as
   assert.deepEqual(await page.evaluate(() => window.savedRule.groupBroadcast.situation.mentionTargets), [], 'situation mentions are optional');
 });
 
+test('SQL datasource is required and all existing sources including offline sources are selectable', async t => {
+  const page = await openTabbedRule(t);
+  await page.getByRole('tab', { name: '实时校验' }).click();
+  await page.click('[data-validation-method="sql"]');
+  assert.equal(await page.locator('#f-sql-datasource').count(), 1, 'SQL validation must offer its own datasource selector');
+  assert.equal(await page.locator('#f-sql-datasource').inputValue(), '');
+  assert.equal(await page.locator('#f-sql-datasource').getAttribute('aria-required'), 'true');
+  const options = await page.locator('#f-sql-datasource option').evaluateAll(nodes => nodes.map(node => ({ value: node.value, text: node.textContent, disabled: node.disabled })));
+  assert.deepEqual(options.map(option => option.value), ['', 'source-1', 'source-2']);
+  assert.match(options[1].text, /订单库.*MySQL/);
+  assert.match(options[2].text, /校验仓库.*StarRocks.*离线/);
+  assert.equal(options[2].disabled, false);
+  await page.fill('#f-validation-sql', 'SELECT status FROM repairs');
+  await page.fill('#f-sql-result-field', 'status');
+  await page.fill('#f-sql-value', 'normal');
+  await page.getByRole('tab', { name: '基本信息' }).click();
+  await page.click('#f-save');
+  assert.equal(await page.evaluate(() => window.savedRule), null);
+  assert.equal(await page.evaluate(() => document.activeElement.id), 'f-sql-datasource');
+  assert.match(await page.locator('#f-validation-target-error').innerText(), /选择.*数据源/);
+  await page.selectOption('#f-sql-datasource', 'source-2');
+  await page.click('#f-save');
+  assert.equal(await page.evaluate(() => window.savedRule.sqlValidationConfig.datasourceId), 'source-2');
+});
+
+test('new SQL configurations remain blank even after a dataset is selected', async t => {
+  const page = await openTabbedRule(t, { editing: false });
+  await page.getByRole('tab', { name: '关联数据集' }).click();
+  await page.selectOption('#f-dataset', 'dataset-1');
+  await page.getByRole('tab', { name: '实时校验' }).click();
+  await page.click('[data-validation-method="sql"]');
+  assert.equal(await page.locator('#f-sql-datasource').count(), 1);
+  assert.equal(await page.locator('#f-sql-datasource').inputValue(), '');
+});
+
+test('legacy SQL editing selects the original datasource once and saves an independent selection', async t => {
+  const page = await openTabbedRule(t, { rulePatch: {
+    validationMethod: 'sql', sqlValidationConfig: {
+      queryTemplate: 'SELECT status FROM repairs WHERE id={订单ID}', parameters: [{ name: '订单ID', field: 'order_id' }],
+      trueCondition: { field: 'status', operator: 'eq', value: 'normal' },
+    },
+  } });
+  assert.equal(await page.locator('#f-sql-datasource').count(), 1);
+  assert.equal(await page.locator('#f-sql-datasource').inputValue(), 'source-1');
+  await page.getByRole('tab', { name: '关联数据集' }).click();
+  await page.selectOption('#f-dataset', 'dataset-2');
+  await page.getByRole('tab', { name: '实时校验' }).click();
+  assert.equal(await page.locator('#f-sql-datasource').inputValue(), 'source-1');
+  await page.selectOption('#f-sql-datasource', 'source-2');
+  await page.click('[data-validation-method="pseudo"]');
+  await page.click('[data-validation-method="sql"]');
+  assert.equal(await page.locator('#f-sql-datasource').inputValue(), 'source-2');
+  await page.getByRole('tab', { name: '关联数据集' }).click();
+  await page.selectOption('#f-dataset', 'dataset-1');
+  await page.click('#f-key-fields');
+  await page.locator('#f-key-fields-listbox [data-key-field="order_id"]').click();
+  await page.click('#f-save');
+  const saved = await page.evaluate(() => window.savedRule);
+  assert.equal(saved.datasetId, 'dataset-1');
+  assert.equal(saved.sqlValidationConfig.datasourceId, 'source-2');
+  assert.deepEqual(saved.sqlValidationConfig.parameters, [{ name: '订单ID', field: 'order_id' }]);
+  await page.evaluate(() => { Store.getRule = () => ({ id: 'rule-1', ...window.savedRule }); RulesModule.openItem('rule-1'); });
+  assert.equal(await page.locator('#f-sql-datasource').inputValue(), 'source-2');
+});
+
+test('missing SQL datasource is retained as unavailable and cannot fall back or save', async t => {
+  const page = await openTabbedRule(t, { rulePatch: {
+    validationMethod: 'sql', sqlValidationConfig: { datasourceId: 'deleted-source', queryTemplate: 'SELECT status FROM repairs', parameters: [], trueCondition: { field: 'status', operator: 'eq', value: 'normal' } },
+  } });
+  assert.equal(await page.locator('#f-sql-datasource').count(), 1);
+  assert.equal(await page.locator('#f-sql-datasource').inputValue(), 'deleted-source');
+  assert.match(await page.locator('#f-sql-datasource option:checked').textContent(), /不可用/);
+  await page.click('#f-save');
+  assert.equal(await page.evaluate(() => window.savedRule), null);
+  assert.equal(await page.evaluate(() => document.activeElement.id), 'f-sql-datasource');
+  await page.selectOption('#f-sql-datasource', 'source-2');
+  await page.click('#f-save');
+  assert.equal(await page.evaluate(() => window.savedRule.sqlValidationConfig.datasourceId), 'source-2');
+});
+
+test('SQL without any sources explains the prerequisite while pseudo validation can save', async t => {
+  const page = await openTabbedRule(t, { datasources: [], rulePatch: {
+    validationMethod: 'sql', sqlValidationConfig: { queryTemplate: 'SELECT status', parameters: [], trueCondition: { field: 'status', operator: 'eq', value: 'normal' } },
+  } });
+  await page.getByRole('tab', { name: '实时校验' }).click();
+  assert.match(await page.locator('#f-sql-validation-panel').innerText(), /先创建数据源/);
+  await page.click('#f-save');
+  assert.equal(await page.evaluate(() => window.savedRule), null);
+  assert.match(await page.locator('#f-validation-target-error').innerText(), /先创建数据源/);
+  await page.click('[data-validation-method="pseudo"]');
+  await page.click('#f-save');
+  assert.equal(await page.evaluate(() => window.savedRule.sqlValidationConfig), null);
+});
+
 test('SQL validation keeps its draft across tabs and focuses missing parameter mappings', async t => {
   const page = await openTabbedRule(t);
   await page.getByRole('tab', { name: '实时校验' }).click();
   await page.click('[data-validation-method="sql"]');
   await page.fill('#f-validation-sql', 'SELECT amount FROM orders WHERE id={订单ID}');
+  await page.selectOption('#f-sql-datasource', 'source-2');
   await page.click('#f-add-sql-parameter');
   await page.locator('[data-sql-param="name"]').fill('订单ID');
   await page.getByRole('tab', { name: '基本信息' }).click();
@@ -349,6 +449,7 @@ test('SQL validation keeps its draft across tabs and focuses missing parameter m
   await page.getByRole('tab', { name: '基本信息' }).click();
   await page.click('#f-save');
   assert.deepEqual(await page.evaluate(() => window.savedRule.sqlValidationConfig), {
+    datasourceId: 'source-2',
     queryTemplate: 'SELECT amount FROM orders WHERE id={订单ID}',
     parameters: [{ name: '订单ID', field: 'order_id' }],
     trueCondition: { field: 'amount', operator: 'between', value: 10, upperValue: 20, valueSource: 'literal', valueField: null, upperValueSource: 'literal', upperValueField: null },
@@ -375,6 +476,7 @@ test('rule summary shows deduplicated pushes in transit and refreshes the server
     window.Store = {
       getRules: () => [],
       getDatasets: () => [],
+      getDatasources: () => [], getDatasource: () => undefined,
       getStats: () => ({ pushInTransitAnomalies: window.pushInTransit }),
       refresh: async () => {
         window.refreshCalls += 1;
@@ -452,6 +554,7 @@ test('opening an existing rule directly renders its condition and can add anothe
       getRules: () => [rule],
       getRule: id => id === rule.id ? rule : null,
       getDatasets: () => [dataset],
+      getDatasources: () => [], getDatasource: () => undefined,
       getDataset: id => id === dataset.id ? dataset : null,
       updateRule: async (_id, payload) => { window.updatedRule = payload; },
     };
@@ -540,6 +643,7 @@ test('editing an API-shaped condition removes the stale operator before saving',
     window.Store = {
       getRules: () => [rule], getRule: () => rule,
       getDatasets: () => [dataset], getDataset: () => dataset,
+      getDatasources: () => [], getDatasource: () => undefined,
       updateRule: async (_id, payload) => {
         window.updatedRule = payload;
         Object.assign(rule, payload);
@@ -606,6 +710,7 @@ test('creating a rule uses condition fields and commits a typed user_id without 
     window.Store = {
       getRules: () => [],
       getDatasets: () => [dataset],
+      getDatasources: () => [], getDatasource: () => undefined,
       getDataset: id => id === dataset.id ? dataset : null,
       addRule: async payload => { window.createdRule = payload; },
     };
@@ -688,6 +793,7 @@ test('anomaly key picker supports accessible multi-selection and clears stale fi
     window.Store = {
       getRules: () => [],
       getDatasets: () => datasets,
+      getDatasources: () => [], getDatasource: () => undefined,
       getDataset: id => datasets.find(dataset => dataset.id === id),
     };
   });
@@ -786,6 +892,7 @@ test('rule form preserves configured webhook and saves fixed plus field group me
     window.Store = {
       getRules: () => [rule], getRule: () => rule,
       getDatasets: () => [dataset], getDataset: () => dataset,
+      getDatasources: () => [], getDatasource: () => undefined,
       updateRule: async (_id, payload) => { window.updatedRule = payload; },
     };
   });
@@ -873,6 +980,7 @@ test('rule form inserts template parameters and links from nested drawers and va
     window.Store = {
       getRules: () => [rule], getRule: () => rule,
       getDatasets: () => [dataset], getDataset: () => dataset,
+      getDatasources: () => [], getDatasource: () => undefined,
       updateRule: async (_id, payload) => { window.updatedRule = payload; },
     };
   });
@@ -985,6 +1093,7 @@ test('SQL result field operands persist and hide for null operators without losi
   await page.getByRole('tab', { name: '实时校验' }).click();
   await page.click('[data-validation-method="sql"]');
   await page.fill('#f-validation-sql', 'SELECT amount, low, high FROM orders');
+  await page.selectOption('#f-sql-datasource', 'source-1');
   await page.fill('#f-sql-result-field', 'amount');
   await page.selectOption('#f-sql-operator', 'between');
   assert.equal(await page.locator('#f-sql-value-operand [data-source="field"]').count(), 1);

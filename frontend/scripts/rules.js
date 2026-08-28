@@ -323,6 +323,13 @@ window.RulesModule = (function () {
     const situationBroadcast = groupBroadcast.situation || groupBroadcast;
     const timeoutBroadcast = groupBroadcast.timeout || {};
     const sqlCondition = data.sqlValidationConfig?.trueCondition || {};
+    const datasources = Store.getDatasources();
+    // Resolve legacy configuration only when opening an existing SQL rule.
+    // Dataset changes below must never replace the validation datasource draft.
+    const sqlDatasourceId = data.sqlValidationConfig?.datasourceId === undefined && editing?.validationMethod === 'sql'
+      ? (Store.getDataset(data.datasetId)?.datasourceId || '')
+      : (data.sqlValidationConfig?.datasourceId || '');
+    const missingSqlDatasource = sqlDatasourceId && !datasources.some(source => source.id === sqlDatasourceId);
 
     function operandSwitch(source) {
       return `<div class="segmented operand-source" role="group" aria-label="比较值来源">
@@ -453,6 +460,15 @@ window.RulesModule = (function () {
             ${Icon.info({ size: 14 })}<span>处理人在飞书卡片填写说明并提交后，异常即视为校验通过。</span>
           </div>
           <div id="f-sql-validation-panel" class="validation-method-panel sql-validation-panel" ${data.validationMethod === 'sql' ? '' : 'hidden'}>
+            <div class="field">
+              <label class="field-label" for="f-sql-datasource"><span>校验数据源<span class="field-required">*</span></span></label>
+              <select class="select" id="f-sql-datasource" aria-required="true" aria-describedby="f-sql-datasource-help">
+                <option value="">请选择校验数据源…</option>
+                ${missingSqlDatasource ? `<option value="${escapeHtml(sqlDatasourceId)}" selected disabled>数据源不可用（${escapeHtml(sqlDatasourceId)}），请重新选择</option>` : ''}
+                ${datasources.map(source => `<option value="${escapeHtml(source.id)}" ${source.id === sqlDatasourceId ? 'selected' : ''}>${escapeHtml(source.name)} · ${escapeHtml({ mysql: 'MySQL', starrocks: 'StarRocks' }[source.type] || source.type)}${source.status === 'offline' ? ' · 离线' : ''}</option>`).join('')}
+              </select>
+              <div class="field-help" id="f-sql-datasource-help">${datasources.length ? '独立于异常数据集；离线数据源仍可选择，SQL 参数取自异常数据集字段。' : '暂无已有数据源，请先创建数据源后再配置 SQL 校验。'}</div>
+            </div>
             <div class="field">
               <label class="field-label" for="f-validation-sql"><span>查询 SQL<span class="field-required">*</span></span></label>
               <textarea class="input mono sql-validation-editor" id="f-validation-sql" rows="6" placeholder="SELECT status FROM test_table WHERE id='{目标ID}'">${escapeHtml(data.sqlValidationConfig?.queryTemplate || '')}</textarea>
@@ -1374,6 +1390,7 @@ window.RulesModule = (function () {
       };
       const sqlTrueOperator = m.dialog.querySelector('#f-sql-operator').value;
       const sqlValidationConfig = validationMethod === 'sql' ? {
+        datasourceId: m.dialog.querySelector('#f-sql-datasource').value.trim(),
         queryTemplate: m.dialog.querySelector('#f-validation-sql').value.trim(),
         parameters: captureSqlParameters(),
         trueCondition: {
@@ -1398,7 +1415,16 @@ window.RulesModule = (function () {
         const placeholders = [...sqlValidationConfig.queryTemplate.matchAll(/\{([^{}]+)\}/g)].map(match => match[1].trim());
         const missingMappings = [...new Set(placeholders)].filter(name => !parameterNames.includes(name));
         const unusedMappings = [...new Set(parameterNames)].filter(name => !placeholders.includes(name));
-        if (!sqlValidationConfig.queryTemplate) validationMessage = 'SQL 校验必须填写查询 SQL';
+        if (!Store.getDatasources().length) {
+          validationMessage = '请先创建数据源后再配置 SQL 校验';
+          validationControl = '#f-sql-datasource';
+        } else if (!sqlValidationConfig.datasourceId) {
+          validationMessage = 'SQL 校验必须选择校验数据源';
+          validationControl = '#f-sql-datasource';
+        } else if (!Store.getDatasource(sqlValidationConfig.datasourceId)) {
+          validationMessage = '所选校验数据源不可用，请重新选择';
+          validationControl = '#f-sql-datasource';
+        } else if (!sqlValidationConfig.queryTemplate) validationMessage = 'SQL 校验必须填写查询 SQL';
         else if (sqlValidationConfig.parameters.some(item => !item.name || !item.field)) {
           validationMessage = '每个 SQL 参数都必须填写参数名并选择异常字段';
           const index = sqlValidationConfig.parameters.findIndex(item => !item.name || !item.field);
