@@ -29,6 +29,112 @@ async function openResizableTable(page) {
   await page.evaluate(() => UI.initResizableTables(document));
 }
 
+test('button tooltips escape clipped table cells and overlay modal content', async t => {
+  const browser = await chromium.launch({ headless: true, executablePath });
+  t.after(() => browser.close());
+  const page = await browser.newPage({ viewport: { width: 390, height: 700 } });
+  page.setDefaultTimeout(2000);
+  await openResizableTable(page);
+  await page.evaluate(() => {
+    document.querySelector('.table-wrap').style.marginTop = '80px';
+    document.querySelector('tbody').innerHTML = [1, 2].map(n => `<tr><td>Row ${n}</td><td>
+      <button data-tooltip="提示 ${n}" aria-label="操作 ${n}"><span>操作</span></button>
+    </td></tr>`).join('');
+  });
+  const tip = page.getByRole('tooltip');
+  for (const n of [1, 2]) {
+    await page.getByRole('button', { name: `操作 ${n}` }).hover();
+    await tip.waitFor({ state: 'visible' });
+    assert.equal(await tip.textContent(), `提示 ${n}`);
+    const geometry = await tip.evaluate(el => {
+      const box = el.getBoundingClientRect();
+      const cell = document.querySelector('tbody tr:hover td:last-child');
+      // Hit-test the painted overlay, temporarily enabling pointer events for the assertion.
+      el.style.pointerEvents = 'auto';
+      const topmost = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2) === el;
+      el.style.removeProperty('pointer-events');
+      return { topmost, outsideCell: box.bottom <= cell.getBoundingClientRect().top + 16,
+        fixed: getComputedStyle(el).position, parent: el.parentElement.tagName,
+        passthrough: getComputedStyle(el).pointerEvents };
+    });
+    assert.deepEqual(geometry, { topmost: true, outsideCell: true, fixed: 'fixed', parent: 'BODY', passthrough: 'none' });
+  }
+  await page.evaluate(() => UI.modal({ title: 'Test modal', body: '<button data-tooltip="弹窗提示">弹窗操作</button>' }));
+  await page.getByRole('button', { name: '弹窗操作' }).hover();
+  await tip.waitFor({ state: 'visible' });
+  assert.equal(await tip.textContent(), '弹窗提示');
+  assert.equal(await tip.evaluate(el => {
+    const box = el.getBoundingClientRect();
+    el.style.pointerEvents = 'auto';
+    const topmost = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2) === el;
+    el.style.removeProperty('pointer-events');
+    return topmost;
+  }), true);
+});
+
+test('tooltips fit viewport edges, render text safely, and close on navigation or removal', async t => {
+  const browser = await chromium.launch({ headless: true, executablePath });
+  t.after(() => browser.close());
+  const page = await browser.newPage({ viewport: { width: 390, height: 700 } });
+  page.setDefaultTimeout(2000);
+  await openResizableTable(page);
+  await page.evaluate(() => {
+    const button = document.createElement('button');
+    button.id = 'edge-button';
+    button.textContent = '边缘按钮';
+    button.dataset.tooltip = '<b>纯文本</b>' + '很长的说明'.repeat(30);
+    button.setAttribute('aria-describedby', 'existing-description');
+    button.style.cssText = 'position:fixed;top:0;right:0';
+    document.body.append(button);
+  });
+  const button = page.locator('#edge-button');
+  const tip = page.getByRole('tooltip');
+  await button.focus();
+  await tip.waitFor({ state: 'visible' });
+  assert.equal(await tip.locator('b').count(), 0);
+  assert.ok((await tip.textContent()).startsWith('<b>纯文本</b>'));
+  const bounds = await tip.boundingBox();
+  const anchor = await button.boundingBox();
+  assert.ok(bounds.y >= anchor.y + anchor.height, 'flips below a button at the top edge');
+  assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= 390 && bounds.y + bounds.height <= 700);
+  assert.ok((await button.getAttribute('aria-describedby')).includes('existing-description'));
+  assert.ok((await button.getAttribute('aria-describedby')).includes(await tip.getAttribute('id')));
+  await button.press('Escape');
+  await tip.waitFor({ state: 'hidden' });
+  assert.equal(await button.getAttribute('aria-describedby'), 'existing-description');
+  await button.evaluate(el => el.blur());
+  await button.focus();
+  await tip.waitFor({ state: 'visible' });
+  await button.evaluate(el => el.blur());
+  await tip.waitFor({ state: 'hidden' });
+  assert.equal(await button.getAttribute('aria-describedby'), 'existing-description');
+  await button.focus();
+  await tip.waitFor({ state: 'visible' });
+  await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+  await tip.waitFor({ state: 'hidden' });
+
+  const show = async () => {
+    await page.mouse.move(10, 650);
+    await button.hover();
+    await tip.waitFor({ state: 'visible' });
+  };
+  await show();
+  await page.mouse.move(10, 650);
+  await tip.waitFor({ state: 'hidden' });
+  await show();
+  await page.evaluate(() => document.querySelector('.table-wrap').dispatchEvent(new Event('scroll')));
+  await tip.waitFor({ state: 'hidden' });
+  await show();
+  await page.setViewportSize({ width: 360, height: 640 });
+  await tip.waitFor({ state: 'hidden' });
+  await page.mouse.move(10, 600);
+  await button.hover();
+  await tip.waitFor({ state: 'visible' });
+  await button.evaluate(el => el.remove());
+  await tip.waitFor({ state: 'hidden' });
+  assert.equal(await page.locator('[role="tooltip"]').count(), 1, 'one shared node survives dynamic rerenders');
+});
+
 test('resizable tables persist widths, enforce a minimum, and do not trigger header clicks', async t => {
   const browser = await chromium.launch({ headless: true, executablePath });
   t.after(() => browser.close());

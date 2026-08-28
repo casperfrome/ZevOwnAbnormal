@@ -1,5 +1,7 @@
 const assert = require('node:assert/strict');
 const path = require('node:path');
+const fs = require('node:fs');
+const http = require('node:http');
 const test = require('node:test');
 const { chromium } = require('playwright');
 
@@ -917,6 +919,90 @@ test('ratio conditions accept a numeric field multiplier and retain baseline acr
   assert.equal(saved.value_source, 'field');
   assert.equal(saved.value_field, 'limit');
   assert.equal(saved.baseline, '7d_avg');
+});
+
+test('entrypoint bypasses a cached legacy Store and repeat push survives saving and reloading in both directions', async t => {
+  const legacyUrl = '/scripts/data.js?v=20260826-auth-login';
+  const storeSource = fs.readFileSync(path.join(frontendRoot, 'scripts/data.js'), 'utf8');
+  // The previous release omitted the flag in both serialization directions.
+  const legacySource = storeSource.replace(/^\s*repeatPushEnabled:.*$/m, '')
+    .replace(/^\s*repeat_push_enabled:.*$/m, '');
+  const entry = fs.readFileSync(path.join(frontendRoot, 'index.html'), 'utf8')
+    .replace(/<link[^>]*https:\/\/[^>]*>/g, '')
+    .replace(/<script src="scripts\/(?!icons\.js|data\.js|components\.js|rules\.js)[^>]*><\/script>/g, '');
+  const dataset = { id: 'dataset-1', name: '订单', fields: [{ name: 'order_id', type: 'VARCHAR' }, { name: 'amount', type: 'DECIMAL' }], row_count: 1 };
+  let rule = { id: 'rule-1', name: '订单异常', dataset_id: dataset.id, dataset_name: dataset.name,
+    severity: 'medium', logic: 'AND', enabled: false, repeat_push_enabled: false,
+    conditions: [{ field: 'amount', operator: 'gt', value: 100 }], anomaly_key_fields: ['order_id'],
+    schedule: { frequency: 'day', interval: 1, time: '09:00', start_date: '2026-08-28' },
+    notification_targets: [{ receive_id_type: 'user_id', source: 'literal', value: 'owner' }] };
+  const submitted = [];
+  let priming = true;
+  let legacyLoads = 0;
+  const server = http.createServer(async (req, res) => {
+    const pathname = new URL(req.url, 'http://localhost').pathname;
+    const send = (body, type, cache = 'no-store') => {
+      res.writeHead(200, { 'Content-Type': type, 'Cache-Control': cache });
+      res.end(body);
+    };
+    if (pathname === '/prime') return send(`<script src="${legacyUrl}"></script>`, 'text/html');
+    if (pathname === '/') return send(entry, 'text/html');
+    if (pathname.startsWith('/api/v1/')) {
+      if (req.method === 'PUT' && pathname === '/api/v1/rules/rule-1') {
+        let body = '';
+        for await (const chunk of req) body += chunk;
+        const payload = JSON.parse(body);
+        submitted.push(payload);
+        rule = { ...rule, ...payload, repeat_push_enabled: payload.repeat_push_enabled ?? false };
+        return send(JSON.stringify(rule), 'application/json');
+      }
+      const result = { '/api/v1/datasources': [], '/api/v1/datasets': [dataset],
+        '/api/v1/rules': [rule], '/api/v1/anomalies': { items: [], total: 0 }, '/api/v1/overview': {} }[pathname];
+      if (result) return send(JSON.stringify(result), 'application/json');
+    }
+    if (/^\/(scripts|styles)\/[\w.-]+\.(js|css)$/.test(pathname)) {
+      if (req.url === legacyUrl) legacyLoads += 1;
+      const content = priming && req.url === legacyUrl ? legacySource : fs.readFileSync(path.join(frontendRoot, pathname.slice(1)), 'utf8');
+      return send(content, pathname.endsWith('.js') ? 'text/javascript' : 'text/css', 'public, max-age=3600');
+    }
+    res.writeHead(404); res.end();
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const browser = await chromium.launch({ headless: true, executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' });
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  page.setDefaultTimeout(3000);
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  await page.goto(origin + '/prime');
+  assert.equal(legacyLoads, 1);
+  priming = false;
+  await page.goto(origin);
+  const mount = () => page.evaluate(async () => {
+    await Store.refresh();
+    const actions = document.createElement('div');
+    document.body.append(actions);
+    RulesModule.render(document.getElementById('page-root'), { actionsEl: actions, navigate: () => {} });
+    RulesModule.openItem('rule-1');
+  });
+  await mount();
+  for (const enabled of [true, false]) {
+    await page.getByRole('tab', { name: '关联数据集', exact: true }).click();
+    assert.equal(await page.locator('#f-repeat-push-enabled').isChecked(), !enabled);
+    await page.locator('label').filter({ has: page.locator('#f-repeat-push-enabled') }).click();
+    await page.getByRole('tab', { name: '基本信息', exact: true }).click();
+    await page.click('#f-save');
+    await page.locator('#f-save').waitFor({ state: 'detached' });
+    assert.equal(submitted.at(-1).repeat_push_enabled, enabled, 'the active Store submits the selected flag');
+    await page.evaluate(() => RulesModule.openItem('rule-1'));
+    await page.getByRole('tab', { name: '关联数据集', exact: true }).click();
+    assert.equal(await page.locator('#f-repeat-push-enabled').isChecked(), enabled, 'API response maps back into the form');
+    await page.reload();
+    await mount();
+    await page.getByRole('tab', { name: '关联数据集', exact: true }).click();
+    assert.equal(await page.locator('#f-repeat-push-enabled').isChecked(), enabled, 'fresh API reads retain the flag');
+  }
+  assert.equal(legacyLoads, 1, 'the old script remains cached instead of being forcibly refreshed');
 });
 
 test('switching datasets clears both field operand references without discarding literal drafts', async t => {

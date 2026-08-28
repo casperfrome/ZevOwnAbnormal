@@ -200,8 +200,70 @@ window.UI = (function () {
     tables.forEach(initResizableTable);
   };
 
+  // A body-level tooltip escapes clipped cells and local stacking contexts.
+  const initTooltips = () => {
+    const tooltip = document.createElement('div');
+    tooltip.id = 'ui-tooltip';
+    tooltip.className = 'ui-tooltip';
+    tooltip.setAttribute('role', 'tooltip');
+    tooltip.hidden = true;
+    document.body.appendChild(tooltip);
+    let anchor = null;
+
+    const hide = () => {
+      if (anchor) {
+        const descriptions = (anchor.getAttribute('aria-describedby') || '').split(/\s+/)
+          .filter(id => id && id !== tooltip.id);
+        if (descriptions.length) anchor.setAttribute('aria-describedby', descriptions.join(' '));
+        else anchor.removeAttribute('aria-describedby');
+      }
+      anchor = null;
+      tooltip.hidden = true;
+    };
+    const targetOf = node => node?.closest?.('[data-tooltip]');
+    const show = target => {
+      if (!target || target === anchor) return;
+      hide();
+      const text = target.getAttribute('data-tooltip');
+      if (!text?.trim()) return;
+      anchor = target;
+      tooltip.textContent = text;
+      tooltip.hidden = false;
+
+      const rect = anchor.getBoundingClientRect();
+      const tip = tooltip.getBoundingClientRect();
+      const width = document.documentElement.clientWidth;
+      const height = document.documentElement.clientHeight;
+      const margin = 8;
+      const gap = 6;
+      const left = rect.left + (rect.width - tip.width) / 2;
+      const above = rect.top - tip.height - gap;
+      const top = above >= margin ? above : rect.bottom + gap;
+      tooltip.style.left = `${Math.max(margin, Math.min(left, width - tip.width - margin))}px`;
+      tooltip.style.top = `${Math.max(margin, Math.min(top, height - tip.height - margin))}px`;
+      const descriptions = (anchor.getAttribute('aria-describedby') || '').split(/\s+/).filter(Boolean);
+      anchor.setAttribute('aria-describedby', [...new Set([...descriptions, tooltip.id])].join(' '));
+    };
+    const leave = event => {
+      if (anchor?.contains(event.target) && !anchor.contains(event.relatedTarget)) hide();
+    };
+    document.addEventListener('pointerover', event => show(targetOf(event.target)));
+    document.addEventListener('pointerout', leave);
+    document.addEventListener('focusin', event => show(targetOf(event.target)));
+    document.addEventListener('focusout', leave);
+    document.addEventListener('click', hide, true);
+    document.addEventListener('keydown', event => { if (event.key === 'Escape') hide(); }, true);
+    document.addEventListener('scroll', hide, true);
+    window.addEventListener('resize', hide);
+    window.addEventListener('blur', hide);
+    new MutationObserver(() => {
+      if (anchor && !anchor.isConnected) hide();
+    }).observe(document.body, { childList: true, subtree: true });
+  };
+
   if (typeof document !== 'undefined' && typeof MutationObserver !== 'undefined') {
     const startTableObserver = () => {
+      initTooltips();
       initResizableTables(document);
       const observer = new MutationObserver(mutations => mutations.forEach(mutation => {
         mutation.addedNodes.forEach(node => {

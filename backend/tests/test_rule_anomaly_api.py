@@ -91,6 +91,19 @@ def test_rule_crud_exposes_key_fields_and_targets():
         assert body["sync_status"] == "pending"
         assert len(client.get("/api/v1/rules").json()) == 1
 
+        assert body["repeat_push_enabled"] is False
+        rule_id = body["id"]
+        for enabled in (True, False):
+            updated = client.put(f"/api/v1/rules/{rule_id}", json={
+                **body, "repeat_push_enabled": enabled,
+            })
+            assert updated.status_code == 200, updated.text
+            assert updated.json()["repeat_push_enabled"] is enabled
+            with client.app.state.session_factory() as session:
+                assert session.get(Rule, rule_id).repeat_push_enabled is enabled
+            assert client.get(f"/api/v1/rules/{rule_id}").json()["repeat_push_enabled"] is enabled
+            assert client.get("/api/v1/rules").json()[0]["repeat_push_enabled"] is enabled
+
 
 def test_rule_group_broadcast_config_is_validated_stored_and_returned_as_plaintext():
     """Webhook configuration is editable in full while URL and field validation remain enforced."""
