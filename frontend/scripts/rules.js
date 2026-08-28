@@ -280,8 +280,7 @@ window.RulesModule = (function () {
       size: 'xl',
       onClose: () => cleanupKeyFieldPicker(),
       body: `
-        <div class="form-section">
-          <div class="form-section-title">${Icon.info({ size: 14 })}基本信息</div>
+        <div class="form-section rule-form-panel" id="rule-panel-basic" data-rule-panel="basic" role="tabpanel" aria-labelledby="rule-tab-basic">
           <div class="form-grid">
             ${UI.field('规则名称', `<input class="input" id="f-name" value="${escapeHtml(data.name)}" placeholder="例如：订单金额突增检测" />`, { required: true })}
             ${UI.field('严重程度', `
@@ -296,8 +295,63 @@ window.RulesModule = (function () {
           </div>
         </div>
 
-        <div class="form-section validation-config">
-          <div class="form-section-title">${Icon.shield({ size: 14 })}实时校验</div>
+        <div class="form-section rule-form-panel" id="rule-panel-dataset" data-rule-panel="dataset" role="tabpanel" aria-labelledby="rule-tab-dataset" hidden>
+          <div class="form-section-desc">规则将基于此数据集的查询结果进行检测</div>
+          <div class="form-grid">
+            ${UI.field('数据集', `
+              <select class="select" id="f-dataset">
+                <option value="">请选择数据集…</option>
+                ${datasets.map(d => `<option value="${d.id}" ${data.datasetId === d.id ? 'selected' : ''}>${escapeHtml(d.name)}</option>`).join('')}
+              </select>
+            `, { required: true })}
+            ${UI.field('异常主键字段', `
+              <div class="key-field-picker">
+                <button type="button" class="key-field-picker-trigger" id="f-key-fields" role="combobox"
+                  aria-label="异常主键字段" aria-required="true" aria-haspopup="listbox"
+                  aria-expanded="false" aria-controls="f-key-fields-listbox" disabled>
+                  <span class="key-field-picker-summary"><span class="key-field-picker-placeholder">请先选择数据集…</span></span>
+                  <span class="key-field-picker-chevron" aria-hidden="true">${Icon.chevronDown({ size: 14 })}</span>
+                </button>
+                <div class="key-field-picker-listbox" id="f-key-fields-listbox" role="listbox"
+                  aria-label="异常主键字段" aria-multiselectable="true" hidden></div>
+              </div>
+            `, { required: true, help: '可选择多个字段；建议包含门店 ID 与日期字段' })}
+          </div>
+          <div id="dataset-fields-preview"></div>
+        </div>
+
+        <div class="form-section rule-form-panel" id="rule-panel-conditions" data-rule-panel="conditions" role="tabpanel" aria-labelledby="rule-tab-conditions" hidden>
+          <div class="form-section-desc">支持多条件组合，可使用 AND / OR 逻辑连接</div>
+          <div class="field">
+            <label class="field-label"><span>逻辑关系</span></label>
+            <div class="segmented" id="f-logic">
+              <button type="button" data-logic="AND" class="${data.logic === 'AND' ? 'active' : ''}">满足全部 (AND)</button>
+              <button type="button" data-logic="OR" class="${data.logic === 'OR' ? 'active' : ''}">满足任一 (OR)</button>
+            </div>
+          </div>
+          <div id="conditions-container"></div>
+          <button type="button" class="condition-add" id="add-condition">${Icon.plus({ size: 14 })}添加条件</button>
+        </div>
+
+        <div class="form-section rule-form-panel" id="rule-panel-schedule" data-rule-panel="schedule" role="tabpanel" aria-labelledby="rule-tab-schedule" hidden>
+          <div class="form-section-desc">设置规则的执行频率与有效时间窗口</div>
+          <div class="form-grid">
+            ${UI.field('调度频率', `
+              <select class="select" id="f-freq">
+                <option value="min" ${data.schedule.frequency === 'min' ? 'selected' : ''}>按分钟</option>
+                <option value="hour" ${data.schedule.frequency === 'hour' ? 'selected' : ''}>按小时</option>
+                <option value="day" ${data.schedule.frequency === 'day' ? 'selected' : ''}>按天</option>
+              </select>
+            `, { required: true })}
+            ${UI.field('间隔', `<input class="input mono" id="f-interval" type="number" min="1" value="${data.schedule.interval}" />`, { required: true, help: '执行频率的间隔数' })}
+            ${UI.field('执行时间', `<input class="input mono" id="f-time" type="time" value="${data.schedule.time || '09:00'}" ${data.schedule.frequency !== 'day' ? 'disabled' : ''} />`, { optional: true, help: '仅按天调度时有效' })}
+            ${UI.field('开始日期', `<input class="input mono" id="f-start" type="date" value="${data.schedule.start || ''}" />`, { required: true })}
+            ${UI.field('结束日期', `<input class="input mono" id="f-end" type="date" value="${data.schedule.end || ''}" />`, { optional: true, help: '留空表示长期有效' })}
+          </div>
+          <div id="schedule-preview"></div>
+        </div>
+
+        <div class="form-section rule-form-panel validation-config" id="rule-panel-validation" data-rule-panel="validation" role="tabpanel" aria-labelledby="rule-tab-validation" hidden>
           <div class="form-section-desc">异常触发后，将校验卡片发送给指定 user_id，首位有效提交人完成闭环</div>
           <div class="validation-toggle-row">
             <div>
@@ -352,67 +406,7 @@ window.RulesModule = (function () {
           <div class="field-error" id="f-validation-target-error" style="display:none;">${Icon.alert({ size: 12 })}<span></span></div>
         </div>
 
-        <div class="form-section">
-          <div class="form-section-title">${Icon.table({ size: 14 })}关联数据集</div>
-          <div class="form-section-desc">规则将基于此数据集的查询结果进行检测</div>
-          <div class="form-grid">
-            ${UI.field('数据集', `
-              <select class="select" id="f-dataset">
-                <option value="">请选择数据集…</option>
-                ${datasets.map(d => `<option value="${d.id}" ${data.datasetId === d.id ? 'selected' : ''}>${escapeHtml(d.name)}</option>`).join('')}
-              </select>
-            `, { required: true })}
-            ${UI.field('异常主键字段', `
-              <div class="key-field-picker">
-                <button type="button" class="key-field-picker-trigger" id="f-key-fields" role="combobox"
-                  aria-label="异常主键字段" aria-required="true" aria-haspopup="listbox"
-                  aria-expanded="false" aria-controls="f-key-fields-listbox" disabled>
-                  <span class="key-field-picker-summary"><span class="key-field-picker-placeholder">请先选择数据集…</span></span>
-                  <span class="key-field-picker-chevron" aria-hidden="true">${Icon.chevronDown({ size: 14 })}</span>
-                </button>
-                <div class="key-field-picker-listbox" id="f-key-fields-listbox" role="listbox"
-                  aria-label="异常主键字段" aria-multiselectable="true" hidden></div>
-              </div>
-            `, { required: true, help: '可选择多个字段；建议包含门店 ID 与日期字段' })}
-          </div>
-          <div id="dataset-fields-preview"></div>
-        </div>
-
-        <div class="form-section">
-          <div class="form-section-title">${Icon.sliders({ size: 14 })}异常条件</div>
-          <div class="form-section-desc">支持多条件组合，可使用 AND / OR 逻辑连接</div>
-          <div class="field">
-            <label class="field-label"><span>逻辑关系</span></label>
-            <div class="segmented" id="f-logic">
-              <button type="button" data-logic="AND" class="${data.logic === 'AND' ? 'active' : ''}">满足全部 (AND)</button>
-              <button type="button" data-logic="OR" class="${data.logic === 'OR' ? 'active' : ''}">满足任一 (OR)</button>
-            </div>
-          </div>
-          <div id="conditions-container"></div>
-          <button type="button" class="condition-add" id="add-condition">${Icon.plus({ size: 14 })}添加条件</button>
-        </div>
-
-        <div class="form-section">
-          <div class="form-section-title">${Icon.clock({ size: 14 })}调度规则</div>
-          <div class="form-section-desc">设置规则的执行频率与有效时间窗口</div>
-          <div class="form-grid">
-            ${UI.field('调度频率', `
-              <select class="select" id="f-freq">
-                <option value="min" ${data.schedule.frequency === 'min' ? 'selected' : ''}>按分钟</option>
-                <option value="hour" ${data.schedule.frequency === 'hour' ? 'selected' : ''}>按小时</option>
-                <option value="day" ${data.schedule.frequency === 'day' ? 'selected' : ''}>按天</option>
-              </select>
-            `, { required: true })}
-            ${UI.field('间隔', `<input class="input mono" id="f-interval" type="number" min="1" value="${data.schedule.interval}" />`, { required: true, help: '执行频率的间隔数' })}
-            ${UI.field('执行时间', `<input class="input mono" id="f-time" type="time" value="${data.schedule.time || '09:00'}" ${data.schedule.frequency !== 'day' ? 'disabled' : ''} />`, { optional: true, help: '仅按天调度时有效' })}
-            ${UI.field('开始日期', `<input class="input mono" id="f-start" type="date" value="${data.schedule.start || ''}" />`, { required: true })}
-            ${UI.field('结束日期', `<input class="input mono" id="f-end" type="date" value="${data.schedule.end || ''}" />`, { optional: true, help: '留空表示长期有效' })}
-          </div>
-          <div id="schedule-preview"></div>
-        </div>
-
-        <div class="form-section">
-          <div class="form-section-title">${Icon.send({ size: 14 })}飞书通知</div>
+        <div class="form-section rule-form-panel" id="rule-panel-private" data-rule-panel="private" role="tabpanel" aria-labelledby="rule-tab-private" hidden>
           <div class="form-section-desc">异常触发时通过飞书推送告警</div>
           <div class="field">
             <label class="field-label"><span>通知方式</span></label>
@@ -457,8 +451,7 @@ window.RulesModule = (function () {
           </div>
         </div>
 
-        <div class="form-section group-broadcast-config">
-          <div class="form-section-title">${Icon.send({ size: 14 })}群聊播报</div>
+        <div class="form-section rule-form-panel group-broadcast-config" id="rule-panel-group" data-rule-panel="group" role="tabpanel" aria-labelledby="rule-tab-group" hidden>
           <div class="form-section-desc">每次规则成功执行后，将本批异常记录组汇总发送到飞书话题群</div>
           <div class="validation-toggle-row">
             <div>
@@ -512,6 +505,62 @@ window.RulesModule = (function () {
         <button type="button" class="btn btn-accent" id="f-save">${Icon.check({ size: 16 })}${editing ? '保存规则' : '创建规则'}</button>
       `,
     });
+
+    // Keep all controls mounted: switching sections must not reset pending input.
+    m.dialog.classList.add('rule-form');
+    const tabs = [
+      ['basic', '基本信息'], ['dataset', '关联数据集'], ['conditions', '异常条件'],
+      ['schedule', '调度规则'], ['validation', '实时校验'], ['private', '私聊通知'], ['group', '群聊播报'],
+    ];
+    const tabList = document.createElement('div');
+    tabList.className = 'tabs rule-form-tabs';
+    tabList.setAttribute('role', 'tablist');
+    tabList.setAttribute('aria-label', '异常规则配置');
+    tabList.innerHTML = tabs.map(([key, label], index) => `
+      <button type="button" class="tab${index === 0 ? ' active' : ''}" id="rule-tab-${key}"
+        data-rule-tab="${key}" role="tab" aria-controls="rule-panel-${key}"
+        aria-selected="${index === 0}" tabindex="${index === 0 ? 0 : -1}">${label}</button>
+    `).join('');
+    m.body.before(tabList);
+    const tabButtons = [...tabList.querySelectorAll('[role="tab"]')];
+    const tabPanels = [...m.body.querySelectorAll('[data-rule-panel]')];
+
+    function selectTab(key, focus = false) {
+      cleanupKeyFieldPicker();
+      tabPanels.forEach(panel => { panel.hidden = panel.dataset.rulePanel !== key; });
+      tabButtons.forEach(button => {
+        const selected = button.dataset.ruleTab === key;
+        button.classList.toggle('active', selected);
+        button.setAttribute('aria-selected', String(selected));
+        button.tabIndex = selected ? 0 : -1;
+        if (selected) {
+          if (focus) button.focus({ preventScroll: true });
+          button.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+        }
+      });
+      m.body.scrollTop = 0;
+    }
+
+    tabButtons.forEach((button, index) => {
+      button.addEventListener('click', () => selectTab(button.dataset.ruleTab));
+      button.addEventListener('keydown', event => {
+        let next;
+        if (event.key === 'ArrowRight') next = (index + 1) % tabs.length;
+        else if (event.key === 'ArrowLeft') next = (index - 1 + tabs.length) % tabs.length;
+        else if (event.key === 'Home') next = 0;
+        else if (event.key === 'End') next = tabs.length - 1;
+        else return;
+        event.preventDefault();
+        selectTab(tabs[next][0], true);
+      });
+    });
+
+    function revealField(selector) {
+      const control = m.dialog.querySelector(selector);
+      selectTab(control.closest('[data-rule-panel]').dataset.rulePanel);
+      control.focus({ preventScroll: true });
+      control.scrollIntoView({ block: 'nearest' });
+    }
 
     // ---------- State within form ----------
     let conditions = data.conditions.map(({ operator, op, ...condition }) => ({
@@ -921,7 +970,7 @@ window.RulesModule = (function () {
             </select>
             <input class="input mono" data-c="value" value="${escapeHtml(c.value ?? '')}" placeholder="阈值" ${!showValue ? 'disabled style="opacity:0.4;"' : ''} />
             <button type="button" class="row-action danger" data-remove="${idx}" aria-label="删除条件" ${conditions.length === 1 ? 'disabled style="opacity:0.3;"' : ''}>${Icon.trash({ size: 14 })}</button>
-            ${c.op === 'between' ? `<input class="input mono" data-c="upper_value" value="${escapeHtml(c.upper_value ?? '')}" placeholder="上界" style="grid-column:3;" />` : ''}
+            ${c.op === 'between' ? `<input class="input mono" data-c="upper_value" value="${escapeHtml(c.upper_value ?? '')}" placeholder="上界" />` : ''}
             ${showBaseline ? `<select class="select" data-c="baseline" style="grid-column:1/-1;">
               <option value="">选择基线…</option>
               <option value="7d_avg" ${c.baseline === '7d_avg' ? 'selected' : ''}>近 7 日均值</option>
@@ -1075,14 +1124,14 @@ window.RulesModule = (function () {
     m.dialog.querySelector('#f-save').addEventListener('click', async () => {
       const name = m.dialog.querySelector('#f-name').value.trim();
       const datasetId = m.dialog.querySelector('#f-dataset').value;
-      if (!name) { UI.toast({ type: 'warning', title: '请填写规则名称' }); return; }
-      if (!datasetId) { UI.toast({ type: 'warning', title: '请选择关联数据集' }); return; }
+      if (!name) { revealField('#f-name'); UI.toast({ type: 'warning', title: '请填写规则名称' }); return; }
+      if (!datasetId) { revealField('#f-dataset'); UI.toast({ type: 'warning', title: '请选择关联数据集' }); return; }
 
       const ds = Store.getDataset(datasetId);
       const validConditions = conditions.filter(c => c.field && c.op);
-      if (validConditions.length === 0) { UI.toast({ type: 'warning', title: '请至少配置一个有效条件' }); return; }
+      if (validConditions.length === 0) { revealField('.condition-row [data-c="field"], #add-condition'); UI.toast({ type: 'warning', title: '请至少配置一个有效条件' }); return; }
       const anomalyKeyFields = keyFieldControl.values();
-      if (!anomalyKeyFields.length) { UI.toast({ type: 'warning', title: '请至少选择一个异常主键字段' }); return; }
+      if (!anomalyKeyFields.length) { revealField('#f-key-fields'); UI.toast({ type: 'warning', title: '请至少选择一个异常主键字段' }); return; }
 
       const privateMessageTemplate = m.dialog.querySelector('#f-private-message-template').value.trim();
       const groupMessageTemplate = m.dialog.querySelector('#f-group-message-template').value.trim();
@@ -1091,12 +1140,12 @@ window.RulesModule = (function () {
         {
           message: validateTemplateInput(privateMessageTemplate, templateFields, 'private'),
           error: m.dialog.querySelector('#f-private-template-error'),
-          section: m.dialog.querySelector('[data-template-context="private"].message-template-editor'),
+          control: '#f-private-message-template',
         },
         {
           message: validateTemplateInput(groupMessageTemplate, templateFields, 'group'),
           error: m.dialog.querySelector('#f-group-template-error'),
-          section: m.dialog.querySelector('[data-template-context="group"].message-template-editor'),
+          control: '#f-group-message-template',
         },
       ];
       templateChecks.forEach(check => {
@@ -1105,7 +1154,7 @@ window.RulesModule = (function () {
       });
       const invalidTemplate = templateChecks.find(check => check.message);
       if (invalidTemplate) {
-        invalidTemplate.section.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        revealField(invalidTemplate.control);
         return;
       }
 
@@ -1118,7 +1167,11 @@ window.RulesModule = (function () {
         ...chatIds.map(value => ({ receive_id_type: 'chat_id', source: 'literal', value })),
       ];
       if (notifyMode === 'field' && m.dialog.querySelector('#f-field-source').value) notificationTargets.push({ receive_id_type: m.dialog.querySelector('#f-field-id-type').value, source: 'field', field: m.dialog.querySelector('#f-field-source').value });
-      if (!notificationTargets.length) { UI.toast({ type: 'warning', title: '请至少配置一个飞书接收目标' }); return; }
+      if (!notificationTargets.length) {
+        revealField(notifyMode === 'field' ? '#f-field-source' : '#f-openids-input');
+        UI.toast({ type: 'warning', title: '请至少配置一个私聊通知接收目标' });
+        return;
+      }
 
       commitPendingValidationTarget();
       validationFields = [...validationFieldsSel.selectedOptions].map(option => option.value).filter(Boolean);
@@ -1146,28 +1199,45 @@ window.RulesModule = (function () {
       } : null;
       const validationError = m.dialog.querySelector('#f-validation-target-error');
       let validationMessage = '';
+      let validationControl = '#f-validation-sql';
       if (!Number.isInteger(validationTimeoutMinutes) || validationTimeoutMinutes < 1 || validationTimeoutMinutes > 43200) {
         validationMessage = '超时时间必须是 1–43200 之间的整数分钟';
+        validationControl = '#f-validation-timeout';
       } else if (validationEnabled && !validationTargets.length) {
         validationMessage = '启用实时校验时，请至少配置一个验证目标';
+        validationControl = '#f-validation-userids-input';
       } else if (validationMethod === 'sql') {
         const parameterNames = sqlValidationConfig.parameters.map(item => item.name);
         const placeholders = [...sqlValidationConfig.queryTemplate.matchAll(/\{([^{}]+)\}/g)].map(match => match[1].trim());
         const missingMappings = [...new Set(placeholders)].filter(name => !parameterNames.includes(name));
         const unusedMappings = [...new Set(parameterNames)].filter(name => !placeholders.includes(name));
         if (!sqlValidationConfig.queryTemplate) validationMessage = 'SQL 校验必须填写查询 SQL';
-        else if (sqlValidationConfig.parameters.some(item => !item.name || !item.field)) validationMessage = '每个 SQL 参数都必须填写参数名并选择异常字段';
-        else if (new Set(parameterNames).size !== parameterNames.length) validationMessage = 'SQL 参数名不能重复';
+        else if (sqlValidationConfig.parameters.some(item => !item.name || !item.field)) {
+          validationMessage = '每个 SQL 参数都必须填写参数名并选择异常字段';
+          const index = sqlValidationConfig.parameters.findIndex(item => !item.name || !item.field);
+          validationControl = `[data-sql-parameter-index="${index}"] [data-sql-param="${sqlValidationConfig.parameters[index].name ? 'field' : 'name'}"]`;
+        } else if (new Set(parameterNames).size !== parameterNames.length) {
+          validationMessage = 'SQL 参数名不能重复';
+          const index = parameterNames.findIndex((name, index) => parameterNames.indexOf(name) !== index);
+          validationControl = `[data-sql-parameter-index="${index}"] [data-sql-param="name"]`;
+        }
         else if (missingMappings.length) validationMessage = `SQL 占位符缺少参数映射：${missingMappings.join('、')}`;
         else if (unusedMappings.length) validationMessage = `SQL 参数未在查询中使用：${unusedMappings.join('、')}`;
-        else if (!sqlValidationConfig.trueCondition.field) validationMessage = 'True 条件必须填写结果字段';
-        else if (!['is_null', 'is_not_null'].includes(sqlTrueOperator) && sqlValidationConfig.trueCondition.value === null) validationMessage = '当前 True 条件必须填写期望值';
-        else if (sqlTrueOperator === 'between' && sqlValidationConfig.trueCondition.upperValue === null) validationMessage = 'between 条件必须填写范围上界';
+        else if (!sqlValidationConfig.trueCondition.field) {
+          validationMessage = 'True 条件必须填写结果字段';
+          validationControl = '#f-sql-result-field';
+        } else if (!['is_null', 'is_not_null'].includes(sqlTrueOperator) && sqlValidationConfig.trueCondition.value === null) {
+          validationMessage = '当前 True 条件必须填写期望值';
+          validationControl = '#f-sql-value';
+        } else if (sqlTrueOperator === 'between' && sqlValidationConfig.trueCondition.upperValue === null) {
+          validationMessage = 'between 条件必须填写范围上界';
+          validationControl = '#f-sql-upper-value';
+        }
       }
       validationError.querySelector('span').textContent = validationMessage;
       validationError.style.display = validationMessage ? 'flex' : 'none';
       if (validationMessage) {
-        m.dialog.querySelector('.validation-config').scrollIntoView({ block: 'center', behavior: 'smooth' });
+        revealField(validationControl);
         return;
       }
 
@@ -1189,7 +1259,7 @@ window.RulesModule = (function () {
       groupBroadcastError.querySelector('span').textContent = groupBroadcastMessage;
       groupBroadcastError.style.display = groupBroadcastMessage ? 'flex' : 'none';
       if (groupBroadcastMessage) {
-        m.dialog.querySelector('.group-broadcast-config').scrollIntoView({ block: 'center', behavior: 'smooth' });
+        revealField(!groupWebhookUrl ? '#f-group-webhook' : '#f-group-userids-input');
         return;
       }
 

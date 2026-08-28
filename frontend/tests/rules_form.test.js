@@ -5,6 +5,221 @@ const { chromium } = require('playwright');
 
 const frontendRoot = path.join(__dirname, '..');
 
+async function openTabbedRule(t, { editing = true, viewport = { width: 1280, height: 900 } } = {}) {
+  const browser = await chromium.launch({ headless: true, executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' });
+  t.after(() => browser.close());
+  const page = await browser.newPage({ viewport });
+  page.setDefaultTimeout(3000);
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  t.after(() => assert.deepEqual(errors, []));
+  await page.setContent('<!doctype html><html><body><div id="toast-container"></div><div id="actions"></div><div id="content"></div></body></html>');
+  for (const file of ['base', 'components', 'pages']) {
+    await page.addStyleTag({ path: path.join(frontendRoot, 'styles', `${file}.css`) });
+  }
+  for (const file of ['icons', 'components']) {
+    await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', `${file}.js`) });
+  }
+  await page.evaluate(() => {
+    const dataset = { id: 'dataset-1', name: '订单数据', rowCount: 2, fields: [
+      { name: 'order_id', type: 'VARCHAR' }, { name: 'amount', type: 'DECIMAL' },
+      { name: 'owner_id', type: 'VARCHAR' },
+    ] };
+    const rule = {
+      id: 'rule-1', name: '订单异常', description: '', datasetId: dataset.id, datasetName: dataset.name,
+      severity: 'medium', enabled: true, anomalyCount: 0, lastRun: null,
+      conditions: [{ field: 'amount', op: 'gt', value: '100' }], logic: 'AND', anomalyKeyFields: ['order_id'],
+      schedule: { frequency: 'day', interval: 1, time: '09:00', start: '2026-08-28', end: '' },
+      notify: { mode: 'manual', openIds: ['ou_notify'], userIds: [] },
+      notificationTargets: [{ receive_id_type: 'open_id', source: 'literal', value: 'ou_notify' }],
+      validationEnabled: false, validationTargets: [], validationTimeoutMinutes: 1440,
+      groupBroadcast: { enabled: false, webhookUrl: '', mentionTargets: [], messageTemplate: '' },
+    };
+    window.savedRule = null;
+    window.Store = {
+      getRules: () => [rule], getRule: () => rule, getDatasets: () => [dataset], getDataset: () => dataset,
+      addRule: async payload => { window.savedRule = payload; },
+      updateRule: async (_id, payload) => { window.savedRule = payload; },
+    };
+  });
+  await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'rules.js') });
+  await page.evaluate(() => RulesModule.render(document.getElementById('content'), {
+    actionsEl: document.getElementById('actions'), navigate: () => {},
+  }));
+  await page.evaluate(edit => RulesModule.openItem(edit ? 'rule-1' : undefined), editing);
+  return page;
+}
+
+test('rule tabs isolate sections and preserve drafts for both create and edit', async t => {
+  for (const editing of [false, true]) {
+    const page = await openTabbedRule(t, { editing });
+    const tabs = page.getByRole('tab');
+    const names = ['基本信息', '关联数据集', '异常条件', '调度规则', '实时校验', '私聊通知', '群聊播报'];
+    assert.deepEqual(await tabs.allTextContents(), names);
+    assert.equal(await page.getByRole('tab', { selected: true }).textContent(), '基本信息');
+    await page.fill('#f-name', '跨栏目草稿');
+    for (const name of names) {
+      await page.getByRole('tab', { name, exact: true }).click();
+      assert.equal(await page.getByRole('tabpanel').count(), 1);
+      assert.equal(await page.getByRole('tabpanel', { name, exact: true }).count(), 1);
+      if (name !== '基本信息') assert.equal(await page.locator('#f-name').isVisible(), false);
+    }
+    await page.getByRole('tab', { name: '关联数据集' }).click();
+    if (!editing) {
+      await page.selectOption('#f-dataset', 'dataset-1');
+      await page.click('#f-key-fields');
+      await page.locator('#f-key-fields-listbox [data-key-field="order_id"]').click();
+    }
+    await page.getByRole('tab', { name: '异常条件' }).click();
+    await page.selectOption('.condition-row [data-c="field"]', 'amount');
+    await page.fill('.condition-row [data-c="value"]', '321');
+    if (!editing) {
+      await page.click('#f-save');
+      assert.equal(await page.getByRole('tab', { selected: true }).textContent(), '私聊通知');
+      assert.equal(await page.locator('#f-openids-input').evaluate(node => node === document.activeElement), true);
+    }
+    await page.getByRole('tab', { name: '调度规则' }).click();
+    await page.fill('#f-interval', '3');
+    await page.getByRole('tab', { name: '实时校验' }).click();
+    await page.fill('#f-validation-userids-input', 'validator_draft');
+    await page.getByRole('tab', { name: '私聊通知' }).click();
+    await page.fill('#f-userids-input', 'recipient_draft');
+    await page.fill('#f-private-message-template', '订单 {order_id}');
+    await page.getByRole('tab', { name: '群聊播报' }).click();
+    await page.fill('#f-group-userids-input', 'group_draft');
+    await page.fill('#f-group-message-template', '订单 {order_id列表}');
+    await page.getByRole('tab', { name: '基本信息' }).click();
+    assert.equal(await page.locator('#f-name').inputValue(), '跨栏目草稿');
+    assert.equal(await page.evaluate(() => window.savedRule), null, 'switching tabs never saves');
+    await page.click('#f-save');
+    assert.ok(await page.evaluate(() => window.savedRule), await page.locator('#toast-container').textContent());
+    const saved = await page.evaluate(() => window.savedRule);
+    assert.equal(saved.name, '跨栏目草稿');
+    assert.equal(saved.conditions[0].value, '321');
+    assert.equal(saved.schedule.interval, 3);
+    assert.deepEqual(saved.validationTargets, [{ source: 'literal', value: 'validator_draft' }]);
+    assert.ok(saved.notificationTargets.some(target => target.value === 'recipient_draft'));
+    assert.equal(saved.privateMessageTemplate, '订单 {order_id}');
+    assert.deepEqual(saved.groupBroadcast.mentionTargets, [{ source: 'literal', value: 'group_draft' }]);
+    assert.equal(saved.groupBroadcast.messageTemplate, '订单 {order_id列表}');
+    await page.evaluate(() => RulesModule.openItem('rule-1'));
+    assert.equal(await page.getByRole('tab', { selected: true }).textContent(), '基本信息');
+  }
+});
+
+test('rule tabs support keyboard navigation and keep navigation and actions visible on narrow screens', async t => {
+  const page = await openTabbedRule(t, { viewport: { width: 390, height: 700 } });
+  assert.equal(await page.getByRole('tab').count(), 7);
+  await page.getByRole('tab', { name: '基本信息' }).focus();
+  for (const [key, name] of [['ArrowRight', '关联数据集'], ['End', '群聊播报'], ['ArrowRight', '基本信息'], ['ArrowLeft', '群聊播报'], ['Home', '基本信息']]) {
+    await page.keyboard.press(key);
+    const selected = page.getByRole('tab', { selected: true });
+    assert.equal(await selected.textContent(), name);
+    assert.equal(await selected.evaluate(node => node === document.activeElement), true);
+  }
+  await page.keyboard.press('Tab');
+  assert.equal(await page.locator('#f-name').evaluate(node => node === document.activeElement), true);
+  await page.getByRole('tab', { name: '实时校验' }).click();
+  await page.click('[data-validation-method="sql"]');
+  const before = await page.getByRole('tablist').boundingBox();
+  await page.locator('.modal-body').evaluate(node => { node.scrollTop = node.scrollHeight; });
+  const after = await page.getByRole('tablist').boundingBox();
+  assert.equal(after.y, before.y, 'tabs stay above the scrolling panel');
+  const footer = await page.locator('.modal-footer').boundingBox();
+  assert.ok(footer.y + footer.height <= 700);
+  assert.equal(await page.locator('.modal-body').evaluate(node => node.scrollTop > 0), true);
+  assert.equal(await page.locator('.modal').evaluate(node => node.scrollWidth <= node.clientWidth), true);
+  await page.getByRole('tab', { name: '群聊播报' }).click();
+  const last = await page.getByRole('tab', { selected: true }).boundingBox();
+  assert.ok(last.x >= 0 && last.x + last.width <= 390);
+  for (const width of [390, 320]) {
+    await page.setViewportSize({ width, height: 700 });
+    for (const name of ['基本信息', '关联数据集', '异常条件', '调度规则', '实时校验', '私聊通知', '群聊播报']) {
+      await page.getByRole('tab', { name, exact: true }).click();
+      if (name === '异常条件') await page.selectOption('.condition-row [data-c="op"]', 'between');
+      assert.equal(await page.locator('.modal-body').evaluate(node => node.scrollWidth <= node.clientWidth), true, `${width}px ${name} must fit`);
+    }
+    const dialog = await page.locator('.modal').boundingBox();
+    for (const button of await page.locator('.modal-footer button').all()) {
+      const box = await button.boundingBox();
+      assert.ok(box.x >= dialog.x && box.x + box.width <= dialog.x + dialog.width, `${width}px footer actions must fit`);
+    }
+  }
+});
+
+test('saving opens the hidden tab containing an error and focuses its input', async t => {
+  const page = await openTabbedRule(t);
+  assert.equal(await page.getByRole('tab').count(), 7);
+  const cases = [
+    ['基本信息', '#f-name', '', '已修复'],
+    ['关联数据集', '#f-dataset', '', 'dataset-1'],
+    ['异常条件', '.condition-row [data-c="field"]', '', 'amount'],
+    ['私聊通知', '#f-private-message-template', '[不安全](http://example.com)', ''],
+    ['群聊播报', '#f-group-message-template', '{不存在}', ''],
+    ['实时校验', '#f-validation-timeout', '0', '30'],
+  ];
+  for (const [name, selector, invalid, valid] of cases) {
+    await page.getByRole('tab', { name, exact: true }).click();
+    const input = page.locator(selector);
+    const isSelect = await input.evaluate(node => node.tagName === 'SELECT');
+    if (isSelect) await input.selectOption(invalid); else await input.fill(invalid);
+    await page.getByRole('tab', { name: name === '基本信息' ? '调度规则' : '基本信息', exact: true }).click();
+    await page.click('#f-save');
+    assert.equal(await page.getByRole('tab', { selected: true }).textContent(), name);
+    assert.equal(await input.evaluate(node => node === document.activeElement), true);
+    assert.equal(await page.evaluate(() => window.savedRule), null);
+    if (isSelect) await input.selectOption(valid); else await input.fill(valid);
+    if (selector === '#f-dataset') {
+      await page.click('#f-key-fields');
+      await page.locator('#f-key-fields-listbox [data-key-field="order_id"]').click();
+      await page.getByRole('tab', { name: '异常条件' }).click();
+      await page.selectOption('.condition-row [data-c="field"]', 'amount');
+    }
+  }
+  await page.getByRole('tab', { name: '群聊播报' }).click();
+  await page.locator('label').filter({ has: page.locator('#f-group-broadcast-enabled') }).click();
+  await page.getByRole('tab', { name: '基本信息' }).click();
+  await page.click('#f-save');
+  assert.equal(await page.getByRole('tab', { selected: true }).textContent(), '群聊播报');
+  assert.equal(await page.locator('#f-group-webhook').evaluate(node => node === document.activeElement), true);
+  await page.fill('#f-group-webhook', 'https://open.feishu.cn/open-apis/bot/v2/hook/example');
+  await page.getByRole('tab', { name: '基本信息' }).click();
+  await page.click('#f-save');
+  assert.equal(await page.locator('#f-group-userids-input').evaluate(node => node === document.activeElement), true);
+});
+
+test('SQL validation keeps its draft across tabs and focuses missing parameter mappings', async t => {
+  const page = await openTabbedRule(t);
+  await page.getByRole('tab', { name: '实时校验' }).click();
+  await page.click('[data-validation-method="sql"]');
+  await page.fill('#f-validation-sql', 'SELECT amount FROM orders WHERE id={订单ID}');
+  await page.click('#f-add-sql-parameter');
+  await page.locator('[data-sql-param="name"]').fill('订单ID');
+  await page.getByRole('tab', { name: '基本信息' }).click();
+  await page.click('#f-save');
+  assert.equal(await page.getByRole('tab', { selected: true }).textContent(), '实时校验');
+  assert.equal(await page.locator('[data-sql-param="field"]').evaluate(node => node === document.activeElement), true);
+  assert.equal(await page.locator('#f-validation-sql').inputValue(), 'SELECT amount FROM orders WHERE id={订单ID}');
+  assert.equal(await page.locator('[data-sql-param="name"]').inputValue(), '订单ID');
+  await page.locator('[data-sql-param="field"]').selectOption('order_id');
+  await page.selectOption('#f-sql-operator', 'between');
+  for (const [selector, value] of [['#f-sql-result-field', 'amount'], ['#f-sql-value', '10'], ['#f-sql-upper-value', '20']]) {
+    await page.getByRole('tab', { name: '基本信息' }).click();
+    await page.click('#f-save');
+    assert.equal(await page.getByRole('tab', { selected: true }).textContent(), '实时校验');
+    assert.equal(await page.locator(selector).evaluate(node => node === document.activeElement), true);
+    assert.equal(await page.evaluate(() => window.savedRule), null);
+    await page.fill(selector, value);
+  }
+  await page.getByRole('tab', { name: '基本信息' }).click();
+  await page.click('#f-save');
+  assert.deepEqual(await page.evaluate(() => window.savedRule.sqlValidationConfig), {
+    queryTemplate: 'SELECT amount FROM orders WHERE id={订单ID}',
+    parameters: [{ name: '订单ID', field: 'order_id' }],
+    trueCondition: { field: 'amount', operator: 'between', value: 10, upperValue: 20 },
+  });
+});
+
 test('rule summary shows deduplicated pushes in transit and refreshes the server count', async t => {
   const browser = await chromium.launch({
     headless: true,
@@ -127,6 +342,7 @@ test('opening an existing rule directly renders its condition and can add anothe
     `condition rows were not initialized; browser errors: ${pageErrors.join(' | ')}`,
   );
 
+  await page.getByRole('tab', { name: '异常条件', exact: true }).click();
   await page.click('#add-condition');
   assert.equal(await page.locator('.condition-row').count(), 2);
 
@@ -208,7 +424,9 @@ test('editing an API-shaped condition removes the stale operator before saving',
   }));
 
   await page.evaluate(() => RulesModule.openItem('rule-1'));
+  await page.getByRole('tab', { name: '异常条件', exact: true }).click();
   await page.selectOption('.condition-row [data-c="field"]', 'license_plate');
+  await page.getByRole('tab', { name: '异常条件', exact: true }).click();
   await page.selectOption('.condition-row [data-c="op"]', 'eq');
   await page.fill('.condition-row [data-c="value"]', 'q皖H0BCB7');
   await page.click('#f-save');
@@ -273,11 +491,16 @@ test('creating a rule uses condition fields and commits a typed user_id without 
   assert.equal(await page.getByText('监控字段', { exact: true }).count(), 0);
   assert.equal(await page.locator('#f-field').count(), 0);
   await page.fill('#f-name', 'User ID notification');
+  await page.getByRole('tab', { name: '关联数据集', exact: true }).click();
   await page.selectOption('#f-dataset', 'dataset-1');
+  await page.getByRole('tab', { name: '异常条件', exact: true }).click();
   await page.selectOption('.condition-row [data-c="field"]', 'amount');
+  await page.getByRole('tab', { name: '私聊通知', exact: true }).click();
   await page.fill('#f-userids-input', 'u_123456');
   await page.click('#f-save');
   assert.equal(await page.evaluate(() => window.createdRule), null, 'an anomaly key remains required');
+  assert.equal(await page.getByRole('tab', { selected: true }).textContent(), '关联数据集');
+  assert.equal(await page.locator('#f-key-fields').evaluate(node => node === document.activeElement), true);
   await page.click('#f-key-fields');
   await page.locator('#f-key-fields-listbox [data-key-field="order_id"]').click();
   await page.locator('#f-key-fields-listbox [data-key-field="amount"]').click();
@@ -354,6 +577,7 @@ test('anomaly key picker supports accessible multi-selection and clears stale fi
   assert.equal(await trigger.getAttribute('aria-required'), 'true');
   assert.equal(await trigger.isDisabled(), true);
 
+  await page.getByRole('tab', { name: '关联数据集', exact: true }).click();
   await page.selectOption('#f-dataset', 'dataset-1');
   assert.equal(await trigger.isEnabled(), true);
   await trigger.click();
@@ -381,6 +605,7 @@ test('anomaly key picker supports accessible multi-selection and clears stale fi
   assert.deepEqual(await trigger.locator('.key-field-picker-tag').allTextContents(), ['shop_id', 'order_id']);
   await trigger.press('Escape');
 
+  await page.getByRole('tab', { name: '关联数据集', exact: true }).click();
   await page.selectOption('#f-dataset', 'dataset-2');
   assert.deepEqual(await trigger.locator('.key-field-picker-tag').allTextContents(), []);
   await trigger.click();
@@ -448,6 +673,7 @@ test('rule form preserves configured webhook and saves fixed plus field group me
   const groupFieldListbox = page.locator('#f-group-fields-listbox');
   assert.deepEqual(await groupFieldTrigger.locator('.key-field-picker-tag').allTextContents(), ['owner_user_id']);
 
+  await page.getByRole('tab', { name: '群聊播报', exact: true }).click();
   await page.fill('#f-group-userids-input', 'extra-user');
   await groupFieldTrigger.click();
   await groupFieldListbox.locator('[data-key-field="backup_user_id"]').click();
@@ -467,6 +693,7 @@ test('rule form preserves configured webhook and saves fixed plus field group me
   });
 
   await page.evaluate(() => RulesModule.openItem('rule-1'));
+  await page.getByRole('tab', { name: '群聊播报', exact: true }).click();
   await page.uncheck('#f-group-broadcast-enabled');
   await page.fill('#f-group-webhook', '');
   await page.click('#f-save');
@@ -525,6 +752,7 @@ test('rule form inserts template parameters and links from nested drawers and va
   await page.evaluate(() => RulesModule.openItem('rule-1'));
 
   const privateEditor = page.locator('#f-private-message-template');
+  await page.getByRole('tab', { name: '私聊通知', exact: true }).click();
   await privateEditor.focus();
   await privateEditor.evaluate(input => input.setSelectionRange(input.value.length, input.value.length));
   await page.click('[data-template-picker="parameter"][data-template-context="private"]');
@@ -537,22 +765,26 @@ test('rule form inserts template parameters and links from nested drawers and va
   );
 
   const groupEditor = page.locator('#f-group-message-template');
+  await page.getByRole('tab', { name: '群聊播报', exact: true }).click();
   await groupEditor.focus();
   await groupEditor.evaluate(input => input.setSelectionRange(input.value.length, input.value.length));
   await page.click('[data-template-picker="parameter"][data-template-context="group"]');
   await page.click('.template-picker-option[data-template-value="{车牌号列表}"]');
   assert.equal(await groupEditor.inputValue(), '异常记录组：{车牌号列表}');
 
+  await page.getByRole('tab', { name: '私聊通知', exact: true }).click();
   await privateEditor.fill('[不安全](http://example.com)');
   await page.click('#f-save');
   assert.match(await page.locator('#f-private-template-error').textContent(), /必须使用 HTTPS/);
   assert.equal(await page.evaluate(() => window.updatedRule), null);
 
+  await page.getByRole('tab', { name: '私聊通知', exact: true }).click();
   await privateEditor.fill('[错误目标]({车牌号})');
   await page.click('#f-save');
   assert.match(await page.locator('#f-private-template-error').textContent(), /仅支持系统深链/);
   assert.equal(await page.evaluate(() => window.updatedRule), null);
 
+  await page.getByRole('tab', { name: '私聊通知', exact: true }).click();
   await privateEditor.fill('异常记录：{车牌号}\n[查看]({异常记录链接})');
   await page.click('#f-save');
   await page.waitForTimeout(25);

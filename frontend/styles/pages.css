@@ -191,6 +191,34 @@
   overflow-y: hidden;
 }
 
+/* Rule sections share one draft while only the active panel scrolls. */
+.modal.rule-form { height: min(760px, calc(100dvh - 96px)); }
+.rule-form > .modal-header,
+.rule-form > .modal-footer,
+.rule-form > .rule-form-tabs { flex-shrink: 0; }
+.rule-form > .modal-body { min-height: 0; }
+.rule-form-tabs { min-width: 0; }
+.rule-form-tabs .tab { white-space: nowrap; }
+.rule-form-tabs .tab:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: -3px;
+  box-shadow: none;
+}
+.rule-form-panel { padding: 0; margin: 0; border: 0; }
+.rule-form-panel[hidden] { display: none; }
+.rule-form .condition-row [data-c="upper_value"] { grid-column: 3; }
+
+@media (max-width: 600px) {
+  .rule-form > .modal-footer { padding: var(--space-3); }
+  .rule-form > .modal-footer .btn { padding-inline: var(--space-2); font-size: var(--text-xs); }
+  .rule-form .condition-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .rule-form .condition-row [data-c="field"],
+  .rule-form .condition-row [data-c="op"],
+  .rule-form .condition-row [data-c="upper_value"] { grid-column: 1 / -1; }
+  .rule-form .condition-row .input,
+  .rule-form .condition-row .select { min-width: 0; }
+}
+
 /* Message templates use a compact, technical editor inside the rule form. */
 .message-template-editor {
   margin-top: var(--space-4);

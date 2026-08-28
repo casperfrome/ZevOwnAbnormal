@@ -54,6 +54,7 @@ test('rule field selectors preserve hostile names and types as inert option text
   });
 
   await page.click('#r-add');
+  await page.getByRole('tab', { name: '关联数据集', exact: true }).click();
   await page.selectOption('#f-dataset', dataset.id);
   const selectors = [
     '#f-field-source', '#f-validation-fields',
@@ -101,22 +102,30 @@ test('rule form saves real-time validation targets and reports an inline error w
   await page.click('#r-add');
   assert.equal(await page.getByText('异常描述', { exact: true }).count(), 1);
   assert.equal(await page.getByText('实时校验', { exact: true }).count(), 1);
-  assert.equal(await page.getByText('飞书通知', { exact: true }).count(), 1, 'normal notifications remain a distinct section');
+  assert.equal(await page.getByRole('tab', { name: '私聊通知', exact: true }).count(), 1, 'normal notifications remain a distinct section');
   await page.fill('#f-name', 'Validation rule');
+  await page.getByRole('tab', { name: '关联数据集', exact: true }).click();
   await page.selectOption('#f-dataset', 'dataset-1');
   await page.click('#f-key-fields');
   await page.locator('#f-key-fields-listbox [data-key-field="order_id"]').click();
+  await page.getByRole('tab', { name: '异常条件', exact: true }).click();
   await page.selectOption('.condition-row [data-c="field"]', 'amount');
+  await page.getByRole('tab', { name: '私聊通知', exact: true }).click();
   await page.fill('#f-openids-input', 'ou_notify');
+  await page.getByRole('tab', { name: '实时校验', exact: true }).click();
   await page.check('#f-validation-enabled');
   await page.fill('#f-validation-timeout', '30');
+  await page.getByRole('tab', { name: '基本信息' }).click();
   await page.click('#f-save');
 
   assert.equal(await page.evaluate(() => window.createdRule), null);
+  assert.equal(await page.getByRole('tab', { selected: true }).textContent(), '实时校验');
+  assert.equal(await page.locator('#f-validation-userids-input').evaluate(node => node === document.activeElement), true);
   const targetError = page.locator('#f-validation-target-error');
   assert.equal(await targetError.isVisible(), true);
   assert.match(await targetError.textContent(), /至少.*验证目标/);
 
+  await page.getByRole('tab', { name: '实时校验', exact: true }).click();
   await page.fill('#f-validation-userids-input', 'u_typed_not_entered');
   await page.selectOption('#f-validation-fields', ['owner_id', 'reviewer_id']);
   await page.click('#f-save');
@@ -1172,13 +1181,19 @@ test('rule form configures one SQL validation method with mapped anomaly fields'
 
   await page.click('#r-add');
   await page.fill('#f-name', 'SQL validation rule');
+  await page.getByRole('tab', { name: '关联数据集', exact: true }).click();
   await page.selectOption('#f-dataset', 'dataset-1');
   await page.click('#f-key-fields');
   await page.locator('#f-key-fields-listbox [data-key-field="order_id"]').click();
+  await page.getByRole('tab', { name: '异常条件', exact: true }).click();
   await page.selectOption('.condition-row [data-c="field"]', 'amount');
+  await page.getByRole('tab', { name: '私聊通知', exact: true }).click();
   await page.fill('#f-openids-input', 'ou_notify');
+  await page.getByRole('tab', { name: '实时校验', exact: true }).click();
   await page.check('#f-validation-enabled');
+  await page.getByRole('tab', { name: '实时校验', exact: true }).click();
   await page.fill('#f-validation-userids-input', 'validator-1');
+  await page.getByRole('tab', { name: '实时校验', exact: true }).click();
   await page.click('[data-validation-method="sql"]');
   assert.equal(await page.locator('#f-sql-validation-panel').isVisible(), true);
   await page.fill('#f-validation-sql', "SELECT current_amount FROM repair_state WHERE order_id='{订单ID}'");
