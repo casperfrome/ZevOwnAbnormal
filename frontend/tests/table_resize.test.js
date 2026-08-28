@@ -1,10 +1,9 @@
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const test = require('node:test');
-const { chromium } = require('playwright');
+const { chromium } = require('./browser');
 
 const frontendRoot = path.join(__dirname, '..');
-const executablePath = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 
 async function openResizableTable(page) {
   await page.route('http://resizer.test/**', route => route.fulfill({
@@ -30,7 +29,7 @@ async function openResizableTable(page) {
 }
 
 test('button tooltips escape clipped table cells and overlay modal content', async t => {
-  const browser = await chromium.launch({ headless: true, executablePath });
+  const browser = await chromium.launch({ headless: true });
   t.after(() => browser.close());
   const page = await browser.newPage({ viewport: { width: 390, height: 700 } });
   page.setDefaultTimeout(2000);
@@ -73,7 +72,7 @@ test('button tooltips escape clipped table cells and overlay modal content', asy
 });
 
 test('tooltips fit viewport edges, render text safely, and close on navigation or removal', async t => {
-  const browser = await chromium.launch({ headless: true, executablePath });
+  const browser = await chromium.launch({ headless: true });
   t.after(() => browser.close());
   const page = await browser.newPage({ viewport: { width: 390, height: 700 } });
   page.setDefaultTimeout(2000);
@@ -136,7 +135,7 @@ test('tooltips fit viewport edges, render text safely, and close on navigation o
 });
 
 test('resizable tables persist widths, enforce a minimum, and do not trigger header clicks', async t => {
-  const browser = await chromium.launch({ headless: true, executablePath });
+  const browser = await chromium.launch({ headless: true });
   t.after(() => browser.close());
   const page = await browser.newPage({ viewport: { width: 1000, height: 800 } });
   await openResizableTable(page);
@@ -197,7 +196,7 @@ test('resizable tables persist widths, enforce a minimum, and do not trigger hea
 });
 
 test('tables fill wide containers, map drags 1:1, and reset on double-click', async t => {
-  const browser = await chromium.launch({ headless: true, executablePath });
+  const browser = await chromium.launch({ headless: true });
   t.after(() => browser.close());
   const page = await browser.newPage({ viewport: { width: 1000, height: 800 } });
   await page.route('http://resizer.test/**', route => route.fulfill({
@@ -265,7 +264,7 @@ test('tables fill wide containers, map drags 1:1, and reset on double-click', as
 });
 
 test('all primary lists and anomaly detail tables opt into the shared resizer', async t => {
-  const browser = await chromium.launch({ headless: true, executablePath });
+  const browser = await chromium.launch({ headless: true });
   t.after(() => browser.close());
   const page = await browser.newPage({ viewport: { width: 1000, height: 800 } });
   await page.setContent('<!doctype html><html><body><div id="toast-container"></div><div id="actions"></div><div id="content"></div></body></html>');

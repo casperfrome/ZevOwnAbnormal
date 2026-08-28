@@ -1,13 +1,12 @@
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const test = require('node:test');
-const { chromium } = require('playwright');
+const { chromium } = require('./browser');
 
 const frontendRoot = path.join(__dirname, '..');
-const executablePath = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 
 async function withPage(t, setup) {
-  const browser = await chromium.launch({ headless: true, executablePath });
+  const browser = await chromium.launch({ headless: true });
   t.after(() => browser.close());
   const page = await browser.newPage();
   page.setDefaultTimeout(2000);
@@ -385,7 +384,7 @@ test('manual resolution relies on the server resolver and refreshes the open det
 });
 
 async function openRealRecordsDeepLink(t, recordId) {
-  const browser = await chromium.launch({ headless: true, executablePath });
+  const browser = await chromium.launch({ headless: true });
   t.after(() => browser.close());
   const page = await browser.newPage();
   await page.setContent(`<!doctype html><html><body>

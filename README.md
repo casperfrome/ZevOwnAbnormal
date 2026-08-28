@@ -274,10 +274,14 @@ docker compose down -v
 
 ```powershell
 $env:SENTINEL_API_BASE_URL='http://127.0.0.1:8000'
-& 'D:\PythonVEnv\FirstVEnv\Scripts\python.exe' -m pytest backend\tests -q
+& 'D:\PythonVenv\Scripts\python.exe' -m pytest backend\tests tests -q
 Push-Location frontend
-node --test
+npm ci
+npx playwright install chromium
+npm test
 Pop-Location
 Get-ChildItem frontend\scripts\*.js | ForEach-Object { node --check $_.FullName }
 docker compose config --quiet
 ```
+
+测试使用 Node.js 20+ 和固定的 Playwright 1.62.1。需要使用已有浏览器时，通过 `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` 指定路径，详见前端 README。登录会话由服务端校验 24 小时有效期；升级前不含过期时间的旧会话需要重新登录。

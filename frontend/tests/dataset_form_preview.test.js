@@ -1,14 +1,13 @@
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const test = require('node:test');
-const { chromium } = require('playwright');
+const { chromium } = require('./browser');
 
 const frontendRoot = path.join(__dirname, '..');
 
 test('opening an existing dataset directly shows its query preview', async t => {
   const browser = await chromium.launch({
     headless: true,
-    executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
   });
   t.after(() => browser.close());
   const page = await browser.newPage();
@@ -40,7 +39,6 @@ test('opening an existing dataset directly shows its query preview', async t => 
 test('running StarRocks SQL in the dataset form renders the returned preview rows', async t => {
   const browser = await chromium.launch({
     headless: true,
-    executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
   });
   t.after(() => browser.close());
 

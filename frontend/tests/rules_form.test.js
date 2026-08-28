@@ -3,12 +3,12 @@ const path = require('node:path');
 const fs = require('node:fs');
 const http = require('node:http');
 const test = require('node:test');
-const { chromium } = require('playwright');
+const { chromium } = require('./browser');
 
 const frontendRoot = path.join(__dirname, '..');
 
 async function openTabbedRule(t, { editing = true, viewport = { width: 1280, height: 900 }, rulePatch = {} } = {}) {
-  const browser = await chromium.launch({ headless: true, executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' });
+  const browser = await chromium.launch({ headless: true });
   t.after(() => browser.close());
   const page = await browser.newPage({ viewport });
   page.setDefaultTimeout(3000);
@@ -269,7 +269,6 @@ test('SQL validation keeps its draft across tabs and focuses missing parameter m
 test('rule summary shows deduplicated pushes in transit and refreshes the server count', async t => {
   const browser = await chromium.launch({
     headless: true,
-    executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
   });
   t.after(() => browser.close());
 
@@ -312,7 +311,6 @@ test('rule summary shows deduplicated pushes in transit and refreshes the server
 test('opening an existing rule directly renders its condition and can add another', async t => {
   const browser = await chromium.launch({
     headless: true,
-    executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
   });
   t.after(() => browser.close());
 
@@ -410,7 +408,6 @@ test('opening an existing rule directly renders its condition and can add anothe
 test('editing an API-shaped condition removes the stale operator before saving', async t => {
   const browser = await chromium.launch({
     headless: true,
-    executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
   });
   t.after(() => browser.close());
 
@@ -487,7 +484,6 @@ test('editing an API-shaped condition removes the stale operator before saving',
 test('creating a rule uses condition fields and commits a typed user_id without Enter', async t => {
   const browser = await chromium.launch({
     headless: true,
-    executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
   });
   t.after(() => browser.close());
 
@@ -566,7 +562,6 @@ test('creating a rule uses condition fields and commits a typed user_id without 
 test('anomaly key picker supports accessible multi-selection and clears stale fields', async t => {
   const browser = await chromium.launch({
     headless: true,
-    executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
   });
   t.after(() => browser.close());
 
@@ -663,7 +658,6 @@ test('anomaly key picker supports accessible multi-selection and clears stale fi
 test('rule form preserves configured webhook and saves fixed plus field group mentions', async t => {
   const browser = await chromium.launch({
     headless: true,
-    executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
   });
   t.after(() => browser.close());
   const page = await browser.newPage();
@@ -753,7 +747,6 @@ test('rule form preserves configured webhook and saves fixed plus field group me
 test('rule form inserts template parameters and links from nested drawers and validates manual URLs', async t => {
   const browser = await chromium.launch({
     headless: true,
-    executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
   });
   t.after(() => browser.close());
   const page = await browser.newPage();
@@ -1007,7 +1000,7 @@ test('entrypoint bypasses a cached legacy Store and repeat push survives saving 
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(() => { server.closeAllConnections(); server.close(); });
-  const browser = await chromium.launch({ headless: true, executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' });
+  const browser = await chromium.launch({ headless: true });
   t.after(() => browser.close());
   const page = await browser.newPage();
   page.setDefaultTimeout(3000);

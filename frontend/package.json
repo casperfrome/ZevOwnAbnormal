@@ -1,0 +1,15 @@
+{
+  "name": "sentinel-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Sentinel static frontend and browser regression tests",
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "playwright": "1.62.1"
+  }
+}

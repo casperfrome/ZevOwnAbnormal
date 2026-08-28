@@ -1,13 +1,12 @@
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const test = require('node:test');
-const { chromium } = require('playwright');
+const { chromium } = require('./browser');
 
 const frontendRoot = path.join(__dirname, '..');
-const executablePath = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 
 async function browserPage(t, viewport = { width: 1280, height: 720 }) {
-  const browser = await chromium.launch({ headless: true, executablePath });
+  const browser = await chromium.launch({ headless: true });
   t.after(() => browser.close());
   const page = await browser.newPage({ viewport });
   page.setDefaultTimeout(1500);
