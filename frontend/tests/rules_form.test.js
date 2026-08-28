@@ -129,6 +129,37 @@ test('successful rule deletion cannot be reported as failed after leaving the pa
   assert.equal(await page.locator('#toast-container').innerText(), '');
 });
 
+test('pending rule toggles survive matching search rerenders and release replacement controls', async t => {
+  const page = await openTabbedRule(t);
+  await page.click('[data-action="cancel"]');
+  await page.evaluate(() => { window.toggleCalls = 0; Store.enableRule = async () => { toggleCalls++; return new Promise(resolve => { window.finishToggle = resolve; }); }; document.querySelector('input[data-action="toggle"]').click(); });
+  await page.fill('#r-search', '订单');
+  await page.locator('input[data-action="toggle"]').dispatchEvent('change');
+  assert.equal(await page.evaluate(() => toggleCalls), 1);
+  assert.equal(await page.locator('input[data-action="toggle"]').isDisabled(), true);
+  await page.evaluate(() => finishToggle());
+  await page.waitForFunction(() => !document.querySelector('input[data-action="toggle"]').disabled);
+});
+
+test('rule deletion stays single flight through confirmation and request rerenders', async t => {
+  const page = await openTabbedRule(t);
+  await page.click('[data-action="cancel"]');
+  await page.evaluate(() => { window.deleteCalls = 0; Store.deleteRule = async () => { deleteCalls++; return new Promise((resolve, reject) => { window.failDelete = () => reject(new Error('delete failed')); }); }; });
+  await page.click('[data-action="delete"]');
+  assert.equal(await page.locator('[data-action="delete"]').isDisabled(), true);
+  await page.click('[data-action="cancel"]');
+  assert.equal(await page.locator('[data-action="delete"]').isDisabled(), false);
+  await page.click('[data-action="delete"]'); await page.click('[data-action="confirm"]');
+  await page.fill('#r-search', '订单');
+  await page.locator('[data-action="delete"]').dispatchEvent('click');
+  assert.equal(await page.getByRole('dialog').count(), 0);
+  assert.equal(await page.locator('[data-action="delete"]').isDisabled(), true);
+  assert.equal(await page.evaluate(() => deleteCalls), 1);
+  await page.evaluate(() => failDelete());
+  await page.waitForFunction(() => !document.querySelector('[data-action="delete"]').disabled);
+  assert.match(await page.locator('#toast-container').innerText(), /删除失败/);
+});
+
 test('deadline rejects invalid components and focuses basic information', async t => {
   const page = await openTabbedRule(t);
   for (const values of [['0','0','0','0'], ['31','0','0','0'], ['1','24','0','0'],

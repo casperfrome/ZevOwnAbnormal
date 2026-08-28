@@ -6,6 +6,16 @@ window.DatasourceModule = (function () {
   let state = { search: '', typeFilter: 'all', statusFilter: 'all', page: 1, pageSize: 8, sortKey: 'createdAt', sortDir: 'desc' };
   let pageRoot = null;
   const ownsPage = root => root?.isConnected && root === pageRoot;
+  const testingIds = new Set();
+  const deletingIds = new Set();
+
+  function syncPendingControls() {
+    if (!ownsPage(pageRoot)) return;
+    document.querySelectorAll('#ds-table [data-action]').forEach(button => {
+      if (button.dataset.action === 'test') button.disabled = testingIds.has(button.dataset.id);
+      if (button.dataset.action === 'delete') button.disabled = deletingIds.has(button.dataset.id);
+    });
+  }
 
   function renderActions(actionsEl) {
     actionsEl.innerHTML = `
@@ -216,6 +226,7 @@ window.DatasourceModule = (function () {
     });
 
     // Wire actions
+    syncPendingControls();
     tableEl.querySelectorAll('[data-action]').forEach(btn => {
       btn.addEventListener('click', () => {
         const id = btn.dataset.id;
@@ -245,10 +256,11 @@ window.DatasourceModule = (function () {
 
   // ---------- Test connection ----------
   async function testConnection(id, btn) {
-    if (btn.disabled) return;
+    if (btn.disabled || testingIds.has(id)) return;
     const root = pageRoot;
     const ds = Store.getDatasource(id);
     if (!ds) return;
+    testingIds.add(id);
     const original = btn.innerHTML;
     btn.innerHTML = `<span class="btn-spinner"></span>`;
     btn.disabled = true;
@@ -265,7 +277,9 @@ window.DatasourceModule = (function () {
       renderList(); renderStats();
       UI.toast({ type: 'error', title: '连接失败', desc: error.message });
     } finally {
+      testingIds.delete(id);
       if (btn.isConnected) { btn.innerHTML = original; btn.disabled = false; }
+      syncPendingControls();
     }
   }
 
@@ -273,21 +287,22 @@ window.DatasourceModule = (function () {
   async function confirmDelete(id) {
     const root = pageRoot;
     const ds = Store.getDatasource(id);
-    if (!ds) return;
-    const ok = await UI.confirm({
-      title: '删除数据源',
-      desc: `确定要删除「${ds.name}」吗？关联的数据集与规则可能受到影响。`,
-      confirmText: '删除',
-      danger: true,
-    });
-    if (ok) {
-      try {
-        await Store.deleteDatasource(id);
-        if (!ownsPage(root)) return;
-        UI.toast({ type: 'success', title: '已删除', desc: ds.name });
-        renderList(); renderStats();
-      } catch (error) { UI.toast({ type: 'error', title: '删除失败', desc: error.message }); }
-    }
+    if (!ds || deletingIds.has(id)) return;
+    deletingIds.add(id);
+    syncPendingControls();
+    try {
+      const ok = await UI.confirm({
+        title: '删除数据源',
+        desc: `确定要删除「${ds.name}」吗？关联的数据集与规则可能受到影响。`,
+        confirmText: '删除', danger: true,
+      });
+      if (!ok || !ownsPage(root)) return;
+      await Store.deleteDatasource(id);
+      if (!ownsPage(root)) return;
+      UI.toast({ type: 'success', title: '已删除', desc: ds.name });
+      renderList(); renderStats();
+    } catch (error) { if (ownsPage(root)) UI.toast({ type: 'error', title: '删除失败', desc: error.message }); }
+    finally { deletingIds.delete(id); syncPendingControls(); }
   }
 
   // ---------- Form (add / edit) ----------

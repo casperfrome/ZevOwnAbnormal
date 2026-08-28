@@ -81,6 +81,45 @@ test('datasource connection success keeps refresh failure as a separate warning'
   assert.doesNotMatch(await page.locator('#toast-container').innerText(), /连接失败/);
 });
 
+test('pending datasource tests survive matching search rerenders and release replacement controls', async t => {
+  const page = await datasourcePage(t);
+  await page.evaluate(() => { window.testCalls = 0; Store.testDatasource = async () => { testCalls++; return new Promise(resolve => { window.finishTest = resolve; }); }; });
+  await page.click('[data-action="test"]');
+  await page.fill('#ds-search', 'Source');
+  await page.locator('[data-action="test"]').dispatchEvent('click');
+  assert.equal(await page.evaluate(() => testCalls), 1);
+  assert.equal(await page.locator('[data-action="test"]').isDisabled(), true);
+  await page.evaluate(() => finishTest({ ok: true }));
+  await page.waitForFunction(() => !document.querySelector('[data-action="test"]').disabled);
+});
+
+test('datasource deletion stays single flight through confirmation and request rerenders', async t => {
+  const page = await datasourcePage(t);
+  await page.evaluate(() => { window.deleteCalls = 0; Store.deleteDatasource = async () => { deleteCalls++; return new Promise((resolve, reject) => { window.failDelete = () => reject(new Error('delete failed')); }); }; });
+  await page.click('[data-action="delete"]');
+  assert.equal(await page.locator('[data-action="delete"]').isDisabled(), true);
+  await page.click('[data-action="cancel"]');
+  assert.equal(await page.locator('[data-action="delete"]').isDisabled(), false);
+  await page.click('[data-action="delete"]'); await page.click('[data-action="confirm"]');
+  await page.fill('#ds-search', 'Source');
+  await page.locator('[data-action="delete"]').dispatchEvent('click');
+  assert.equal(await page.getByRole('dialog').count(), 0);
+  assert.equal(await page.locator('[data-action="delete"]').isDisabled(), true);
+  assert.equal(await page.evaluate(() => deleteCalls), 1);
+  await page.evaluate(() => failDelete());
+  await page.waitForFunction(() => !document.querySelector('[data-action="delete"]').disabled);
+  assert.match(await page.locator('#toast-container').innerText(), /删除失败/);
+});
+
+test('late datasource deletion failure cannot notify a replacement page', async t => {
+  const page = await datasourcePage(t);
+  await page.evaluate(() => { Store.deleteDatasource = async () => new Promise((resolve, reject) => { window.failDelete = () => reject(new Error('late delete failed')); }); });
+  await page.click('[data-action="delete"]'); await page.click('[data-action="confirm"]');
+  await page.evaluate(() => { document.querySelector('#content').innerHTML = '<h2>Other page</h2>'; failDelete(); });
+  await page.waitForTimeout(50);
+  assert.equal(await page.locator('#toast-container').innerText(), '');
+});
+
 async function browserPage(t, viewport = { width: 1280, height: 720 }) {
   const browser = await chromium.launch({ headless: true });
   t.after(() => browser.close());

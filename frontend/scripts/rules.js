@@ -8,6 +8,21 @@ window.RulesModule = (function () {
   let pageRoot = null;
   const ownsPage = root => root?.isConnected && root === pageRoot;
   const runningRules = new Set();
+  const pendingToggles = new Map();
+  const deletingIds = new Set();
+
+  function syncPendingControls() {
+    if (!ownsPage(pageRoot)) return;
+    document.querySelectorAll('#r-table [data-action]').forEach(control => {
+      const { action, id } = control.dataset;
+      if (action === 'run') control.disabled = runningRules.has(id);
+      if (action === 'delete') control.disabled = deletingIds.has(id);
+      if (action === 'toggle') {
+        control.disabled = pendingToggles.has(id);
+        control.checked = pendingToggles.has(id) ? pendingToggles.get(id) : !!Store.getRule(id)?.enabled;
+      }
+    });
+  }
 
   function renderActions(actionsEl) {
     actionsEl.innerHTML = `
@@ -202,6 +217,7 @@ window.RulesModule = (function () {
       ${UI.renderPagination(state.page, totalPages, total, state.pageSize)}
     `;
 
+    syncPendingControls();
     tableEl.querySelectorAll('[data-action]').forEach(btn => {
       btn.addEventListener('click', () => {
         const id = btn.dataset.id;
@@ -214,17 +230,20 @@ window.RulesModule = (function () {
     });
     tableEl.querySelectorAll('input[data-action="toggle"]').forEach(inp => {
       inp.addEventListener('change', async () => {
-        if (inp.disabled) return;
+        const id = inp.dataset.id;
+        if (inp.disabled || pendingToggles.has(id)) return;
         const root = pageRoot;
+        const enabled = inp.checked;
+        pendingToggles.set(id, enabled);
         inp.disabled = true;
-        const r = Store.getRule(inp.dataset.id);
+        const r = Store.getRule(id);
         try {
-          await Store.enableRule(inp.dataset.id, inp.checked);
+          await Store.enableRule(id, enabled);
           if (!ownsPage(root)) return;
-          UI.toast({ type: inp.checked ? 'success' : 'info', title: inp.checked ? '已启用' : '已停用', desc: r.name });
+          UI.toast({ type: enabled ? 'success' : 'info', title: enabled ? '已启用' : '已停用', desc: r.name });
           renderList(); renderStats();
         } catch (error) { if (ownsPage(root)) { inp.checked = !inp.checked; UI.toast({ type: 'error', title: '调度同步失败', desc: error.message }); } }
-        finally { if (inp.isConnected) inp.disabled = false; }
+        finally { pendingToggles.delete(id); syncPendingControls(); }
       });
     });
     tableEl.querySelectorAll('.page-btn[data-page]').forEach(btn => {
@@ -260,18 +279,23 @@ window.RulesModule = (function () {
       if (run.refreshWarning) UI.toast({ type: 'warning', title: '执行完成，页面刷新失败', desc: run.refreshWarning });
       renderList(); renderStats();
     } catch (error) { if (ownsPage(root)) UI.toast({ type: 'error', title: '执行失败', desc: error.message }); }
-    finally { runningRules.delete(id); buttons.forEach(button => { if (button.isConnected) button.disabled = false; }); }
+    finally { runningRules.delete(id); syncPendingControls(); }
   }
 
   async function confirmDelete(id) {
     const root = pageRoot;
     const r = Store.getRule(id);
-    if (!r) return;
-    const ok = await UI.confirm({ title: '删除规则', desc: `确定要删除「${r.name}」吗？历史异常记录将保留。`, confirmText: '删除', danger: true });
-    if (ok) {
-      try { await Store.deleteRule(id); if (!ownsPage(root)) return; UI.toast({ type: 'success', title: '已删除', desc: r.name }); renderList(); renderStats(); }
-      catch (error) { if (ownsPage(root)) UI.toast({ type: 'error', title: '删除失败', desc: error.message }); }
-    }
+    if (!r || deletingIds.has(id)) return;
+    deletingIds.add(id);
+    syncPendingControls();
+    try {
+      const ok = await UI.confirm({ title: '删除规则', desc: `确定要删除「${r.name}」吗？历史异常记录将保留。`, confirmText: '删除', danger: true });
+      if (!ok || !ownsPage(root)) return;
+      await Store.deleteRule(id);
+      if (!ownsPage(root)) return;
+      UI.toast({ type: 'success', title: '已删除', desc: r.name }); renderList(); renderStats();
+    } catch (error) { if (ownsPage(root)) UI.toast({ type: 'error', title: '删除失败', desc: error.message }); }
+    finally { deletingIds.delete(id); syncPendingControls(); }
   }
 
   // ---------- Form (add/edit) ----------
@@ -1228,6 +1252,7 @@ window.RulesModule = (function () {
       } catch (error) { if (m.dialog.isConnected) UI.toast({ type: 'error', title: '执行失败', desc: error.message }); }
       finally {
         runningRules.delete(id);
+        syncPendingControls();
         if (btn.isConnected) { btn.innerHTML = original; btn.disabled = false; }
       }
     });

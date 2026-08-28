@@ -13,6 +13,14 @@ window.RecordsModule = (function () {
   let pageRoot = null;
   const ownsPage = root => root?.isConnected && root === pageRoot;
   let exporting = false;
+  let bulkUpdating = false;
+
+  function syncBulkControls() {
+    if (!ownsPage(pageRoot)) return;
+    document.querySelectorAll('#rec-table [data-bulk]').forEach(button => {
+      if (button.dataset.bulk !== 'export') button.disabled = bulkUpdating;
+    });
+  }
 
   function renderActions(actionsEl) {
     const canAbort = typeof Store.isSuperuser === 'function' && Store.isSuperuser();
@@ -645,13 +653,15 @@ window.RecordsModule = (function () {
       });
     });
     tableEl.querySelector('#rec-clear-sel')?.addEventListener('click', () => { state.selected.clear(); renderList(); });
+    syncBulkControls();
     tableEl.querySelectorAll('[data-bulk]').forEach(btn => {
       btn.addEventListener('click', async () => {
         const action = btn.dataset.bulk;
         if (action === 'export') { await exportRecords(selectedIds); return; }
-        if (btn.disabled) return;
+        if (btn.disabled || bulkUpdating) return;
         const root = pageRoot;
-        btn.disabled = true;
+        bulkUpdating = true;
+        syncBulkControls();
         try {
           const result = await Store.bulkUpdateRecords(selectedIds, action);
           if (!ownsPage(root)) return;
@@ -659,7 +669,7 @@ window.RecordsModule = (function () {
           if (result?.refreshWarning) UI.toast({ type: 'warning', title: '已更新，页面刷新失败', desc: result.refreshWarning });
           state.selected.clear(); renderList(); renderStats(); renderTabs();
         } catch (error) { if (ownsPage(root)) UI.toast({ type: 'error', title: '批量更新失败', desc: error.message }); }
-        finally { if (btn.isConnected) btn.disabled = false; }
+        finally { bulkUpdating = false; syncBulkControls(); }
       });
     });
 
@@ -743,7 +753,7 @@ window.RecordsModule = (function () {
     const root = pageRoot;
     let r;
     try { r = await Store.loadRecord(id); }
-    catch (error) { UI.toast({ type: 'error', title: '详情加载失败', desc: error.message }); return; }
+    catch (error) { if (!root || ownsPage(root)) UI.toast({ type: 'error', title: '详情加载失败', desc: error.message }); return; }
     if (root && !ownsPage(root)) return;
     const rule = Store.getRule(r.ruleId);
 
@@ -1023,6 +1033,7 @@ window.RecordsModule = (function () {
       }
       if (!ownsPage(root)) return;
       if (count === 0) { UI.toast({ type: 'warning', title: '暂无数据可导出' }); return; }
+      if (ids && typeof Store.exportUrl !== 'function') throw new Error('当前导出接口不支持仅导出选中记录');
       const url = typeof Store.exportUrl === 'function' ? Store.exportUrl(filters) : Store.exportUrl;
       if (typeof Store.downloadExport === 'function') {
         const blob = await Store.downloadExport(url);

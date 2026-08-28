@@ -125,6 +125,40 @@ test('an empty manual query does not auto-execute twice and cannot produce an ex
   assert.doesNotMatch(await page.locator('#toast-container').innerText(), /导出已开始/);
 });
 
+async function deletableDatasetPage(t) {
+  const page = await datasetPage(t);
+  await page.evaluate(() => {
+    window.deleteCalls = 0; Store.getDatasets = () => [dataset];
+    Store.deleteDataset = async () => { deleteCalls++; return new Promise((resolve, reject) => { window.finishDelete = resolve; window.failDelete = () => reject(new Error('late delete failed')); }); };
+    DatasetModule.render(document.querySelector('#content'), { actionsEl: document.querySelector('#actions') });
+  });
+  return page;
+}
+
+test('dataset deletion stays single flight through confirmation and request rerenders', async t => {
+  const page = await deletableDatasetPage(t);
+  await page.click('[data-action="delete"]');
+  assert.equal(await page.locator('[data-action="delete"]').isDisabled(), true);
+  await page.click('[data-action="cancel"]');
+  assert.equal(await page.locator('[data-action="delete"]').isDisabled(), false);
+  await page.click('[data-action="delete"]'); await page.click('[data-action="confirm"]');
+  await page.fill('#ds-search', 'Saved');
+  await page.locator('[data-action="delete"]').dispatchEvent('click');
+  assert.equal(await page.getByRole('dialog').count(), 0);
+  assert.equal(await page.locator('[data-action="delete"]').isDisabled(), true);
+  assert.equal(await page.evaluate(() => deleteCalls), 1);
+  await page.evaluate(() => finishDelete());
+  await page.waitForFunction(() => !document.querySelector('[data-action="delete"]').disabled);
+});
+
+test('late dataset deletion failure cannot notify a replacement page', async t => {
+  const page = await deletableDatasetPage(t);
+  await page.click('[data-action="delete"]'); await page.click('[data-action="confirm"]');
+  await page.evaluate(() => { document.querySelector('#content').innerHTML = '<h2>Other page</h2>'; failDelete(); });
+  await page.waitForTimeout(50);
+  assert.equal(await page.locator('#toast-container').innerText(), '');
+});
+
 test('opening an existing dataset directly shows its query preview', async t => {
   const browser = await chromium.launch({
     headless: true,

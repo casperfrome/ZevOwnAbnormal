@@ -7,6 +7,14 @@ window.DatasetModule = (function () {
   let state = { search: '', datasourceFilter: 'all', page: 1, pageSize: 8 };
   let pageRoot = null;
   const ownsPage = root => root?.isConnected && root === pageRoot;
+  const deletingIds = new Set();
+
+  function syncPendingControls() {
+    if (!ownsPage(pageRoot)) return;
+    document.querySelectorAll('#ds-table [data-action="delete"]').forEach(button => {
+      button.disabled = deletingIds.has(button.dataset.id);
+    });
+  }
 
   // ---------- SQL syntax highlighter ----------
   const KEYWORDS = new Set([
@@ -297,6 +305,7 @@ window.DatasetModule = (function () {
       ${UI.renderPagination(state.page, totalPages, total, state.pageSize)}
     `;
 
+    syncPendingControls();
     tableEl.querySelectorAll('[data-action]').forEach(btn => {
       btn.addEventListener('click', () => {
         const id = btn.dataset.id;
@@ -326,12 +335,17 @@ window.DatasetModule = (function () {
   async function confirmDelete(id) {
     const root = pageRoot;
     const d = Store.getDataset(id);
-    if (!d) return;
-    const ok = await UI.confirm({ title: '删除数据集', desc: `确定要删除「${d.name}」吗？关联的异常规则将失效。`, confirmText: '删除', danger: true });
-    if (ok) {
-      try { await Store.deleteDataset(id); if (!ownsPage(root)) return; UI.toast({ type: 'success', title: '已删除', desc: d.name }); renderList(); renderStats(); }
-      catch (error) { UI.toast({ type: 'error', title: '删除失败', desc: error.message }); }
-    }
+    if (!d || deletingIds.has(id)) return;
+    deletingIds.add(id);
+    syncPendingControls();
+    try {
+      const ok = await UI.confirm({ title: '删除数据集', desc: `确定要删除「${d.name}」吗？关联的异常规则将失效。`, confirmText: '删除', danger: true });
+      if (!ok || !ownsPage(root)) return;
+      await Store.deleteDataset(id);
+      if (!ownsPage(root)) return;
+      UI.toast({ type: 'success', title: '已删除', desc: d.name }); renderList(); renderStats();
+    } catch (error) { if (ownsPage(root)) UI.toast({ type: 'error', title: '删除失败', desc: error.message }); }
+    finally { deletingIds.delete(id); syncPendingControls(); }
   }
 
   // ---------- Query preview drawer ----------

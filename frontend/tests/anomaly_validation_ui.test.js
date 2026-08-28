@@ -160,6 +160,39 @@ test('a late export preparation failure does not notify a different route', asyn
   assert.equal(await page.locator('#toast-container').innerText(), '');
 });
 
+test('pending bulk updates survive selection rerenders and release replacement controls', async t => {
+  const { page } = await exportPage(t);
+  await page.evaluate(() => { window.bulkCalls = 0; Store.bulkUpdateRecords = async () => { bulkCalls++; return new Promise((resolve, reject) => { window.failBulk = () => reject(new Error('bulk failed')); }); }; });
+  await page.locator('.rec-row-check[data-id="selected"]').check();
+  await page.click('[data-bulk="resolved"]');
+  await page.locator('.rec-row-check[data-id="unselected"]').check();
+  await page.locator('[data-bulk="resolved"]').dispatchEvent('click');
+  assert.equal(await page.evaluate(() => bulkCalls), 1);
+  assert.equal(await page.locator('[data-bulk="resolved"]').isDisabled(), true);
+  await page.evaluate(() => failBulk());
+  await page.waitForFunction(() => !document.querySelector('[data-bulk="resolved"]').disabled);
+});
+
+test('late initial record detail failure cannot notify a replacement page', async t => {
+  const { page } = await exportPage(t);
+  await page.evaluate(() => { Store.loadRecord = async () => new Promise((resolve, reject) => { window.failDetail = () => reject(new Error('late detail failed')); }); void RecordsModule.openDetail('selected'); });
+  await page.evaluate(() => { document.querySelector('#content').innerHTML = '<h2>Other page</h2>'; failDetail(); });
+  await page.waitForTimeout(50);
+  assert.equal(await page.locator('#toast-container').innerText(), '');
+});
+
+test('selected export fails closed for a static legacy URL without broadening its scope', async t => {
+  const { page } = await exportPage(t);
+  await page.evaluate(() => { Store.exportUrl = '#legacy-full-export'; delete Store.downloadExport; });
+  await page.locator('.rec-row-check[data-id="selected"]').check();
+  await page.click('[data-bulk="export"]');
+  assert.equal(await page.evaluate(() => location.hash), '');
+  assert.match(await page.locator('#toast-container').innerText(), /导出失败/);
+  assert.doesNotMatch(await page.locator('#toast-container').innerText(), /导出已开始/);
+  await page.click('#rec-export');
+  assert.equal(await page.evaluate(() => location.hash), '#legacy-full-export');
+});
+
 for (const [buttonId, method] of [['rec-abort-push', 'abortAnomalyPushes'], ['rec-recover-push', 'recoverAnomalyPushes'], ['rec-clear-in-transit', 'clearInTransitPushes']]) {
   test(`${method} cannot report or repaint after leaving its originating page`, async t => {
     const { page, pageErrors } = await exportPage(t);
