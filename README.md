@@ -8,13 +8,13 @@ Sentinel 是一个基于 FastAPI 的数据异常监控平台。前端页面由 F
 
 - Windows 与 Docker Desktop
 - 建议至少 16 GiB 可用内存
-- Python 虚拟环境：`D:\PythonVEnv\FirstVEnv\Scripts\python.exe`
+- Python 虚拟环境：`D:\PythonVenv\Scripts\python.exe`
 - 项目依赖：`backend\requirements.txt`
 
 先安装 Python 依赖：
 
 ```powershell
-& 'D:\PythonVEnv\FirstVEnv\Scripts\python.exe' -m pip install -r backend\requirements.txt
+& 'D:\PythonVenv\Scripts\python.exe' -m pip install -r backend\requirements.txt
 ```
 
 ## 配置
@@ -28,7 +28,7 @@ Sentinel 是一个基于 FastAPI 的数据异常监控平台。前端页面由 F
 推荐使用初始化脚本生成配置：
 
 ```powershell
-& 'D:\PythonVEnv\FirstVEnv\Scripts\python.exe' backend\scripts\bootstrap_env.py
+& 'D:\PythonVenv\Scripts\python.exe' backend\scripts\bootstrap_env.py
 ```
 
 运行前需确保 `D:\飞书里尔机器人凭证.txt` 存在，并包含 `App ID` 和 `App Secret`。脚本会覆盖根目录现有的 `.env`，但不会复制或修改原凭证文件。
@@ -99,16 +99,16 @@ docker compose up -d --wait --wait-timeout 600
 
 ```powershell
 Push-Location backend
-& 'D:\PythonVEnv\FirstVEnv\Scripts\python.exe' -m alembic -c alembic.ini upgrade head
-& 'D:\PythonVEnv\FirstVEnv\Scripts\python.exe' scripts\generate_demo_data.py --reset
-& 'D:\PythonVEnv\FirstVEnv\Scripts\python.exe' scripts\seed_platform.py
+& 'D:\PythonVenv\Scripts\python.exe' -m alembic -c alembic.ini upgrade head
+& 'D:\PythonVenv\Scripts\python.exe' scripts\generate_demo_data.py --reset
+& 'D:\PythonVenv\Scripts\python.exe' scripts\seed_platform.py
 Pop-Location
 ```
 
 默认会生成 12,000 家门店、近 30 天 1,000,000 笔订单，以及约 360,000 行门店日 ADS 数据。查看或调整造数参数：
 
 ```powershell
-& 'D:\PythonVEnv\FirstVEnv\Scripts\python.exe' backend\scripts\generate_demo_data.py --help
+& 'D:\PythonVenv\Scripts\python.exe' backend\scripts\generate_demo_data.py --help
 ```
 
 `--reset` 会重建 `tastien_prod` 和 `tastien_ads` 演示数据库。执行前请确认其中没有需要保留的数据。
