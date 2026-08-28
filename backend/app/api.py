@@ -2,11 +2,12 @@ import csv
 import io
 import secrets
 from datetime import datetime, timedelta
-from typing import Literal
+from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
 import httpx
 import jwt
+from pydantic import BeforeValidator
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 from sqlalchemy import and_, case, exists, func, or_, select, tuple_
@@ -74,6 +75,18 @@ from .validation_service import (
 router = APIRouter(prefix="/api/v1")
 internal_router = APIRouter(prefix="/api/internal")
 FEISHU_TEST_MESSAGE = "【Sentinel 测试消息】飞书消息发送测试成功。"
+
+
+def _parse_overview_days(value):
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return value
+    return value
+
+
+OverviewDays = Annotated[Literal[14, 30, 90], BeforeValidator(_parse_overview_days)]
 
 
 def get_session(request: Request):
@@ -1493,11 +1506,11 @@ def bulk_anomaly_status(
 
 @router.get("/overview")
 def overview(
-    days: Literal["14", "30", "90"] = "14",
+    days: OverviewDays = 14,
     session: Session = Depends(get_session),
     _reader: User = Depends(get_current_reader),
 ):
-    day_count = int(days)
+    day_count = days
     anomaly_stats = session.execute(select(
         func.sum(case((AnomalyRecord.status == "pending", 1), else_=0)),
         func.sum(case((AnomalyRecord.status == "processing", 1), else_=0)),

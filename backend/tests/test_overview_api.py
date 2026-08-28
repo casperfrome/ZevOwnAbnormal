@@ -54,3 +54,12 @@ def test_overview_has_beijing_zero_filled_trend_and_limited_rankings(monkeypatch
     assert len(thirty.json()["trend"]) == 30 and len(ninety.json()["trend"]) == 90
     assert unsupported.status_code == 422
     assert body["top_rules"] == [{"id": body["top_rules"][0]["id"], "name": "overview-rule", "dataset_name": "overview-dataset", "anomaly_count": 2}]
+
+
+def test_overview_days_openapi_contract_uses_numeric_literal_values():
+    app = create_app(testing=True)
+    parameter = next(
+        parameter for parameter in app.openapi()["paths"]["/api/v1/overview"]["get"]["parameters"]
+        if parameter["name"] == "days"
+    )
+    assert parameter["schema"] == {"enum": [14, 30, 90], "type": "integer", "default": 14, "title": "Days"}

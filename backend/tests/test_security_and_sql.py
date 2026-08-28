@@ -21,6 +21,7 @@ def test_sql_guard_rejects_mutation_and_multiple_statements():
         "SELECT 1; DROP TABLE orders",
         "INSERT INTO audit_log VALUES (1)",
         "SELECT 1 INTO audit_copy",
+        "WITH cte AS (SELECT 1 INTO audit_copy) SELECT * FROM cte",
     ):
         try:
             validate_readonly_sql(sql)

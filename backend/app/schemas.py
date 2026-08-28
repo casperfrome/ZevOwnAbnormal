@@ -22,10 +22,10 @@ def _required_text(value, field_name: str = "字段"):
 class DatasourceCreate(BaseModel):
     name: str = Field(min_length=1, max_length=150)
     type: DatasourceType
-    host: str = Field(min_length=1)
+    host: str = Field(min_length=1, max_length=255)
     port: int = Field(gt=0, le=65535)
-    database: str = Field(min_length=1)
-    username: str = Field(min_length=1)
+    database: str = Field(min_length=1, max_length=150)
+    username: str = Field(min_length=1, max_length=150)
     password: str = ""
     ssl: bool = False
     description: str = ""
@@ -38,10 +38,10 @@ class DatasourceCreate(BaseModel):
 
 class DatasourceUpdate(BaseModel):
     name: str | None = None
-    host: str | None = None
+    host: str | None = Field(default=None, max_length=255)
     port: int | None = Field(default=None, gt=0, le=65535)
-    database: str | None = None
-    username: str | None = None
+    database: str | None = Field(default=None, max_length=150)
+    username: str | None = Field(default=None, max_length=150)
     password: str | None = None
     ssl: bool | None = None
     description: str | None = None
@@ -95,10 +95,10 @@ class DatasourceTestRequest(BaseModel):
     datasource_id: str | None = None
     name: str | None = Field(default=None, max_length=150)
     type: DatasourceType | None = None
-    host: str | None = None
+    host: str | None = Field(default=None, max_length=255)
     port: int | None = Field(default=None, gt=0, le=65535)
-    database: str | None = None
-    username: str | None = None
+    database: str | None = Field(default=None, max_length=150)
+    username: str | None = Field(default=None, max_length=150)
     password: str | None = None
     ssl: bool | None = None
     description: str | None = None

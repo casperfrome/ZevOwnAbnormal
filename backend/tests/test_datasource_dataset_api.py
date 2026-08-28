@@ -178,3 +178,15 @@ def test_dataset_execute_endpoints_close_connections(monkeypatch):
         assert client.post(f"/api/v1/datasets/{dataset['id']}/execute").status_code == 200
         assert client.post("/api/v1/datasets/execute", json={"datasource_id": source["id"], "sql": "SELECT 1"}).status_code == 200
     assert all(connection.closed for connection in connections)
+
+
+def test_datasource_text_fields_enforce_database_backed_lengths_on_all_requests():
+    fields = {"host": 255, "database": 150, "username": 150}
+    with TestClient(create_app(testing=True)) as client:
+        source = client.post("/api/v1/datasources", json=_audit_datasource()).json()
+        for field, maximum in fields.items():
+            oversized = "x" * (maximum + 1)
+            assert client.post("/api/v1/datasources", json=_audit_datasource(f"length-{field}", **{field: oversized})).status_code == 422
+            assert client.patch(f"/api/v1/datasources/{source['id']}", json={field: oversized}).status_code == 422
+            assert client.post("/api/v1/datasources/test", json=_audit_datasource(**{field: oversized})).status_code == 422
+            assert client.post("/api/v1/datasources/test", json={"datasource_id": source["id"], field: oversized}).status_code == 422

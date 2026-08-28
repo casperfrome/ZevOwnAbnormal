@@ -32,6 +32,6 @@ def validate_readonly_sql(sql: str) -> str:
     statement = statements[0]
     if not isinstance(statement, (exp.Select, exp.Union)):
         raise SqlValidationError("仅允许 SELECT 或 WITH 查询")
-    if statement.args.get("into") is not None or any(statement.find(node_type) is not None for node_type in _MUTATING_NODES):
+    if statement.find(exp.Into) is not None or any(statement.find(node_type) is not None for node_type in _MUTATING_NODES):
         raise SqlValidationError("SQL 包含写入或结构变更操作")
     return statement.sql(dialect="mysql")
