@@ -99,6 +99,39 @@ def test_datasource_dataset_names_and_patch_values_are_normalized():
         assert client.patch(f"/api/v1/datasets/{dataset.json()['id']}", json={"sql": None}).status_code == 422
 
 
+def test_datasource_update_name_enforces_normalized_150_character_limit_and_preserves_rejected_value():
+    with TestClient(create_app(testing=True)) as client:
+        source = client.post("/api/v1/datasources", json=_audit_datasource()).json()
+
+        rejected = client.patch(f"/api/v1/datasources/{source['id']}", json={"name": f" {'d' * 151} "})
+        assert rejected.status_code == 422
+        assert client.get(f"/api/v1/datasources/{source['id']}").json()["name"] == "source"
+
+        accepted = client.patch(f"/api/v1/datasources/{source['id']}", json={"name": f" {'d' * 150} "})
+        assert accepted.status_code == 200
+        assert accepted.json()["name"] == "d" * 150
+        assert client.patch(f"/api/v1/datasources/{source['id']}", json={"name": None}).status_code == 422
+        assert client.patch(f"/api/v1/datasources/{source['id']}", json={}).json()["name"] == "d" * 150
+
+
+def test_dataset_update_name_enforces_normalized_150_character_limit_and_preserves_rejected_value():
+    with TestClient(create_app(testing=True)) as client:
+        source = client.post("/api/v1/datasources", json=_audit_datasource()).json()
+        dataset = client.post(
+            "/api/v1/datasets", json={"name": "dataset", "datasource_id": source["id"], "sql": "SELECT 1"},
+        ).json()
+
+        rejected = client.patch(f"/api/v1/datasets/{dataset['id']}", json={"name": f" {'d' * 151} "})
+        assert rejected.status_code == 422
+        assert client.get(f"/api/v1/datasets/{dataset['id']}").json()["name"] == "dataset"
+
+        accepted = client.patch(f"/api/v1/datasets/{dataset['id']}", json={"name": f" {'d' * 150} "})
+        assert accepted.status_code == 200
+        assert accepted.json()["name"] == "d" * 150
+        assert client.patch(f"/api/v1/datasets/{dataset['id']}", json={"name": None}).status_code == 422
+        assert client.patch(f"/api/v1/datasets/{dataset['id']}", json={}).json()["name"] == "d" * 150
+
+
 def test_dataset_datasource_updates_validate_references_and_conflicts():
     with TestClient(create_app(testing=True)) as client:
         first = client.post("/api/v1/datasources", json=_audit_datasource("one")).json()
@@ -138,6 +171,44 @@ def test_datasource_test_preserves_saved_password_and_closes_connections(monkeyp
         assert client.post("/api/v1/datasources/test", json={"datasource_id": source["id"], "host": "changed"}).status_code == 200
     assert all(connection.closed for _, _, connection in connections)
     assert connections[1][1] == "secret" and connections[1][0].host == "changed"
+
+
+def test_datasource_update_preserves_exact_password_and_blank_edit_retains_saved_password(monkeypatch):
+    passwords = []
+
+    class Cursor:
+        def execute(self, *_args): pass
+        def fetchone(self): return {"ok": 1}
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+
+    class Connection:
+        def cursor(self): return Cursor()
+        def close(self): pass
+
+    def connect(_item, password):
+        passwords.append(password)
+        return Connection()
+
+    monkeypatch.setattr("app.api.connect_to_datasource", connect)
+    with TestClient(create_app(testing=True)) as client:
+        source = client.post("/api/v1/datasources", json=_audit_datasource(password="  created password  ")).json()
+        override = "  test override password  "
+        updated = "  updated password  "
+
+        assert client.post("/api/v1/datasources/test", json={"datasource_id": source["id"], "password": override}).status_code == 200
+        assert client.patch(f"/api/v1/datasources/{source['id']}", json={"password": updated}).status_code == 200
+        assert client.post(f"/api/v1/datasources/{source['id']}/test").status_code == 200
+        assert client.patch(f"/api/v1/datasources/{source['id']}", json={"password": None}).status_code == 422
+        all_space = "   "
+        assert client.patch(f"/api/v1/datasources/{source['id']}", json={"password": all_space}).status_code == 200
+        assert client.post(f"/api/v1/datasources/{source['id']}/test").status_code == 200
+        assert client.patch(f"/api/v1/datasources/{source['id']}", json={"description": "blank password edit"}).status_code == 200
+        assert client.post(f"/api/v1/datasources/{source['id']}/test").status_code == 200
+        assert client.patch(f"/api/v1/datasources/{source['id']}", json={"password": ""}).status_code == 200
+        assert client.post(f"/api/v1/datasources/{source['id']}/test").status_code == 200
+
+    assert passwords == [override, updated, all_space, all_space, ""]
 
 
 def test_failed_saved_datasource_test_updates_check_time_and_closes(monkeypatch):

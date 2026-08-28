@@ -37,7 +37,7 @@ class DatasourceCreate(BaseModel):
 
 
 class DatasourceUpdate(BaseModel):
-    name: str | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=150)
     host: str | None = Field(default=None, max_length=255)
     port: int | None = Field(default=None, gt=0, le=65535)
     database: str | None = Field(default=None, max_length=150)
@@ -53,6 +53,8 @@ class DatasourceUpdate(BaseModel):
             raise ValueError(f"{info.field_name} 不能为空")
         if info.field_name == "name":
             return _required_text(value, "数据源名称")
+        if info.field_name == "password":
+            return value
         return value.strip() if isinstance(value, str) else value
 
     @field_validator("port", "ssl", mode="before")
@@ -76,7 +78,7 @@ class DatasetCreate(BaseModel):
 
 
 class DatasetUpdate(BaseModel):
-    name: str | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=150)
     datasource_id: str | None = None
     sql: str | None = None
     description: str | None = None
