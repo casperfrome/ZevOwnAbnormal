@@ -34,7 +34,10 @@ from .models import (
     utcnow,
 )
 from .query_service import connect_to_datasource, execute_readonly_query
-from .push_pipeline import abort_pending_pushes, execute_push_job, recover_failed_push_jobs
+from .push_pipeline import (
+    abort_pending_pushes, execute_push_job, recover_failed_push_jobs,
+    cancel_record_pushes, in_transit_anomaly_ids as _in_transit_anomaly_ids,
+)
 from .schemas import (
     AnomalyStatusUpdate,
     BulkAnomalyStatusUpdate,
@@ -1144,42 +1147,31 @@ def _anomaly_ordering(sort_key: str, sort_order: str):
     return sort_column.asc() if sort_order == "asc" else sort_column.desc()
 
 
-def _in_transit_anomaly_ids(session: Session):
-    pipeline = session.get(AnomalyPushPipelineState, 1)
-    query = (
-        select(AnomalyPushJob.anomaly_id)
-        .outerjoin(
-            NotificationDelivery,
-            and_(
-                AnomalyPushJob.kind == "notification",
-                NotificationDelivery.id == AnomalyPushJob.delivery_id,
-            ),
-        )
-        .outerjoin(
-            AnomalyValidationRequest,
-            and_(
-                AnomalyPushJob.kind == "validation",
-                AnomalyValidationRequest.id == AnomalyPushJob.delivery_id,
-            ),
-        )
-    )
-    if pipeline is None:
-        return query.where(AnomalyPushJob.id.is_(None))
-    return query.where(
-        AnomalyPushJob.generation == pipeline.generation,
-        AnomalyPushJob.cancel_requested.is_(False),
-        AnomalyPushJob.status.not_in(["sent", "aborted"]),
-        or_(
-            and_(
-                AnomalyPushJob.kind == "notification",
-                NotificationDelivery.status.in_(["pending", "failed", "sending", "uncertain"]),
-            ),
-            and_(
-                AnomalyPushJob.kind == "validation",
-                AnomalyValidationRequest.delivery_status.in_(["pending", "failed", "sending", "uncertain"]),
-            ),
-        ),
-    ).distinct()
+@router.post("/anomaly-pushes/clear-in-transit")
+def clear_in_transit_pushes(
+    session: Session = Depends(get_session),
+    admin_username: str = Depends(get_current_admin),
+):
+    try:
+        # Serialize with other pipeline management and new outbox creation.
+        pipeline = session.scalar(select(AnomalyPushPipelineState).where(
+            AnomalyPushPipelineState.id == 1,
+        ).with_for_update().execution_options(populate_existing=True))
+        if pipeline is not None and pipeline.abort_in_progress:
+            raise HTTPException(409, "中止推送正在执行，请稍后重试")
+        ids = list(session.scalars(_in_transit_anomaly_ids(session)))
+        cancelled = cancel_record_pushes(session, ids)
+        payload = AnomalyStatusUpdate(status="resolved")
+        resolved = 0
+        for item in session.scalars(select(AnomalyRecord).where(
+            AnomalyRecord.id.in_(ids),
+        ).order_by(AnomalyRecord.id)):
+            resolved += _set_anomaly_status(item, payload, session, admin_username)
+        session.commit()
+        return {"resolved_records": resolved, "cancelled_jobs": cancelled}
+    except Exception:
+        session.rollback()
+        raise
 
 
 @router.get("/anomalies")

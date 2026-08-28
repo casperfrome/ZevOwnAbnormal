@@ -475,7 +475,7 @@ def test_push_pipeline_dispatches_group_jobs_and_marks_them_sent(db_session, mon
         AnomalyPushJob.kind == "group_broadcast"
     ))
 
-    def deliver(session, _settings, delivery_ids):
+    def deliver(session, _settings, delivery_ids, *, should_stop=None):
         assert delivery_ids == [delivery.id]
         delivery.status = "sent"
         session.commit()
@@ -494,7 +494,7 @@ def test_uncertain_group_job_is_terminal_and_never_requeued(db_session, monkeypa
         AnomalyPushJob.kind == "group_broadcast"
     ))
 
-    def uncertain(session, _settings, delivery_ids):
+    def uncertain(session, _settings, delivery_ids, *, should_stop=None):
         assert delivery_ids == [delivery.id]
         delivery.status = "uncertain"
         delivery.last_error = "飞书 webhook 发送结果未知"
@@ -522,7 +522,7 @@ def test_failed_group_job_is_requeued_when_due(db_session, monkeypatch):
         AnomalyPushJob.kind == "group_broadcast"
     ))
 
-    def rejected(session, _settings, delivery_ids):
+    def rejected(session, _settings, delivery_ids, *, should_stop=None):
         assert delivery_ids == [delivery.id]
         delivery.status = "failed"
         delivery.attempts = 1

@@ -356,6 +356,7 @@ def deliver_group_broadcasts(
     delivery_ids: list[str],
     *,
     transport: httpx.BaseTransport | None = None,
+    should_stop=None,
 ) -> int:
     if not delivery_ids:
         return 0
@@ -372,11 +373,18 @@ def deliver_group_broadcasts(
         transport=transport,
     ) as client:
         for delivery in deliveries:
+            if should_stop is not None and should_stop():
+                break
             delivery.attempts += 1
             delivery.status = "sending"
             delivery.last_error = None
             session.commit()
             try:
+                if should_stop is not None and should_stop():
+                    delivery.status = "aborted"
+                    delivery.next_attempt_at = None
+                    session.commit()
+                    break
                 response = client.post(delivery.webhook_url, json=delivery.payload)
                 if not response.is_success:
                     raise GroupWebhookDeliveryError(

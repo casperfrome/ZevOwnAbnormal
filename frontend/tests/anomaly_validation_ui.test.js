@@ -1072,7 +1072,7 @@ test('abort push action is left of export, confirms danger, and prevents duplica
   });
 
   assert.deepEqual(await page.locator('#actions button').evaluateAll(items => items.map(item => item.id)), [
-    'rec-recover-push', 'rec-abort-push', 'rec-export', 'rec-refresh',
+    'rec-recover-push', 'rec-abort-push', 'rec-clear-in-transit', 'rec-export', 'rec-refresh',
   ]);
   await page.click('#rec-abort-push');
   assert.match(await page.locator('[role="dialog"]').innerText(), /已发送消息无法撤回/);
@@ -1242,6 +1242,7 @@ test('abort push action is hidden from non-superadmin readers', async t => {
 
   assert.equal(await page.locator('#rec-abort-push').count(), 0);
   assert.equal(await page.locator('#rec-recover-push').count(), 0);
+  assert.equal(await page.locator('#rec-clear-in-transit').count(), 0);
   assert.deepEqual(await page.locator('#actions button').evaluateAll(items => items.map(item => item.id)), [
     'rec-export', 'rec-refresh',
   ]);
@@ -1271,3 +1272,70 @@ test('record detail shows resolved field comparisons and last failed SQL audit w
   assert.equal(await page.locator('.drawer low').count(), 0);
   assert.deepEqual(pageErrors, []);
 });
+
+for (const outcome of ['success', 'request-failure', 'refresh-failure', 'list-failure']) {
+  test(`clear in-transit action confirms global scope and handles ${outcome}`, async t => {
+    const { page, pageErrors } = await withPage(t, async page => {
+      await page.evaluate(outcome => {
+        window.clearCalls = 0;
+        window.refreshCalls = 0;
+        const record = { id: 'clear-target', ruleId: 'rule-1', ruleName: 'Clear target',
+          datasetName: 'Orders', severity: 'high', status: 'pending',
+          occurredAt: '2026-08-22T09:00:00', field: 'amount', value: 999, assignee: null };
+        window.Store = {
+          isSuperuser: () => true,
+          getStats: () => ({ pendingRecords: window.refreshCalls ? 0 : 12, processingRecords: 0, timedOutRecords: 0,
+            resolvedToday: window.refreshCalls ? 12 : 0, highAnomalies: 0 }),
+          getRecords: () => [record], getRules: () => [],
+          loadRecordsPage: async () => {
+            if (outcome === 'list-failure' && window.refreshCalls) throw new Error('list failed');
+            return { items: [record], total: 1, page: 1, pageSize: 10 };
+          },
+          clearInTransitPushes: () => {
+            window.clearCalls++;
+            return new Promise((resolve, reject) => {
+              window.finishClear = () => outcome === 'request-failure'
+                ? reject(new Error('request failed')) : resolve({ resolved_records: 12, cancelled_jobs: 25 });
+            });
+          },
+          refresh: async () => {
+            window.refreshCalls++;
+            if (outcome === 'refresh-failure') throw new Error('refresh failed');
+          }, exportUrl: '/export',
+        };
+      }, outcome);
+      await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'records.js') });
+      await page.evaluate(() => RecordsModule.render(document.getElementById('content'), {
+        actionsEl: document.getElementById('actions'), navigate: () => {},
+      }));
+    });
+    await page.locator('.rec-row-check').check();
+    await page.click('#rec-clear-in-transit');
+    const dialog = page.locator('[role="dialog"]');
+    assert.match(await dialog.innerText(), /所有.*在途/);
+    assert.match(await dialog.innerText(), /群聊播报/);
+    assert.match(await dialog.innerText(), /筛选.*分页/);
+    await dialog.locator('[data-action="cancel"]').click();
+    assert.equal(await page.evaluate(() => window.clearCalls), 0);
+    await page.click('#rec-clear-in-transit');
+    await dialog.locator('[data-action="confirm"]').click();
+    await page.waitForFunction(() => window.clearCalls === 1);
+    assert.equal(await page.locator('#rec-clear-in-transit').isDisabled(), true);
+    await page.evaluate(() => {
+      document.getElementById('rec-clear-in-transit').dispatchEvent(new Event('click'));
+      window.finishClear();
+    });
+    const title = outcome === 'request-failure' ? '清除在途推送失败'
+      : ['refresh-failure', 'list-failure'].includes(outcome) ? '在途推送已清除，页面刷新失败' : '在途推送已清除';
+    await page.getByText(title, { exact: true }).waitFor();
+    assert.equal(await page.evaluate(() => window.clearCalls), 1);
+    assert.equal(await page.evaluate(() => window.refreshCalls), outcome === 'request-failure' ? 0 : 1);
+    assert.equal(await page.locator('#rec-clear-in-transit').isDisabled(), false);
+    if (outcome === 'success') {
+      assert.match(await page.locator('#toast-container').innerText(), /12.*25/);
+      assert.equal(await page.locator('.rec-row-check').isChecked(), false);
+      assert.equal(await page.locator('#cnt-resolved').innerText(), '12');
+    }
+    assert.deepEqual(pageErrors, []);
+  });
+}

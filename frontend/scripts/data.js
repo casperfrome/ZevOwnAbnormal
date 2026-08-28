@@ -389,6 +389,7 @@ window.Store = (function () {
       body: JSON.stringify({ receive_id_type: receiveIdType, receive_id: receiveId }),
     }),
     abortAnomalyPushes: () => request('/anomaly-pushes/abort', { method: 'POST' }),
+    clearInTransitPushes: () => request('/anomaly-pushes/clear-in-transit', { method: 'POST' }),
     recoverAnomalyPushes: () => request('/anomaly-pushes/recover', { method: 'POST' }),
 
     getDatasets: () => [...state.datasets],

@@ -154,7 +154,8 @@ def test_interactive_token_failure_is_a_safe_pre_post_error_and_valid_4xx_is_def
     assert not isinstance(rejection.value, FeishuDeliveryUncertainError)
 
 
-def test_interactive_cancellation_after_token_does_not_start_the_message_post():
+@pytest.mark.parametrize("kind", ["interactive", "text"])
+def test_cancellation_after_token_does_not_start_the_message_post(kind):
     stopped = False
     paths = []
 
@@ -174,7 +175,10 @@ def test_interactive_cancellation_after_token_does_not_start_the_message_post():
     )
 
     with pytest.raises(FeishuError, match="已取消") as cancelled:
-        client.send_interactive("user_id", "user-1", {"schema": "2.0"})
+        if kind == "interactive":
+            client.send_interactive("user_id", "user-1", {"schema": "2.0"})
+        else:
+            client.send_text("user_id", "user-1", "text")
 
     assert not isinstance(cancelled.value, FeishuDeliveryUncertainError)
     assert paths == ["/open-apis/auth/v3/tenant_access_token/internal/"]

@@ -1,4 +1,5 @@
 from datetime import timedelta
+import pytest
 
 from sqlalchemy import select
 
@@ -119,6 +120,194 @@ class FakeScheduler:
     def start_push_job(self, job_id):
         self.events.append("start")
         self.started.append(job_id)
+
+
+@pytest.mark.parametrize("stage", ["publish", "dispatch"])
+@pytest.mark.parametrize("fails", [False, True])
+def test_cancellation_during_external_queue_call_cannot_be_overwritten(db_session, stage, fails):
+    rule = _rule(db_session)
+    rule.validation_enabled = False
+    persist_matches(db_session, rule, [EvaluationMatch(
+        row={"store_id": "S1", "gmv": 500}, business_key={"store_id": "S1"}, matched_conditions=[],
+    )])
+    job = db_session.scalar(select(AnomalyPushJob))
+    def cancel():
+        job.cancel_requested = True
+        job.status = "aborted"
+        db_session.commit()
+        if fails:
+            raise RuntimeError("external failure after cancellation")
+    class CancellingKafka(FakeKafka):
+        def publish(self, event, key):
+            cancel()
+            return super().publish(event, key)
+    class CancellingScheduler(FakeScheduler):
+        def start_push_job(self, job_id):
+            cancel()
+            super().start_push_job(job_id)
+    if stage == "publish":
+        publish_pending_jobs(db_session, Settings(), CancellingKafka())
+    else:
+        kafka = FakeKafka()
+        publish_pending_jobs(db_session, Settings(), kafka)
+        consume_one(db_session, Settings(), kafka, CancellingScheduler())
+    db_session.refresh(job)
+    assert job.status == "aborted"
+    assert job.next_attempt_at is None
+    assert db_session.get(NotificationDelivery, job.delivery_id, populate_existing=True).status == "aborted"
+    assert execute_push_job(db_session, Settings(), job.id) == "aborted"
+    assert recover_failed_push_jobs(db_session)["requeued_jobs"] == 0
+
+
+def test_cancel_flag_blocks_a_late_callback_even_if_job_status_is_stale(db_session, monkeypatch):
+    rule = _rule(db_session)
+    persist_matches(db_session, rule, [EvaluationMatch(
+        row={"store_id": "S1", "gmv": 500}, business_key={"store_id": "S1"}, matched_conditions=[],
+    )])
+    job = db_session.scalar(select(AnomalyPushJob).where(AnomalyPushJob.kind == "notification"))
+    job.cancel_requested = True
+    job.status = "ds_scheduled"
+    db_session.commit()
+    monkeypatch.setattr(push_pipeline, "deliver_notifications", lambda *_args, **_kwargs: pytest.fail("cancelled job must not send"))
+    assert execute_push_job(db_session, Settings(), job.id) == "aborted"
+
+
+def test_notification_cancellation_stops_immediate_retries(db_session, monkeypatch):
+    from app.feishu import FeishuError
+    rule = _rule(db_session)
+    rule.validation_enabled = False
+    persist_matches(db_session, rule, [EvaluationMatch(
+        row={"store_id": "S1", "gmv": 500}, business_key={"store_id": "S1"}, matched_conditions=[],
+    )])
+    job = db_session.scalar(select(AnomalyPushJob))
+    calls = []
+    class CancellingClient:
+        def __init__(self, *_args, **_kwargs): pass
+        def send_text(self, *_args, **_kwargs):
+            calls.append("send")
+            job.cancel_requested = True
+            db_session.commit()
+            raise FeishuError("definitive rejection")
+        def close(self): pass
+    monkeypatch.setattr("app.execution_service.FeishuClient", CancellingClient)
+    assert execute_push_job(db_session, Settings(), job.id) == "aborted"
+    assert calls == ["send"]
+    assert db_session.get(NotificationDelivery, job.delivery_id).status == "aborted"
+
+
+def test_notification_persists_delivery_before_locking_anomaly_for_deadline(db_session, monkeypatch):
+    from app import execution_service
+    rule = _rule(db_session)
+    rule.validation_enabled = False
+    persist_matches(db_session, rule, [EvaluationMatch(
+        row={"store_id": "S1", "gmv": 500}, business_key={"store_id": "S1"}, matched_conditions=[],
+    )])
+    job = db_session.scalar(select(AnomalyPushJob))
+    class SentClient:
+        def __init__(self, *_args, **_kwargs): pass
+        def send_text(self, *_args, **_kwargs): return "sent-message"
+        def close(self): pass
+    seen = []
+    original = execution_service.start_deadline
+    def inspect_deadline(session, anomaly_id, delivered_at):
+        # Read the persisted column, not a potentially dirty ORM object.
+        seen.append(session.scalar(select(NotificationDelivery.status).where(
+            NotificationDelivery.id == job.delivery_id)))
+        return original(session, anomaly_id, delivered_at)
+    monkeypatch.setattr(execution_service, "FeishuClient", SentClient)
+    monkeypatch.setattr(execution_service, "start_deadline", inspect_deadline)
+    assert execute_push_job(db_session, Settings(), job.id) == "sent"
+    assert seen == ["sent"]
+
+
+@pytest.mark.parametrize("kind", ["notification", "validation", "group_broadcast"])
+@pytest.mark.parametrize("outcome", ["success", "rejected", "uncertain"])
+def test_clear_during_http_send_preserves_outcome_and_never_retries(db_session, monkeypatch, kind, outcome):
+    import httpx
+    from sqlalchemy.orm import Session
+    from app.models import AnomalyRecord, AnomalyGroupBroadcastDelivery
+    from app.validation_service import transition_anomaly
+    from test_push_api import seed_clear_records
+    ids, broadcast_id = seed_clear_records(db_session)
+    job = db_session.scalar(select(AnomalyPushJob).where(
+        AnomalyPushJob.kind == kind,
+        AnomalyPushJob.delivery_id == broadcast_id if kind == "group_broadcast" else AnomalyPushJob.anomaly_id == ids[0],
+    ))
+    calls = []
+    real_client = httpx.Client
+    def handle(request):
+        if request.url.path.endswith("tenant_access_token/internal/"):
+            return httpx.Response(200, json={"code": 0, "tenant_access_token": "token", "expire": 7200})
+        calls.append(request.url.path)
+        with Session(db_session.get_bind(), autoflush=False, expire_on_commit=False) as cancelling:
+            push_pipeline.cancel_record_pushes(cancelling, [ids[0]])
+            record = cancelling.get(AnomalyRecord, ids[0])
+            transition_anomaly(cancelling, record, "resolved", source="manual", user_id="clear-admin")
+            cancelling.commit()
+        if outcome == "uncertain":
+            raise httpx.ReadTimeout("response lost", request=request)
+        return httpx.Response(200, json={"code": 0 if outcome == "success" else 123,
+                                        "msg": "rejected", "data": {"message_id": "sent-during-clear"}})
+    monkeypatch.setattr(httpx, "Client", lambda *args, **kwargs: real_client(
+        *args, **{**kwargs, "transport": httpx.MockTransport(handle)},
+    ))
+    settings = Settings(feishu_app_id="app", feishu_app_secret="secret")
+    if kind == "group_broadcast" and outcome != "success":
+        with pytest.raises(push_pipeline.GroupWebhookDeliveryUncertainError if outcome == "uncertain" else RuntimeError):
+            execute_push_job(db_session, settings, job.id)
+    else:
+        execute_push_job(db_session, settings, job.id)
+    db_session.expire_all()
+    job = db_session.get(AnomalyPushJob, job.id)
+    assert job.cancel_requested is True
+    assert job.next_attempt_at is None
+    model = {"notification": NotificationDelivery, "validation": AnomalyValidationRequest,
+             "group_broadcast": AnomalyGroupBroadcastDelivery}[kind]
+    delivery = db_session.get(model, job.delivery_id)
+    status = delivery.delivery_status if kind == "validation" else delivery.status
+    if outcome == "success":
+        assert status in {"sent", "resolved"}
+        if kind != "group_broadcast":
+            assert delivery.message_id == "sent-during-clear"
+    else:
+        assert status == ("uncertain" if outcome == "uncertain" else "aborted")
+    assert len(calls) == 1
+    assert recover_failed_push_jobs(db_session)["requeued_jobs"] == 0
+    execute_push_job(db_session, settings, job.id)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("kind", ["notification", "validation", "group_broadcast"])
+@pytest.mark.parametrize("delivery_status", ["sent", "uncertain", "sending"])
+@pytest.mark.parametrize("cancelled", [True, False])
+def test_stale_sender_preserves_delivery_evidence(db_session, kind, delivery_status, cancelled):
+    from app.models import AnomalyGroupBroadcastDelivery
+    from test_push_api import seed_clear_records
+    ids, broadcast_id = seed_clear_records(db_session)
+    job = db_session.scalar(select(AnomalyPushJob).where(
+        AnomalyPushJob.kind == kind,
+        AnomalyPushJob.delivery_id == broadcast_id if kind == "group_broadcast" else AnomalyPushJob.anomaly_id == ids[0],
+    ))
+    model = {"notification": NotificationDelivery, "validation": AnomalyValidationRequest,
+             "group_broadcast": AnomalyGroupBroadcastDelivery}[kind]
+    delivery = db_session.get(model, job.delivery_id)
+    setattr(delivery, "delivery_status" if kind == "validation" else "status", delivery_status)
+    job.status = "sending"
+    job.cancel_requested = cancelled
+    job.updated_at = utcnow() - timedelta(hours=1)
+    db_session.commit()
+    assert requeue_stale_push_jobs(db_session, Settings()) == 1
+    db_session.expire_all()
+    expected = "sent" if delivery_status == "sent" else "uncertain"
+    if not cancelled and kind == "validation" and delivery_status == "sending":
+        # Existing validation delivery keeps its own dedupe-window retry lease.
+        assert job.status == "failed"
+        assert delivery.delivery_status == "sending"
+        return
+    assert job.status == expected
+    assert getattr(delivery, "delivery_status" if kind == "validation" else "status") == expected
+    assert job.next_attempt_at is None
+    assert recover_failed_push_jobs(db_session)["requeued_jobs"] == 0
 
 
 def test_publish_pending_job_writes_minimal_versioned_message_and_records_offset(db_session):

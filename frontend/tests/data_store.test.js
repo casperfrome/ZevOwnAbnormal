@@ -128,6 +128,22 @@ test('abortAnomalyPushes posts to the administrative abort endpoint', async () =
   assert.equal(requests[0].options.method, 'POST');
 });
 
+test('clearInTransitPushes sends a global request without page filters or selected IDs', async () => {
+  const requests = [];
+  const context = { window: {}, fetch: async (url, options) => {
+    requests.push({ url, options });
+    return { ok: true, status: 200, json: async () => ({ resolved_records: 12, cancelled_jobs: 25 }) };
+  } };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'scripts', 'data.js'), 'utf8'), context);
+  const result = await context.window.Store.clearInTransitPushes();
+  assert.equal(result.resolved_records, 12);
+  assert.equal(result.cancelled_jobs, 25);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, '/api/v1/anomaly-pushes/clear-in-transit');
+  assert.equal(requests[0].options.method, 'POST');
+  assert.equal(requests[0].options.body, undefined);
+});
+
 test('validation rule fields and anomaly audit details map between API and UI contracts', async () => {
   const requests = [];
   const responses = {

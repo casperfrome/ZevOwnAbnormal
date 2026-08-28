@@ -17,11 +17,13 @@ window.RecordsModule = (function () {
     actionsEl.innerHTML = `
       ${canAbort ? `<button class="btn btn-secondary btn-sm" id="rec-recover-push">${Icon.refresh({ size: 14 })}<span>恢复失败推送</span></button>` : ''}
       ${canAbort ? `<button class="btn btn-danger-ghost btn-sm" id="rec-abort-push">${Icon.pause({ size: 14 })}<span>中止推送</span></button>` : ''}
+      ${canAbort ? `<button class="btn btn-danger-ghost btn-sm" id="rec-clear-in-transit">${Icon.check({ size: 14 })}<span>清除在途推送</span></button>` : ''}
       <button class="btn btn-secondary btn-sm" id="rec-export">${Icon.download({ size: 14 })}<span>导出</span></button>
       <button class="btn btn-secondary btn-sm" id="rec-refresh">${Icon.refresh({ size: 14 })}<span>刷新</span></button>
     `;
     actionsEl.querySelector('#rec-recover-push')?.addEventListener('click', recoverPushes);
     actionsEl.querySelector('#rec-abort-push')?.addEventListener('click', abortPushes);
+    actionsEl.querySelector('#rec-clear-in-transit')?.addEventListener('click', clearInTransitPushes);
     actionsEl.querySelector('#rec-export').addEventListener('click', exportRecords);
     actionsEl.querySelector('#rec-refresh').addEventListener('click', async () => { try { await Store.refresh(); UI.toast({ type: 'info', title: '已刷新' }); renderList(); renderStats(); renderTabs(); } catch (error) { UI.toast({ type: 'error', title: '刷新失败', desc: error.message }); } });
   }
@@ -65,6 +67,43 @@ window.RecordsModule = (function () {
         title: '失败推送恢复失败',
         desc: stages ? `依赖检查失败：${stages}` : error.message,
       });
+    } finally {
+      button.disabled = false;
+      button.innerHTML = original;
+    }
+  }
+
+  async function clearInTransitPushes() {
+    const button = document.getElementById('rec-clear-in-transit');
+    if (!button || button.disabled) return;
+    const original = button.innerHTML;
+    button.disabled = true;
+    try {
+      const confirmed = await UI.confirm({
+        title: '清除所有在途推送？',
+        desc: '将所有在途异常标为已解决，取消其通知、校验推送及所在记录组待发送的群聊播报，不受当前筛选、分页或勾选影响。同组其他记录状态不变；已发送消息无法撤回，正在发送的请求不再重试。',
+        confirmText: '清除在途推送',
+        danger: true,
+      });
+      if (!confirmed) return;
+      button.innerHTML = '<span class="btn-spinner"></span><span>正在清除…</span>';
+      const result = await Store.clearInTransitPushes();
+      state.selected.clear();
+      state.page = 1;
+      UI.toast({
+        type: 'success', title: '在途推送已清除',
+        desc: `已解决 ${result.resolved_records} 条异常 · 已取消 ${result.cancelled_jobs} 条推送任务`,
+      });
+      try {
+        await Store.refresh();
+        await renderList({ throwOnError: true });
+        renderStats();
+        renderTabs();
+      } catch (refreshError) {
+        UI.toast({ type: 'warning', title: '在途推送已清除，页面刷新失败', desc: refreshError.message });
+      }
+    } catch (error) {
+      UI.toast({ type: 'error', title: '清除在途推送失败', desc: error.message });
     } finally {
       button.disabled = false;
       button.innerHTML = original;
@@ -382,7 +421,7 @@ window.RecordsModule = (function () {
     return list;
   }
 
-  async function renderList() {
+  async function renderList({ throwOnError = false } = {}) {
     const tableEl = document.getElementById('rec-table');
     let all;
     let total;
@@ -411,6 +450,7 @@ window.RecordsModule = (function () {
         tableEl.innerHTML = UI.emptyState({
           icon: Icon.alert({ size: 24 }), iconCls: 'danger', title: '异常记录加载失败', desc: error.message,
         });
+        if (throwOnError) throw error;
         UI.toast({ type: 'error', title: '记录加载失败', desc: error.message });
         return;
       }
@@ -424,7 +464,7 @@ window.RecordsModule = (function () {
     if (state.page > totalPages) {
       state.page = totalPages;
       state.selected.clear();
-      return renderList();
+      return renderList({ throwOnError });
     }
     const selectedRecords = pageItems.filter(record => state.selected.has(record.id));
     const selectedIds = selectedRecords.map(record => record.id);

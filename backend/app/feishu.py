@@ -94,6 +94,7 @@ class FeishuClient:
         idempotency_key: str | None = None,
     ) -> str:
         token = self._tenant_token()
+        self._ensure_not_cancelled()
         payload = {
             "receive_id": recipient,
             "msg_type": "text",

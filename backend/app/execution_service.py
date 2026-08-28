@@ -9,7 +9,7 @@ from . import feishu as feishu_gateway
 from .anomaly_group_service import create_anomaly_group
 from .anomaly_service import persist_matches
 from .config import Settings
-from .feishu import FeishuClient
+from .feishu import FeishuClient, FeishuDeliveryUncertainError
 from .message_templates import render_private_markdown
 from .models import AnomalyRecord, NotificationDelivery, Rule, RuleRun, utcnow
 from .deadline_service import start_deadline
@@ -85,7 +85,7 @@ def _notification_card(record: AnomalyRecord, template: str, public_base_url: st
     }
 
 
-def deliver_notifications(session: Session, settings: Settings, delivery_ids: list[str] | None = None, rule_id: str | None = None) -> int:
+def deliver_notifications(session: Session, settings: Settings, delivery_ids: list[str] | None = None, rule_id: str | None = None, *, should_stop=None) -> int:
     query = select(NotificationDelivery, AnomalyRecord, Rule).join(
         AnomalyRecord, NotificationDelivery.anomaly_id == AnomalyRecord.id
     ).join(
@@ -103,16 +103,27 @@ def deliver_notifications(session: Session, settings: Settings, delivery_ids: li
     deliveries = list(session.execute(query))
     if not deliveries:
         return 0
+    client_options = {"cancellation_check": should_stop} if should_stop is not None else {}
     client = FeishuClient(
         settings.feishu_app_id,
         settings.feishu_app_secret,
         timeout=settings.feishu_http_timeout_seconds,
+        **client_options,
     )
     failures = 0
     try:
         for delivery, record, rule in deliveries:
+            uncertain_error = None
             for attempt in range(3):
+                if should_stop is not None and should_stop():
+                    if uncertain_error is not None:
+                        delivery.status = "uncertain"
+                        delivery.last_error = str(uncertain_error)[:2000]
+                        session.commit()
+                    break
+                delivery.status = "sending"
                 delivery.attempts += 1
+                session.commit()
                 try:
                     if rule.private_message_template:
                         delivery.message_id = client.send_interactive(
@@ -136,11 +147,22 @@ def deliver_notifications(session: Session, settings: Settings, delivery_ids: li
                         )
                     delivery.status = "sent"
                     delivery.last_error = None
+                    # Match clearing's delivery -> anomaly lock order.
+                    session.flush()
                     start_deadline(session, record.id, utcnow())
                     break
                 except Exception as exc:
+                    if isinstance(exc, FeishuDeliveryUncertainError):
+                        uncertain_error = exc
                     delivery.status = "failed"
                     delivery.last_error = str(exc)[:2000]
+                    session.commit()
+                    if should_stop is not None and should_stop():
+                        if uncertain_error is not None:
+                            delivery.status = "uncertain"
+                            delivery.last_error = str(uncertain_error)[:2000]
+                            session.commit()
+                        break
                     if attempt < 2:
                         time.sleep((0.2, 0.5)[attempt])
             if delivery.status != "sent":
