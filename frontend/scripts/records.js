@@ -10,6 +10,9 @@ window.RecordsModule = (function () {
     selected: new Set(), requestSequence: 0, searchTimer: null, total: 0,
     highTotal: null, highCountSequence: 0, highCountFailed: false,
   };
+  let pageRoot = null;
+  const ownsPage = root => root?.isConnected && root === pageRoot;
+  let exporting = false;
 
   function renderActions(actionsEl) {
     const canAbort = typeof Store.isSuperuser === 'function' && Store.isSuperuser();
@@ -24,24 +27,36 @@ window.RecordsModule = (function () {
     actionsEl.querySelector('#rec-recover-push')?.addEventListener('click', recoverPushes);
     actionsEl.querySelector('#rec-abort-push')?.addEventListener('click', abortPushes);
     actionsEl.querySelector('#rec-clear-in-transit')?.addEventListener('click', clearInTransitPushes);
-    actionsEl.querySelector('#rec-export').addEventListener('click', exportRecords);
-    actionsEl.querySelector('#rec-refresh').addEventListener('click', async () => { try { await Store.refresh(); UI.toast({ type: 'info', title: '已刷新' }); renderList(); renderStats(); renderTabs(); } catch (error) { UI.toast({ type: 'error', title: '刷新失败', desc: error.message }); } });
+    actionsEl.querySelector('#rec-export').addEventListener('click', () => exportRecords());
+    actionsEl.querySelector('#rec-refresh').addEventListener('click', async event => {
+      const btn = event.currentTarget, root = pageRoot;
+      if (btn.disabled) return;
+      btn.disabled = true;
+      try {
+        await Store.refresh();
+        if (!ownsPage(root)) return;
+        UI.toast({ type: 'info', title: '已刷新' }); renderList(); renderStats(); renderTabs();
+      } catch (error) { if (ownsPage(root)) UI.toast({ type: 'error', title: '刷新失败', desc: error.message }); }
+      finally { if (btn.isConnected) btn.disabled = false; }
+    });
   }
 
   async function recoverPushes() {
     const button = document.getElementById('rec-recover-push');
     if (!button || button.disabled) return;
+    const root = pageRoot;
+    button.disabled = true;
     const confirmed = await UI.confirm({
       title: '恢复所有失败推送？',
       desc: '将先检查 Kafka 与 DolphinScheduler，只恢复可安全重试的失败任务；发送中、结果未知、已发送和已中止任务不会重发。',
       confirmText: '检查并恢复',
     });
-    if (!confirmed) return;
+    if (!confirmed || !ownsPage(root)) { if (button.isConnected) button.disabled = false; return; }
     const original = button.innerHTML;
-    button.disabled = true;
     button.innerHTML = '<span class="btn-spinner"></span><span>正在恢复…</span>';
     try {
       const result = await Store.recoverAnomalyPushes();
+      if (!ownsPage(root)) return;
       const kinds = result.requeued_by_kind || {};
       UI.toast({
         type: 'success',
@@ -50,10 +65,12 @@ window.RecordsModule = (function () {
       });
       try {
         await Store.refresh();
+        if (!ownsPage(root)) return;
         renderList();
         renderStats();
         renderTabs();
       } catch (refreshError) {
+        if (!ownsPage(root)) return;
         UI.toast({
           type: 'warning',
           title: '推送已恢复，页面刷新失败',
@@ -61,6 +78,7 @@ window.RecordsModule = (function () {
         });
       }
     } catch (error) {
+      if (!ownsPage(root)) return;
       const stages = (error.payload?.errors || []).map(item => item.stage).join('、');
       UI.toast({
         type: 'error',
@@ -68,16 +86,16 @@ window.RecordsModule = (function () {
         desc: stages ? `依赖检查失败：${stages}` : error.message,
       });
     } finally {
-      button.disabled = false;
-      button.innerHTML = original;
+      if (button.isConnected) { button.disabled = false; button.innerHTML = original; }
     }
   }
 
   async function clearInTransitPushes() {
     const button = document.getElementById('rec-clear-in-transit');
     if (!button || button.disabled) return;
-    const original = button.innerHTML;
+    const root = pageRoot;
     button.disabled = true;
+    const original = button.innerHTML;
     try {
       const confirmed = await UI.confirm({
         title: '清除所有在途推送？',
@@ -85,9 +103,10 @@ window.RecordsModule = (function () {
         confirmText: '清除在途推送',
         danger: true,
       });
-      if (!confirmed) return;
+      if (!confirmed || !ownsPage(root)) { if (button.isConnected) button.disabled = false; return; }
       button.innerHTML = '<span class="btn-spinner"></span><span>正在清除…</span>';
       const result = await Store.clearInTransitPushes();
+      if (!ownsPage(root)) return;
       state.selected.clear();
       state.page = 1;
       UI.toast({
@@ -96,45 +115,54 @@ window.RecordsModule = (function () {
       });
       try {
         await Store.refresh();
+        if (!ownsPage(root)) return;
         await renderList({ throwOnError: true });
+        if (!ownsPage(root)) return;
         renderStats();
         renderTabs();
       } catch (refreshError) {
+        if (!ownsPage(root)) return;
         UI.toast({ type: 'warning', title: '在途推送已清除，页面刷新失败', desc: refreshError.message });
       }
     } catch (error) {
+      if (!ownsPage(root)) return;
       UI.toast({ type: 'error', title: '清除在途推送失败', desc: error.message });
     } finally {
-      button.disabled = false;
-      button.innerHTML = original;
+      if (button.isConnected) { button.disabled = false; button.innerHTML = original; }
     }
   }
 
   async function abortPushes() {
     const button = document.getElementById('rec-abort-push');
     if (!button || button.disabled) return;
+    const root = pageRoot;
+    button.disabled = true;
     const confirmed = await UI.confirm({
       title: '中止所有待推送异常？',
       desc: '将清除 Kafka 与 DolphinScheduler 中尚未发送的积压；不会删除异常记录，已发送消息无法撤回。',
       confirmText: '中止推送',
       danger: true,
     });
-    if (!confirmed) return;
+    if (!confirmed || !ownsPage(root)) { if (button.isConnected) button.disabled = false; return; }
     const original = button.innerHTML;
-    button.disabled = true;
     button.innerHTML = '<span class="btn-spinner"></span><span>正在中止…</span>';
     try {
       const result = await Store.abortAnomalyPushes();
+      if (!ownsPage(root)) return;
       UI.toast({
         type: 'success',
         title: '推送积压已中止',
         desc: `${result.aborted_jobs} 条任务 · ${result.deleted_ds_instances} 个调度实例 · ${result.cleared_kafka_partitions} 个 Kafka 分区`,
       });
-      await Store.refresh();
-      renderList();
-      renderStats();
-      renderTabs();
+      try {
+        await Store.refresh();
+        if (!ownsPage(root)) return;
+        renderList(); renderStats(); renderTabs();
+      } catch (error) {
+        if (ownsPage(root)) UI.toast({ type: 'warning', title: '推送已中止，页面刷新失败', desc: error.message });
+      }
     } catch (error) {
+      if (!ownsPage(root)) return;
       const stages = (error.payload?.errors || []).map(item => item.stage).join('、');
       UI.toast({
         type: 'error',
@@ -142,8 +170,7 @@ window.RecordsModule = (function () {
         desc: stages ? `未完成阶段：${stages}，可重试` : error.message,
       });
     } finally {
-      button.disabled = false;
-      button.innerHTML = original;
+      if (button.isConnected) { button.disabled = false; button.innerHTML = original; }
     }
   }
 
@@ -167,6 +194,7 @@ window.RecordsModule = (function () {
         <div id="rec-table" role="tabpanel" tabindex="0" aria-labelledby="rec-tab-all"></div>
       </div>
     `;
+    pageRoot = contentEl.querySelector('#rec-stats');
     renderStats();
     renderTabs();
     renderToolbar();
@@ -423,6 +451,7 @@ window.RecordsModule = (function () {
 
   async function renderList({ throwOnError = false } = {}) {
     const tableEl = document.getElementById('rec-table');
+    if (!tableEl) return;
     let all;
     let total;
     let pageItems;
@@ -440,12 +469,12 @@ window.RecordsModule = (function () {
           sortKey: state.sortKey,
           sortOrder: state.sortDir,
         });
-        if (requestSequence !== state.requestSequence) return;
+        if (requestSequence !== state.requestSequence || !tableEl.isConnected) return;
         all = result.items;
         total = result.total;
         pageItems = all;
       } catch (error) {
-        if (requestSequence !== state.requestSequence) return;
+        if (requestSequence !== state.requestSequence || !tableEl.isConnected) return;
         state.total = 0;
         tableEl.innerHTML = UI.emptyState({
           icon: Icon.alert({ size: 24 }), iconCls: 'danger', title: '异常记录加载失败', desc: error.message,
@@ -619,12 +648,18 @@ window.RecordsModule = (function () {
     tableEl.querySelectorAll('[data-bulk]').forEach(btn => {
       btn.addEventListener('click', async () => {
         const action = btn.dataset.bulk;
-        if (action === 'export') { UI.toast({ type: 'success', title: '导出已开始', desc: `${selectedIds.length} 条记录 · CSV` }); return; }
+        if (action === 'export') { await exportRecords(selectedIds); return; }
+        if (btn.disabled) return;
+        const root = pageRoot;
+        btn.disabled = true;
         try {
-          await Store.bulkUpdateRecords(selectedIds, action);
+          const result = await Store.bulkUpdateRecords(selectedIds, action);
+          if (!ownsPage(root)) return;
           UI.toast({ type: 'success', title: '已批量更新', desc: `${selectedIds.length} 条记录 → ${action === 'resolved' ? '已解决' : '处理中'}` });
+          if (result?.refreshWarning) UI.toast({ type: 'warning', title: '已更新，页面刷新失败', desc: result.refreshWarning });
           state.selected.clear(); renderList(); renderStats(); renderTabs();
-        } catch (error) { UI.toast({ type: 'error', title: '批量更新失败', desc: error.message }); }
+        } catch (error) { if (ownsPage(root)) UI.toast({ type: 'error', title: '批量更新失败', desc: error.message }); }
+        finally { if (btn.isConnected) btn.disabled = false; }
       });
     });
 
@@ -645,6 +680,7 @@ window.RecordsModule = (function () {
 
   // ---------- Status quick menu ----------
   function openStatusMenu(id, btn) {
+    const root = pageRoot;
     const r = Store.getRecord(id);
     if (!r) return;
     const m = UI.modal({
@@ -667,15 +703,22 @@ window.RecordsModule = (function () {
       footer: `<button class="btn btn-ghost" data-action="cancel">取消</button>`,
     });
     m.dialog.querySelector('[data-action="cancel"]').addEventListener('click', () => m.close());
+    let updating = false;
     m.dialog.querySelectorAll('[data-status]').forEach(b => {
       b.addEventListener('click', async () => {
+        if (updating || !m.dialog.isConnected) return;
         const newStatus = b.dataset.status;
         if (newStatus !== r.status) {
+          updating = true;
+          m.dialog.querySelectorAll('[data-status]').forEach(button => { button.disabled = true; });
           try {
-            await Store.updateRecord(id, { status: newStatus });
+            const result = await Store.updateRecord(id, { status: newStatus });
+            if (!m.dialog.isConnected || !ownsPage(root)) return;
             UI.toast({ type: 'success', title: '状态已更新', desc: `${r.id} → ${({ pending: '未处理', processing: '处理中', resolved: '已解决' })[newStatus]}` });
+            if (result?.refreshWarning) UI.toast({ type: 'warning', title: '状态已更新，概览刷新失败', desc: result.refreshWarning });
             renderList(); renderStats(); renderTabs();
-          } catch (error) { UI.toast({ type: 'error', title: '更新失败', desc: error.message }); }
+          } catch (error) { if (m.dialog.isConnected) UI.toast({ type: 'error', title: '更新失败', desc: error.message }); }
+          finally { updating = false; m.dialog.querySelectorAll('[data-status]').forEach(button => { button.disabled = false; }); }
         }
         m.close();
       });
@@ -697,9 +740,11 @@ window.RecordsModule = (function () {
   }
 
   async function openDetail(id) {
+    const root = pageRoot;
     let r;
     try { r = await Store.loadRecord(id); }
     catch (error) { UI.toast({ type: 'error', title: '详情加载失败', desc: error.message }); return; }
+    if (root && !ownsPage(root)) return;
     const rule = Store.getRule(r.ruleId);
 
     const d = UI.drawer({
@@ -920,60 +965,82 @@ window.RecordsModule = (function () {
       App.navigate('rules');
       setTimeout(() => UI.toast({ type: 'info', title: '已跳转至规则', desc: r.ruleName }), 300);
     });
-    d.drawer.querySelector('#d-mark-processing')?.addEventListener('click', async () => {
+    let updating = false;
+    async function updateStatus(status) {
+      if (updating || !d.drawer.isConnected) return;
+      updating = true;
+      const buttons = [...d.drawer.querySelectorAll('#d-mark-processing, #d-resolve')];
+      buttons.forEach(button => { button.disabled = true; });
       try {
-        await Store.updateRecord(id, { status: 'processing' });
-        UI.toast({ type: 'info', title: '已标记为处理中' });
+        const result = await Store.updateRecord(id, { status });
+        if (!d.drawer.isConnected || (root && !ownsPage(root))) return;
+        UI.toast({ type: 'success', title: status === 'resolved' ? '已标记为已解决' : '已标记为处理中', desc: r.id });
+        if (result?.refreshWarning) UI.toast({ type: 'warning', title: '状态已更新，概览刷新失败', desc: result.refreshWarning });
         d.close();
-        renderList();
-        renderStats();
-        renderTabs();
-      } catch (error) { UI.toast({ type: 'error', title: '更新失败', desc: error.message }); }
-    });
-    d.drawer.querySelector('#d-resolve')?.addEventListener('click', async () => {
-      try {
-        await Store.updateRecord(id, { status: 'resolved' });
-        UI.toast({ type: 'success', title: '已标记为已解决', desc: r.id });
-        d.close();
-        renderList();
-        renderStats();
-        renderTabs();
-        await openDetail(id);
-      } catch (error) { UI.toast({ type: 'error', title: '更新失败', desc: error.message }); }
-    });
+        if (ownsPage(root)) { renderList(); renderStats(); renderTabs(); }
+        if (status === 'resolved') await openDetail(id);
+      } catch (error) { if (d.drawer.isConnected) UI.toast({ type: 'error', title: '更新失败', desc: error.message }); }
+      finally { updating = false; buttons.forEach(button => { if (button.isConnected) button.disabled = false; }); }
+    }
+    d.drawer.querySelector('#d-mark-processing')?.addEventListener('click', () => updateStatus('processing'));
+    d.drawer.querySelector('#d-resolve')?.addEventListener('click', () => updateStatus('resolved'));
   }
 
-  async function exportRecords() {
-    const serverBacked = typeof Store.peekRecordsPage === 'function';
-    const filters = Object.freeze({
-      status: state.statusFilter === 'all' ? null : state.statusFilter,
-      pushStatus: state.pushStatusFilter === 'all' ? null : state.pushStatusFilter,
-      severity: state.severityFilter === 'all' ? null : state.severityFilter,
-      ruleId: state.ruleFilter === 'all' ? null : state.ruleFilter,
-      search: state.search,
-      sortKey: state.sortKey,
-      sortOrder: state.sortDir,
-    });
-    let count;
-    if (serverBacked) {
-      if (state.searchTimer) window.clearTimeout(state.searchTimer);
-      state.searchTimer = null;
-      try {
-        const result = await Store.peekRecordsPage({
-          ...filters, page: 1, pageSize: state.pageSize,
-        });
-        count = result.total;
-      } catch (error) {
-        UI.toast({ type: 'error', title: '导出准备失败', desc: error.message });
-        return;
+  async function exportRecords(ids) {
+    if (exporting) return;
+    const root = pageRoot;
+    const buttons = [...document.querySelectorAll('#rec-export, [data-bulk="export"]')];
+    exporting = true;
+    buttons.forEach(button => { button.disabled = true; });
+    try {
+      const serverBacked = typeof Store.peekRecordsPage === 'function';
+      const filters = Object.freeze({
+        status: state.statusFilter === 'all' ? null : state.statusFilter,
+        pushStatus: state.pushStatusFilter === 'all' ? null : state.pushStatusFilter,
+        severity: state.severityFilter === 'all' ? null : state.severityFilter,
+        ruleId: state.ruleFilter === 'all' ? null : state.ruleFilter,
+        search: state.search,
+        sortKey: state.sortKey,
+        sortOrder: state.sortDir,
+        ...(ids ? { ids: [...ids] } : {}),
+      });
+      let count;
+      if (ids) count = ids.length;
+      else if (serverBacked) {
+        if (state.searchTimer) window.clearTimeout(state.searchTimer);
+        state.searchTimer = null;
+        try {
+          const result = await Store.peekRecordsPage({
+            ...filters, page: 1, pageSize: state.pageSize,
+          });
+          count = result.total;
+        } catch (error) {
+          if (ownsPage(root)) UI.toast({ type: 'error', title: '导出准备失败', desc: error.message });
+          return;
+        }
+      } else {
+        count = getFiltered().length;
       }
-    } else {
-      count = getFiltered().length;
-    }
-    if (count === 0) { UI.toast({ type: 'warning', title: '暂无数据可导出' }); return; }
-    const url = typeof Store.exportUrl === 'function' ? Store.exportUrl(filters) : Store.exportUrl;
-    window.location.href = url;
-    UI.toast({ type: 'success', title: '导出已开始', desc: `${count} 条记录 · CSV 格式` });
+      if (!ownsPage(root)) return;
+      if (count === 0) { UI.toast({ type: 'warning', title: '暂无数据可导出' }); return; }
+      const url = typeof Store.exportUrl === 'function' ? Store.exportUrl(filters) : Store.exportUrl;
+      if (typeof Store.downloadExport === 'function') {
+        const blob = await Store.downloadExport(url);
+        if (!ownsPage(root)) return;
+        if (!blob?.size) { UI.toast({ type: 'warning', title: '暂无数据可导出' }); return; }
+        const csv = await blob.text();
+        if (!ownsPage(root)) return;
+        if (!csv.includes('\n') || !csv.slice(csv.indexOf('\n') + 1).trim()) {
+          UI.toast({ type: 'warning', title: '暂无数据可导出' }); return;
+        }
+        UI.downloadBlob(blob, 'anomalies.csv');
+      } else {
+        // Compatibility with embedded consumers that provide only an export URL.
+        window.location.href = url;
+      }
+      UI.toast({ type: 'success', title: '导出已开始', desc: `${count} 条记录 · CSV 格式` });
+    } catch (error) { if (ownsPage(root)) UI.toast({ type: 'error', title: '导出失败', desc: error.message }); }
+    finally { exporting = false; buttons.forEach(button => { if (button.isConnected) button.disabled = false; }); }
   }
 
   return { render, openDetail };

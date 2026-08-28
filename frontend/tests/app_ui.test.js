@@ -5,6 +5,82 @@ const { chromium } = require('./browser');
 
 const frontendRoot = path.join(__dirname, '..');
 
+async function datasourcePage(t) {
+  const page = await browserPage(t);
+  await page.setContent('<div id="actions"></div><div id="content"></div><div id="toast-container"></div>');
+  for (const script of ['icons', 'components']) await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', `${script}.js`) });
+  await page.evaluate(() => {
+    const ds = { id: 'source-1', name: 'Source', type: 'mysql', host: 'localhost', port: 3306, database: 'test', username: 'reader', password: '', hasPassword: true, status: 'online' };
+    window.source = ds; window.saveCalls = 0; window.refreshCalls = 0;
+    window.Store = {
+      getDatasources: () => [ds], getDatasource: () => ds,
+      updateDatasource: async () => { saveCalls++; return new Promise(resolve => { window.finishSave = resolve; }); },
+      testDatasourceConfig: async payload => { window.testPayload = payload; },
+      testDatasource: async () => ({ ok: true, refreshWarning: 'refresh offline' }),
+      refresh: async () => { refreshCalls++; return new Promise(resolve => { window.finishRefresh = resolve; }); },
+    };
+  });
+  await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'datasource.js') });
+  await page.evaluate(() => DatasourceModule.render(document.querySelector('#content'), { actionsEl: document.querySelector('#actions') }));
+  return page;
+}
+
+test('datasource edit locks type and tests with saved identity without an empty password', async t => {
+  const page = await datasourcePage(t);
+  assert.doesNotMatch(await page.locator('#ds-stats').innerText(), /覆盖 2 种类型/);
+  await page.evaluate(() => DatasourceModule.openItem('source-1'));
+  assert.match(await page.getByRole('dialog').innerText(), /类型.*不可修改/);
+  assert.match(await page.getByRole('dialog').innerText(), /留空.*保留/);
+  assert.equal(await page.locator('[data-type="starrocks"]').getAttribute('aria-disabled'), 'true');
+  await page.locator('[data-type="starrocks"]').dispatchEvent('click');
+  assert.equal(await page.locator('.radio-card.selected').getAttribute('data-type'), 'mysql');
+  await page.click('#f-test');
+  assert.equal(await page.evaluate(() => testPayload.id), 'source-1');
+  assert.equal(await page.evaluate(() => Object.hasOwn(testPayload, 'password')), false);
+});
+
+test('datasource API username survives Store mapping into the edit form', async t => {
+  const page = await datasourcePage(t);
+  await page.evaluate(() => {
+    window.fetch = async url => ({ ok: true, status: 200, json: async () => url.endsWith('/datasources') ? [{ id: 'source-1', name: 'MySQL', type: 'mysql', username: 'root', host: 'localhost', port: 3306, database: 'audit', has_password: true }] : url.endsWith('/overview') ? { stats: {} } : url.includes('/anomalies?') ? { items: [] } : [] });
+  });
+  await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'data.js') });
+  await page.evaluate(async () => { await Store.refresh(); DatasourceModule.openItem('source-1'); });
+  assert.equal(await page.locator('#f-username').inputValue(), 'root');
+  assert.equal(await page.locator('#f-password').inputValue(), '');
+});
+
+test('datasource save blocks duplicates and leaves a newly mounted dataset list untouched', async t => {
+  const page = await datasourcePage(t);
+  await page.evaluate(() => DatasourceModule.openItem('source-1'));
+  await page.evaluate(() => { document.querySelector('#f-save').click(); document.querySelector('#f-save').click(); });
+  assert.equal(await page.evaluate(() => saveCalls), 1);
+  assert.equal(await page.locator('#f-save').isDisabled(), true);
+  await page.click('[data-action="cancel"]');
+  await page.evaluate(() => { document.querySelector('#content').innerHTML = '<div id="ds-table">Datasets</div><div id="ds-stats">Stats</div>'; finishSave(source); });
+  await page.waitForTimeout(50);
+  assert.equal(await page.locator('#ds-table').innerText(), 'Datasets');
+  assert.equal(await page.locator('#toast-container').innerText(), '');
+});
+
+test('datasource refresh awaits a real request and respects replaced child ownership', async t => {
+  const page = await datasourcePage(t);
+  await page.click('#ds-refresh');
+  assert.equal(await page.evaluate(() => refreshCalls), 1);
+  assert.equal(await page.locator('#ds-refresh').isDisabled(), true);
+  await page.evaluate(() => { document.querySelector('#content').innerHTML = '<div id="ds-table">Datasets</div><div id="ds-stats">Stats</div>'; finishRefresh(); });
+  await page.waitForTimeout(50);
+  assert.equal(await page.locator('#ds-table').innerText(), 'Datasets');
+});
+
+test('datasource connection success keeps refresh failure as a separate warning', async t => {
+  const page = await datasourcePage(t);
+  await page.click('[data-action="test"]');
+  assert.match(await page.locator('#toast-container').innerText(), /连接成功/);
+  assert.match(await page.locator('#toast-container').innerText(), /刷新.*失败/);
+  assert.doesNotMatch(await page.locator('#toast-container').innerText(), /连接失败/);
+});
+
 async function browserPage(t, viewport = { width: 1280, height: 720 }) {
   const browser = await chromium.launch({ headless: true });
   t.after(() => browser.close());

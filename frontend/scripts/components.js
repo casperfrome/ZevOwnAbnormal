@@ -562,9 +562,31 @@ window.UI = (function () {
     el.style.animation = `fade-rise var(--duration-slow) var(--ease-out) ${delay}ms both`;
   };
 
+  function downloadBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function downloadCsv(rows, fields, filename) {
+    const columns = fields?.length ? fields.map(field => field.name) : Object.keys(rows[0] || {});
+    const cell = value => {
+      let text = value == null ? '' : String(value);
+      if (typeof value === 'string' && /^[\s\u0000-\u001f]*[=+\-@]/.test(text)) text = "'" + text;
+      return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+    };
+    const csv = [columns.map(cell).join(','), ...rows.map(row => columns.map(key => cell(row[key])).join(','))].join('\r\n');
+    downloadBlob(new Blob(['\uFEFF', csv], { type: 'text/csv;charset=utf-8' }), filename);
+  }
+
   return {
     escapeHtml, formatNumber, formatTime, operatorLabel, initResizableTables,
-    toast, modal, confirm, drawer,
+    toast, modal, confirm, drawer, downloadBlob, downloadCsv,
     statusBadge, recordStatusBadge, severityBadge, severityMeter, dsTypeBadge,
     emptyState, loadingState, renderPagination,
     field, animateRise,

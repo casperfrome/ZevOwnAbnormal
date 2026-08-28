@@ -5,15 +5,17 @@ window.Store = (function () {
   let unauthorizedHandler = null;
   let authGeneration = 0;
   let unauthorizedGeneration = null;
+  const refreshSequences = { datasources: 0, datasets: 0, rules: 0, overview: 0 };
 
   async function request(path, options = {}) {
+    const { responseType, ...fetchOptions } = options;
     const requestGeneration = authGeneration;
     let response;
     try {
       response = await fetch('/api/v1' + path, {
         credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
-        ...options,
+        ...fetchOptions,
       });
     } catch (error) {
       if (!Number.isFinite(error.status)) error.status = 0;
@@ -34,6 +36,7 @@ window.Store = (function () {
       throw error;
     }
     if (response.status === 204) return null;
+    if (responseType === 'blob') return response.blob();
     try {
       return await response.json();
     } catch (error) {
@@ -201,6 +204,7 @@ window.Store = (function () {
       ['search', filters.search],
       ['sort_key', filters.sortKey],
       ['sort_order', filters.sortOrder],
+      ...(filters.ids || []).map(id => ['ids', id]),
     ].filter(([, value]) => value !== null && value !== undefined && value !== '');
     return entries.map(([key, value]) => `${key}=${encodeURIComponent(value)}`).join('&');
   }
@@ -261,19 +265,30 @@ window.Store = (function () {
     return fetchRecordsPage(filters);
   }
 
-  async function refresh() {
-    const [datasources, datasets, rules, , overview] = await Promise.all([
-      request('/datasources'), request('/datasets'), request('/rules'), loadRecordsPage({ page: 1, pageSize: 10 }), request('/overview'),
-    ]);
-    state.datasources = datasources.map(mapDatasource);
-    state.datasets = datasets.map(mapDataset);
-    state.rules = rules.map(mapRule);
-    state.overview = overview;
+  async function refreshResource(key, path, map = value => value) {
+    const sequence = ++refreshSequences[key];
+    const generation = authGeneration;
+    const result = map(await request(path));
+    if (sequence === refreshSequences[key] && generation === authGeneration) state[key] = result;
+    return result;
   }
 
-  async function refreshOverview() {
-    state.overview = await request('/overview');
-    return state.overview;
+  function refreshOverview(days) {
+    return refreshResource('overview', `/overview${days ? `?days=${days}` : ''}`);
+  }
+
+  async function refresh() {
+    await Promise.all([
+      refreshResource('datasources', '/datasources', rows => rows.map(mapDatasource)),
+      refreshResource('datasets', '/datasets', rows => rows.map(mapDataset)),
+      refreshResource('rules', '/rules', rows => rows.map(mapRule)),
+      loadRecordsPage({ page: 1, pageSize: 10 }), refreshOverview(),
+    ]);
+  }
+
+  async function withRefresh(result, refreshFn = refresh) {
+    try { await refreshFn(); return result; }
+    catch (error) { return { ...result, refreshWarning: error.message }; }
   }
 
   function applyOverviewRecordTransition(previous, next) {
@@ -308,6 +323,19 @@ window.Store = (function () {
     unauthorizedGeneration = null;
     state.currentUser = user;
     return user;
+  }
+
+  function cacheItem(key, item) {
+    refreshSequences[key] += 1;
+    const index = state[key].findIndex(existing => existing.id === item.id);
+    if (index >= 0) state[key][index] = item;
+    else state[key].unshift(item);
+    return item;
+  }
+
+  function removeCachedItem(key, id) {
+    refreshSequences[key] += 1;
+    state[key] = state[key].filter(item => item.id !== id);
   }
 
   function dsPayload(data) {
@@ -373,17 +401,21 @@ window.Store = (function () {
   }
 
   return {
-    init, login, refresh, request, loadRecordsPage, peekRecordsPage,
+    init, login, refresh, refreshOverview, request, loadRecordsPage, peekRecordsPage,
     setUnauthorizedHandler: handler => { unauthorizedHandler = typeof handler === 'function' ? handler : null; },
     loadAnomalyGroupsPage, loadAnomalyGroup,
     isSuperuser: () => state.currentUser?.is_superuser === true,
     getDatasources: () => [...state.datasources],
     getDatasource: id => state.datasources.find(item => item.id === id),
-    addDatasource: async data => { const item = mapDatasource(await request('/datasources', { method: 'POST', body: JSON.stringify(dsPayload(data)) })); state.datasources.unshift(item); return item; },
-    updateDatasource: async (id, data) => { const payload = dsPayload({ ...state.datasources.find(x => x.id === id), ...data }); delete payload.type; if (!data.password) delete payload.password; const item = mapDatasource(await request(`/datasources/${id}`, { method: 'PATCH', body: JSON.stringify(payload) })); state.datasources[state.datasources.findIndex(x => x.id === id)] = item; return item; },
-    deleteDatasource: async id => { await request(`/datasources/${id}`, { method: 'DELETE' }); state.datasources = state.datasources.filter(x => x.id !== id); },
-    testDatasource: async id => { const result = await request(`/datasources/${id}/test`, { method: 'POST' }); await refresh(); return result; },
-    testDatasourceConfig: data => request('/datasources/test', { method: 'POST', body: JSON.stringify(dsPayload(data)) }),
+    addDatasource: async data => { const item = mapDatasource(await request('/datasources', { method: 'POST', body: JSON.stringify(dsPayload(data)) })); return cacheItem('datasources', item); },
+    updateDatasource: async (id, data) => { const payload = dsPayload({ ...state.datasources.find(x => x.id === id), ...data }); delete payload.type; if (!data.password) delete payload.password; const item = mapDatasource(await request(`/datasources/${id}`, { method: 'PATCH', body: JSON.stringify(payload) })); return cacheItem('datasources', item); },
+    deleteDatasource: async id => { await request(`/datasources/${id}`, { method: 'DELETE' }); removeCachedItem('datasources', id); },
+    testDatasource: async id => withRefresh(await request(`/datasources/${id}/test`, { method: 'POST' })),
+    testDatasourceConfig: data => {
+      const payload = dsPayload(data);
+      if (data.id) { payload.datasource_id = data.id; if (!data.password) delete payload.password; }
+      return request('/datasources/test', { method: 'POST', body: JSON.stringify(payload) });
+    },
     sendFeishuTestMessage: (receiveIdType, receiveId) => request('/tests/feishu-message', {
       method: 'POST',
       body: JSON.stringify({ receive_id_type: receiveIdType, receive_id: receiveId }),
@@ -394,34 +426,36 @@ window.Store = (function () {
 
     getDatasets: () => [...state.datasets],
     getDataset: id => state.datasets.find(item => item.id === id),
-    addDataset: async data => { const item = mapDataset(await request('/datasets', { method: 'POST', body: JSON.stringify(datasetPayload(data)) })); state.datasets.unshift(item); return item; },
-    updateDataset: async (id, data) => { const item = mapDataset(await request(`/datasets/${id}`, { method: 'PATCH', body: JSON.stringify(datasetPayload(data)) })); state.datasets[state.datasets.findIndex(x => x.id === id)] = item; return item; },
-    deleteDataset: async id => { await request(`/datasets/${id}`, { method: 'DELETE' }); state.datasets = state.datasets.filter(x => x.id !== id); },
-    executeDataset: async id => { const result = await request(`/datasets/${id}/execute`, { method: 'POST' }); await refresh(); return result; },
+    addDataset: async data => { const item = mapDataset(await request('/datasets', { method: 'POST', body: JSON.stringify(datasetPayload(data)) })); return cacheItem('datasets', item); },
+    updateDataset: async (id, data) => { const item = mapDataset(await request(`/datasets/${id}`, { method: 'PATCH', body: JSON.stringify(datasetPayload(data)) })); return cacheItem('datasets', item); },
+    deleteDataset: async id => { await request(`/datasets/${id}`, { method: 'DELETE' }); removeCachedItem('datasets', id); },
+    executeDataset: async id => withRefresh(await request(`/datasets/${id}/execute`, { method: 'POST' })),
     executeDatasetSql: (datasourceId, sql) => request('/datasets/execute', { method: 'POST', body: JSON.stringify({ datasource_id: datasourceId, sql }) }),
+    validateDatasetSql: sql => request('/datasets/validate', { method: 'POST', body: JSON.stringify({ sql }) }),
 
     getRules: () => [...state.rules],
     getRule: id => state.rules.find(item => item.id === id),
-    addRule: async data => { const item = mapRule(await request('/rules', { method: 'POST', body: JSON.stringify(rulePayload(data)) })); state.rules.unshift(item); return item; },
-    updateRule: async (id, data) => { const current = state.rules.find(x => x.id === id); const item = mapRule(await request(`/rules/${id}`, { method: 'PUT', body: JSON.stringify(rulePayload({ ...current, ...data })) })); state.rules[state.rules.findIndex(x => x.id === id)] = item; return item; },
-    deleteRule: async id => { await request(`/rules/${id}`, { method: 'DELETE' }); state.rules = state.rules.filter(x => x.id !== id); },
-    executeRule: async id => { const result = await request(`/rules/${id}/execute`, { method: 'POST' }); await refresh(); return result; },
-    enableRule: async (id, enabled) => { const item = mapRule(await request(`/rules/${id}/${enabled ? 'enable' : 'disable'}`, { method: 'POST' })); state.rules[state.rules.findIndex(x => x.id === id)] = item; return item; },
-    syncRule: async id => { const item = mapRule(await request(`/rules/${id}/sync`, { method: 'POST' })); state.rules[state.rules.findIndex(x => x.id === id)] = item; return item; },
+    addRule: async data => { const item = mapRule(await request('/rules', { method: 'POST', body: JSON.stringify(rulePayload(data)) })); return cacheItem('rules', item); },
+    updateRule: async (id, data) => { const current = state.rules.find(x => x.id === id); const item = mapRule(await request(`/rules/${id}`, { method: 'PUT', body: JSON.stringify(rulePayload({ ...current, ...data })) })); return cacheItem('rules', item); },
+    deleteRule: async id => { await request(`/rules/${id}`, { method: 'DELETE' }); removeCachedItem('rules', id); },
+    executeRule: async id => withRefresh(await request(`/rules/${id}/execute`, { method: 'POST' })),
+    enableRule: async (id, enabled) => { const item = mapRule(await request(`/rules/${id}/${enabled ? 'enable' : 'disable'}`, { method: 'POST' })); return cacheItem('rules', item); },
+    syncRule: async id => { const item = mapRule(await request(`/rules/${id}/sync`, { method: 'POST' })); return cacheItem('rules', item); },
 
     getRecords: () => [...state.records],
     getRecord: id => state.records.find(item => item.id === id),
     loadRecord: async id => mapRecord(await request(`/anomalies/${id}`)),
     updateRecord: async (id, data) => {
       const item = mapRecord(await request(`/anomalies/${id}/status`, { method: 'PATCH', body: JSON.stringify({ status: data.status, assignee: data.assignee }) }));
+      recordsPageSequence += 1;
       const index = state.records.findIndex(x => x.id === id);
       const previous = index >= 0 ? state.records[index] : null;
       if (index >= 0) state.records[index] = item;
       applyOverviewRecordTransition(previous, item);
-      try { await refreshOverview(); } catch (_) {}
-      return item;
+      return withRefresh(item, refreshOverview);
     },
-    bulkUpdateRecords: async (ids, status) => { await request('/anomalies/bulk-status', { method: 'POST', body: JSON.stringify({ ids, status }) }); await refresh(); },
+    bulkUpdateRecords: async (ids, status) => withRefresh(await request('/anomalies/bulk-status', { method: 'POST', body: JSON.stringify({ ids, status }) })),
+    downloadExport: url => request(url.replace(/^\/api\/v1/, ''), { responseType: 'blob' }),
     exportUrl: filters => {
       const query = anomalyQuery(filters);
       return `/api/v1/anomalies/export${query ? `?${query}` : ''}`;

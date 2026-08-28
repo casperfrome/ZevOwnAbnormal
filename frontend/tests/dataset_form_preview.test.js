@@ -5,6 +5,126 @@ const { chromium } = require('./browser');
 
 const frontendRoot = path.join(__dirname, '..');
 
+async function datasetPage(t) {
+  const browser = await chromium.launch({ headless: true });
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  page.setDefaultTimeout(2000);
+  await page.setContent('<div id="actions"></div><main id="content"></main><div id="toast-container"></div>');
+  for (const script of ['icons', 'components']) await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', `${script}.js`) });
+  await page.evaluate(() => {
+    window.calls = { save: 0, execute: 0, validate: [] };
+    const source = { id: 'source-1', name: '<img src=x onerror="window.injected=true">', type: 'mysql' };
+    window.dataset = { id: 'dataset-1', name: 'Saved', datasourceId: source.id, datasourceName: source.name, fields: [{ name: 'value', type: 'varchar' }], rowCount: 1, sql: 'SELECT 1' };
+    window.Store = {
+      getDatasources: () => [source], getDatasource: () => source,
+      getDatasets: () => [], getDataset: () => dataset,
+      validateDatasetSql: async sql => { calls.validate.push(sql); return { valid: true }; },
+      executeDatasetSql: async () => { calls.execute++; return new Promise(resolve => { window.finishQuery = resolve; }); },
+      addDataset: async () => { calls.save++; return new Promise(resolve => { window.finishSave = () => resolve(dataset); }); },
+      executeDataset: async () => { throw new Error('preview unavailable'); },
+      refresh: async () => new Promise(resolve => { window.finishRefresh = resolve; }),
+    };
+  });
+  await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'dataset.js') });
+  await page.evaluate(() => DatasetModule.render(document.querySelector('#content'), { actionsEl: document.querySelector('#actions') }));
+  return page;
+}
+
+test('explicit SQL validation uses server semantics for SELECT 1 and CTE', async t => {
+  const page = await datasetPage(t);
+  await page.click('#ds-add');
+  for (const sql of ['SELECT 1', 'WITH x AS (SELECT 1) SELECT * FROM x']) {
+    await page.locator('.sql-textarea').fill(sql);
+    await page.locator('#editor-validate-btn').dispatchEvent('click');
+    await page.waitForFunction(count => calls.validate.length === count, sql.startsWith('WITH') ? 2 : 1);
+  }
+  assert.deepEqual(await page.evaluate(() => calls.validate), ['SELECT 1', 'WITH x AS (SELECT 1) SELECT * FROM x']);
+});
+
+test('dataset creation is single flight and remains successful if its preview fails', async t => {
+  const page = await datasetPage(t);
+  await page.click('#ds-add');
+  await page.fill('#f-name', 'New dataset');
+  await page.selectOption('#f-datasource', 'source-1');
+  await page.evaluate(() => { document.querySelector('#f-save').click(); document.querySelector('#f-save').click(); });
+  assert.equal(await page.evaluate(() => calls.save), 1);
+  assert.equal(await page.locator('#f-save').isDisabled(), true);
+  await page.evaluate(() => finishSave());
+  await page.waitForFunction(() => !document.querySelector('#f-save'));
+  assert.match(await page.locator('#toast-container').innerText(), /已创建/);
+  assert.match(await page.locator('#toast-container').innerText(), /预览.*失败/);
+  assert.doesNotMatch(await page.locator('#toast-container').innerText(), /保存失败/);
+});
+
+test('a closed dataset form does not repaint a different route after save', async t => {
+  const page = await datasetPage(t);
+  const errors = []; page.on('pageerror', error => errors.push(error.message));
+  await page.click('#ds-add'); await page.fill('#f-name', 'New'); await page.selectOption('#f-datasource', 'source-1');
+  await page.click('#f-save');
+  await page.click('[data-action="cancel"]');
+  await page.evaluate(() => { document.querySelector('#content').innerHTML = '<div id="ds-table">Other page</div><div id="ds-stats">Other stats</div>'; finishSave(); });
+  await page.waitForTimeout(50);
+  assert.equal(await page.locator('#ds-table').innerText(), 'Other page');
+  assert.equal(await page.locator('#toast-container').innerText(), '');
+  assert.deepEqual(errors, []);
+});
+
+test('dataset refresh fetches once and does not repaint a reused route container', async t => {
+  const page = await datasetPage(t);
+  await page.click('#ds-refresh-list');
+  assert.equal(await page.locator('#ds-refresh-list').isDisabled(), true);
+  await page.evaluate(() => { document.querySelector('#content').innerHTML = '<div id="ds-table">Other page</div><div id="ds-stats">Other stats</div>'; finishRefresh(); });
+  await page.waitForTimeout(50);
+  assert.equal(await page.locator('#ds-table').innerText(), 'Other page');
+});
+
+test('query preview executes legal SELECT 1, escapes loading names and downloads safe CSV bytes', async t => {
+  const page = await datasetPage(t);
+  await page.evaluate(() => DatasetModule.openItem('dataset-1'));
+  await page.click('#q-run');
+  assert.equal(await page.evaluate(() => calls.execute), 1);
+  assert.equal(await page.locator('#result-area img').count(), 0);
+  await page.evaluate(() => finishQuery({ rows: [{ value: '=SUM(1,2)', n: -7 }, { value: 'line "one"\n二', n: 2 }, { value: '\t +cmd', n: 3 }], fields: [{ name: 'value', type: 'varchar' }, { name: 'n', type: 'int' }], elapsed_ms: 2 }));
+  const downloadPromise = page.waitForEvent('download');
+  await page.click('#result-export');
+  const download = await downloadPromise;
+  const bytes = require('node:fs').readFileSync(await download.path());
+  assert.equal(bytes.subarray(0, 3).toString('hex'), 'efbbbf');
+  const csv = bytes.toString('utf8');
+  assert.match(csv, /"'=SUM\(1,2\)"/);
+  assert.match(csv, /"line ""one""\n二"/);
+  assert.match(csv, /'\t \+cmd/);
+  assert.match(csv, /-7/);
+  assert.equal(await page.evaluate(() => window.injected), undefined);
+});
+
+test('closing a query drawer cancels its delayed automatic execution', async t => {
+  const page = await datasetPage(t);
+  await page.evaluate(() => { dataset.sql = 'SELECT * FROM sample'; DatasetModule.openItem('dataset-1'); document.querySelector('#q-close').click(); });
+  await page.waitForTimeout(350);
+  assert.equal(await page.evaluate(() => calls.execute), 0);
+});
+
+test('a query response does not write into or notify a closed drawer', async t => {
+  const page = await datasetPage(t);
+  await page.evaluate(() => { dataset.sql = 'SELECT * FROM sample'; DatasetModule.openItem('dataset-1'); });
+  await page.click('#q-run'); await page.click('#q-close');
+  await page.evaluate(() => finishQuery({ rows: [{ value: 'late' }], fields: dataset.fields, elapsed_ms: 1 }));
+  await page.waitForTimeout(50);
+  assert.equal(await page.locator('#toast-container').innerText(), '');
+});
+
+test('an empty manual query does not auto-execute twice and cannot produce an export success', async t => {
+  const page = await datasetPage(t);
+  await page.evaluate(() => { DatasetModule.openItem('dataset-1'); document.querySelector('#q-run').click(); finishQuery({ rows: [], fields: dataset.fields, elapsed_ms: 1 }); });
+  await page.waitForTimeout(350);
+  assert.equal(await page.evaluate(() => calls.execute), 1);
+  await page.click('#result-export');
+  assert.match(await page.locator('#toast-container').innerText(), /暂无数据可导出/);
+  assert.doesNotMatch(await page.locator('#toast-container').innerText(), /导出已开始/);
+});
+
 test('opening an existing dataset directly shows its query preview', async t => {
   const browser = await chromium.launch({
     headless: true,

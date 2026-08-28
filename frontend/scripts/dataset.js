@@ -4,7 +4,9 @@
    ============================================================ */
 window.DatasetModule = (function () {
   const { escapeHtml, formatTime } = UI;
-  let state = { search: '', datasourceFilter: 'all', view: 'list', currentDataset: null, page: 1, pageSize: 8 };
+  let state = { search: '', datasourceFilter: 'all', page: 1, pageSize: 8 };
+  let pageRoot = null;
+  const ownsPage = root => root?.isConnected && root === pageRoot;
 
   // ---------- SQL syntax highlighter ----------
   const KEYWORDS = new Set([
@@ -118,12 +120,6 @@ window.DatasetModule = (function () {
     const warnings = [];
     if (!sql || !sql.trim()) { errors.push('SQL 不能为空'); return { errors, warnings, ok: false }; }
     const upper = sql.toUpperCase().trim();
-    if (!upper.startsWith('SELECT') && !upper.startsWith('WITH')) {
-      errors.push('仅支持 SELECT 或 WITH 开头的查询语句');
-    }
-    if (!/\bFROM\b/i.test(sql) && !upper.startsWith('WITH')) {
-      errors.push('缺少 FROM 子句');
-    }
     // Unbalanced parens
     const opens = (sql.match(/\(/g) || []).length;
     const closes = (sql.match(/\)/g) || []).length;
@@ -133,39 +129,6 @@ window.DatasetModule = (function () {
     return { errors, warnings, ok: errors.length === 0 };
   }
 
-  // ---------- Mock query results ----------
-  function mockResults(dataset) {
-    if (!dataset) return [];
-    const fields = dataset.fields || [];
-    const today = new Date();
-    const rows = [];
-    for (let i = 0; i < 10; i++) {
-      const row = {};
-      fields.forEach(f => {
-        if (f.type === 'DATE') {
-          const d = new Date(today); d.setDate(d.getDate() - i);
-          row[f.name] = d.toISOString().slice(0, 10);
-        } else if (f.type === 'DATETIME') {
-          const d = new Date(today); d.setMinutes(d.getMinutes() - i * 5);
-          row[f.name] = d.toISOString().slice(0, 19).replace('T', ' ');
-        } else if (f.type === 'VARCHAR' || f.type === 'STRING') {
-          const samples = ['ALIPAY', 'WECHAT', 'UNIONPAY', 'BJ-01', 'SH-02', `SKU-${10000 + i}`, '异地登录拦截', '高频交易拦截'];
-          row[f.name] = samples[i % samples.length];
-        } else if (f.type === 'INT' || f.type === 'BIGINT') {
-          row[f.name] = Math.floor(Math.random() * 5000) + 100;
-        } else if (f.type === 'DECIMAL' || f.type === 'DOUBLE') {
-          if (f.name.includes('rate') || f.name.includes('success')) row[f.name] = (0.85 + Math.random() * 0.14).toFixed(4);
-          else if (f.name.includes('amount')) row[f.name] = (Math.random() * 500000 + 100000).toFixed(2);
-          else row[f.name] = (Math.random() * 200).toFixed(2);
-        } else {
-          row[f.name] = null;
-        }
-      });
-      rows.push(row);
-    }
-    return rows;
-  }
-
   // ---------- Render ----------
   function renderActions(actionsEl) {
     actionsEl.innerHTML = `
@@ -173,7 +136,18 @@ window.DatasetModule = (function () {
       <button class="btn btn-accent" id="ds-add">${Icon.plus({ size: 16 })}<span>新建数据集</span></button>
     `;
     actionsEl.querySelector('#ds-add').addEventListener('click', () => openForm());
-    actionsEl.querySelector('#ds-refresh-list').addEventListener('click', () => { UI.toast({ type: 'info', title: '已刷新' }); renderList(); });
+    actionsEl.querySelector('#ds-refresh-list').addEventListener('click', async (event) => {
+      const btn = event.currentTarget, root = pageRoot;
+      if (btn.disabled) return;
+      btn.disabled = true;
+      try {
+        await Store.refresh();
+        if (!ownsPage(root)) return;
+        renderStats(); renderToolbar(); renderList();
+        UI.toast({ type: 'success', title: '已刷新数据集列表' });
+      } catch (error) { if (ownsPage(root)) UI.toast({ type: 'error', title: '刷新失败', desc: error.message }); }
+      finally { if (btn.isConnected) btn.disabled = false; }
+    });
   }
 
   function render(contentEl, opts) {
@@ -185,6 +159,7 @@ window.DatasetModule = (function () {
         <div id="ds-table"></div>
       </div>
     `;
+    pageRoot = contentEl.querySelector('#ds-stats');
     renderStats();
     renderToolbar();
     renderList();
@@ -212,7 +187,7 @@ window.DatasetModule = (function () {
       </div>
       <div class="stat-card animate-rise" style="animation-delay:240ms;">
         <div class="stat-card-header"><span class="stat-card-label">今日更新</span><div class="stat-card-icon" style="background:var(--color-accent-soft);color:var(--color-accent);">${Icon.clock({ size: 16 })}</div></div>
-        <div class="stat-card-value">${all.filter(d => (d.updatedAt || '').slice(0, 10) === '2026-08-09').length}</div>
+        <div class="stat-card-value">${all.filter(d => formatTime(d.updatedAt).slice(0, 10) === formatTime(new Date().toISOString()).slice(0, 10)).length}</div>
         <div class="stat-card-delta up">已同步</div>
       </div>
     `;
@@ -349,11 +324,12 @@ window.DatasetModule = (function () {
   }
 
   async function confirmDelete(id) {
+    const root = pageRoot;
     const d = Store.getDataset(id);
     if (!d) return;
     const ok = await UI.confirm({ title: '删除数据集', desc: `确定要删除「${d.name}」吗？关联的异常规则将失效。`, confirmText: '删除', danger: true });
     if (ok) {
-      try { await Store.deleteDataset(id); UI.toast({ type: 'success', title: '已删除', desc: d.name }); renderList(); renderStats(); }
+      try { await Store.deleteDataset(id); if (!ownsPage(root)) return; UI.toast({ type: 'success', title: '已删除', desc: d.name }); renderList(); renderStats(); }
       catch (error) { UI.toast({ type: 'error', title: '删除失败', desc: error.message }); }
     }
   }
@@ -362,19 +338,19 @@ window.DatasetModule = (function () {
   function openQuery(id) {
     const d = Store.getDataset(id);
     if (!d) return;
-    const ds = Store.getDatasource(d.datasourceId);
-    let currentSql = d.sql;
     let results = [];
+    let resultFields = [];
     let running = false;
+    let attempted = false;
 
     const d_ = UI.drawer({
-      title: d.name,
-      subtitle: `${d.datasourceName} · ${d.fields.length} 个字段 · ${UI.formatNumber(d.rowCount)} 行`,
+      title: escapeHtml(d.name),
+      subtitle: `${escapeHtml(d.datasourceName)} · ${d.fields.length} 个字段 · ${UI.formatNumber(d.rowCount)} 行`,
       size: 'lg',
       body: `
         <div class="field">
           <label class="field-label"><span>SQL 查询</span><span class="field-optional">支持语法高亮 · Ctrl+Enter 运行</span></label>
-          ${renderSqlEditor(currentSql)}
+          ${renderSqlEditor(d.sql)}
         </div>
         <div class="flex items-center justify-between mb-3">
           <div class="flex items-center gap-2">
@@ -404,7 +380,7 @@ window.DatasetModule = (function () {
       const v = validateSql(sql);
       if (v.errors.length) { footerStatus.className = 'footer-status warn'; footerStatus.innerHTML = `${Icon.alert({ size: 12 })}${v.errors[0]}`; }
       else if (v.warnings.length) { footerStatus.className = 'footer-status warn'; footerStatus.innerHTML = `${Icon.alert({ size: 12 })}${v.warnings[0]}`; }
-      else { footerStatus.className = 'footer-status ok'; footerStatus.innerHTML = `${Icon.check({ size: 12 })}语法正确 · ${lines} 行`; }
+      else { footerStatus.className = 'footer-status ok'; footerStatus.innerHTML = `${Icon.check({ size: 12 })}编辑中 · ${lines} 行（以服务端校验为准）`; }
     }
 
     function syncScroll() {
@@ -430,7 +406,7 @@ window.DatasetModule = (function () {
     syncHighlight();
 
     async function runQuery() {
-      if (running) return;
+      if (running || !d_.drawer.isConnected) return;
       const sql = editorTextarea.value;
       const v = validateSql(sql);
       if (!v.ok) {
@@ -438,6 +414,7 @@ window.DatasetModule = (function () {
         return;
       }
       running = true;
+      attempted = true;
       const runBtn = d_.drawer.querySelector('#q-run');
       const original = runBtn.innerHTML;
       runBtn.innerHTML = `<span class="btn-spinner"></span>运行中…`;
@@ -446,12 +423,14 @@ window.DatasetModule = (function () {
         <div class="state" style="padding: var(--space-12);">
           <div class="state-icon primary"><span class="btn-spinner" style="width:24px;height:24px;border-width:3px;"></span></div>
           <div class="state-title">正在执行查询…</div>
-          <div class="state-desc">连接 ${d.datasourceName}</div>
+          <div class="state-desc">连接 ${escapeHtml(d.datasourceName)}</div>
         </div>
       `;
       try {
         const response = await Store.executeDatasetSql(d.datasourceId, sql);
+        if (!d_.drawer.isConnected) return;
         results = response.rows;
+        resultFields = response.fields;
         const elapsed = response.elapsed_ms;
         d_.body.querySelector('#result-count').textContent = `${results.length} 行`;
         d_.body.querySelector('#result-count').className = 'badge success';
@@ -459,16 +438,19 @@ window.DatasetModule = (function () {
         d_.body.querySelector('#result-area').innerHTML = renderResultsTable(results, response.fields);
         UI.toast({ type: 'success', title: '查询完成', desc: `${results.length} 行 · ${elapsed}ms` });
       } catch (error) {
+        if (!d_.drawer.isConnected) return;
+        results = [];
         d_.body.querySelector('#result-area').innerHTML = UI.emptyState({ icon: Icon.alert({ size: 24 }), iconCls: 'danger', title: '查询失败', desc: error.message });
         UI.toast({ type: 'error', title: '查询失败', desc: error.message });
       } finally {
-        runBtn.innerHTML = original;
-        runBtn.disabled = false;
+        if (runBtn.isConnected) { runBtn.innerHTML = original; runBtn.disabled = false; }
         running = false;
       }
     }
 
     d_.drawer.querySelector('#q-run').addEventListener('click', runQuery);
+    d_.body.querySelector('#editor-format-btn').addEventListener('click', () => { editorTextarea.value = formatSql(editorTextarea.value); syncHighlight(); });
+    d_.body.querySelector('#editor-validate-btn').addEventListener('click', event => validateEditor(editorTextarea, event.currentTarget, () => d_.drawer.isConnected));
     d_.drawer.querySelector('#q-close').addEventListener('click', () => d_.close());
     d_.drawer.querySelector('#q-format').addEventListener('click', () => {
       editorTextarea.value = formatSql(editorTextarea.value);
@@ -477,11 +459,23 @@ window.DatasetModule = (function () {
     });
     d_.body.querySelector('#result-export').addEventListener('click', () => {
       if (results.length === 0) { UI.toast({ type: 'warning', title: '暂无数据可导出', desc: '请先执行查询' }); return; }
+      UI.downloadCsv(results, resultFields, 'query-results.csv');
       UI.toast({ type: 'success', title: '导出已开始', desc: `${results.length} 行 · CSV 格式` });
     });
 
     // Auto-run once for preview
-    setTimeout(runQuery, 300);
+    setTimeout(() => { if (d_.drawer.isConnected && !attempted) runQuery(); }, 300);
+  }
+
+  async function validateEditor(textarea, btn, isCurrent) {
+    if (btn.disabled || !isCurrent()) return;
+    const sql = textarea.value;
+    btn.disabled = true;
+    try {
+      await Store.validateDatasetSql(sql);
+      if (isCurrent() && textarea.value === sql) UI.toast({ type: 'success', title: '校验通过' });
+    } catch (error) { if (isCurrent() && textarea.value === sql) UI.toast({ type: 'error', title: '校验失败', desc: error.message }); }
+    finally { if (btn.isConnected) btn.disabled = false; }
   }
 
   function renderSqlEditor(sql) {
@@ -546,13 +540,14 @@ window.DatasetModule = (function () {
 
   // ---------- Add/Edit form ----------
   function openForm(id) {
+    const root = pageRoot;
     const editing = id ? Store.getDataset(id) : null;
     const data = editing || { name: '', description: '', datasourceId: '', sql: 'SELECT\n  COUNT(*) AS total\nFROM\n  your_table\nLIMIT 10;', fields: [] };
     const datasources = Store.getDatasources();
 
     const m = UI.modal({
       title: editing ? '编辑数据集' : '新建数据集',
-      subtitle: editing ? `修改 ${data.name}` : '从数据源创建可复用的 SQL 视图',
+      subtitle: editing ? `修改 ${escapeHtml(data.name)}` : '从数据源创建可复用的 SQL 视图',
       size: 'xl',
       body: `
         <div class="form-section">
@@ -570,7 +565,7 @@ window.DatasetModule = (function () {
         </div>
         <div class="form-section">
           <div class="form-section-title">${Icon.terminal({ size: 14 })}SQL 查询</div>
-          <div class="form-section-desc">仅支持 SELECT 语句。运行后将自动解析字段。</div>
+          <div class="form-section-desc">支持 SELECT 与 CTE 只读查询。运行后将自动解析字段。</div>
           <div id="form-sql-editor">${renderSqlEditor(data.sql)}</div>
         </div>
         <div class="form-section" id="form-preview-panel" hidden>
@@ -604,7 +599,7 @@ window.DatasetModule = (function () {
       lineNumbers.innerHTML = Array.from({ length: lines }, (_, i) => `<div>${i + 1}</div>`).join('');
       const v = validateSql(sql);
       if (v.errors.length) { footerStatus.className = 'footer-status warn'; footerStatus.innerHTML = `${Icon.alert({ size: 12 })}${v.errors[0]}`; }
-      else { footerStatus.className = 'footer-status ok'; footerStatus.innerHTML = `${Icon.check({ size: 12 })}语法正确`; }
+      else { footerStatus.className = 'footer-status ok'; footerStatus.innerHTML = `${Icon.check({ size: 12 })}编辑中（以服务端校验为准）`; }
     }
     function syncScroll() {
       editorHighlight.scrollTop = editorTextarea.scrollTop;
@@ -623,12 +618,7 @@ window.DatasetModule = (function () {
       }
     });
     m.dialog.querySelector('#editor-format-btn').addEventListener('click', () => { editorTextarea.value = formatSql(editorTextarea.value); syncHighlight(); UI.toast({ type: 'info', title: '已格式化' }); });
-    m.dialog.querySelector('#editor-validate-btn').addEventListener('click', () => {
-      const v = validateSql(editorTextarea.value);
-      if (v.ok && v.warnings.length === 0) UI.toast({ type: 'success', title: '校验通过' });
-      else if (v.ok) UI.toast({ type: 'warning', title: '校验通过（有警告）', desc: v.warnings.join('；') });
-      else UI.toast({ type: 'error', title: '校验失败', desc: v.errors.join('；') });
-    });
+    m.dialog.querySelector('#editor-validate-btn').addEventListener('click', event => validateEditor(editorTextarea, event.currentTarget, () => m.dialog.isConnected));
 
     syncHighlight();
 
@@ -637,6 +627,7 @@ window.DatasetModule = (function () {
 
     m.dialog.querySelector('#f-run').addEventListener('click', async () => {
       const btn = m.dialog.querySelector('#f-run');
+      if (btn.disabled || !m.dialog.isConnected) return;
       const original = btn.innerHTML;
       btn.innerHTML = `<span class="btn-spinner"></span>运行中…`;
       btn.disabled = true;
@@ -644,6 +635,7 @@ window.DatasetModule = (function () {
         const datasourceId = m.dialog.querySelector('#f-datasource').value;
         if (!datasourceId) throw new Error('请先选择数据源');
         const response = await Store.executeDatasetSql(datasourceId, editorTextarea.value);
+        if (!m.dialog.isConnected) return;
         parsedFields = response.fields;
         parsedRowCount = response.row_count;
         const previewRows = response.rows || [];
@@ -655,16 +647,17 @@ window.DatasetModule = (function () {
         m.dialog.querySelector('#form-preview-area').innerHTML = renderResultsTable(previewRows, parsedFields);
         UI.toast({ type: 'success', title: '解析成功', desc: `识别 ${parsedFields.length} 个字段 · 预览 ${parsedRowCount} 行` });
       } catch (error) {
-        UI.toast({ type: 'error', title: '执行失败', desc: error.message });
+        if (m.dialog.isConnected) UI.toast({ type: 'error', title: '执行失败', desc: error.message });
       } finally {
-        btn.innerHTML = original;
-        btn.disabled = false;
+        if (btn.isConnected) { btn.innerHTML = original; btn.disabled = false; }
       }
     });
 
     m.dialog.querySelector('[data-action="cancel"]').addEventListener('click', () => m.close());
 
     m.dialog.querySelector('#f-save').addEventListener('click', async () => {
+      const btn = m.dialog.querySelector('#f-save');
+      if (btn.disabled || !m.dialog.isConnected) return;
       const name = m.dialog.querySelector('#f-name').value.trim();
       const datasourceId = m.dialog.querySelector('#f-datasource').value;
       if (!name) { UI.toast({ type: 'warning', title: '请填写数据集名称' }); return; }
@@ -679,12 +672,29 @@ window.DatasetModule = (function () {
         fields: parsedFields,
         rowCount: parsedRowCount,
       };
-      try {
-        const saved = editing ? await Store.updateDataset(id, payload) : await Store.addDataset(payload);
-        await Store.executeDataset(saved.id);
+      btn.disabled = true;
+      const original = btn.innerHTML;
+      btn.innerHTML = '<span class="btn-spinner"></span>保存中…';
+      let saved;
+      try { saved = editing ? await Store.updateDataset(id, payload) : await Store.addDataset(payload); }
+      catch (error) {
+        if (m.dialog.isConnected) { UI.toast({ type: 'error', title: '保存失败', desc: error.message }); btn.disabled = false; btn.innerHTML = original; }
+        return;
+      }
+      // The create is committed. Close its form before attempting the optional preview.
+      const visible = m.dialog.isConnected;
+      if (visible) {
         UI.toast({ type: 'success', title: editing ? '已保存' : '已创建', desc: name });
-        m.close(); renderList(); renderStats();
-      } catch (error) { UI.toast({ type: 'error', title: '保存失败', desc: error.message }); }
+        m.close();
+        if (ownsPage(root)) { renderList(); renderStats(); }
+      }
+      if (!visible) return;
+      try {
+        const result = await Store.executeDataset(saved.id);
+        if (!ownsPage(root)) return;
+        renderList(); renderStats();
+        if (result?.refreshWarning) UI.toast({ type: 'warning', title: '已保存，列表刷新失败', desc: result.refreshWarning });
+      } catch (error) { if (ownsPage(root)) UI.toast({ type: 'warning', title: '已保存，预览失败', desc: error.message }); }
     });
   }
 

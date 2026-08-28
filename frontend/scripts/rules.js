@@ -5,6 +5,9 @@
 window.RulesModule = (function () {
   const { escapeHtml, formatTime } = UI;
   let state = { search: '', statusFilter: 'all', page: 1, pageSize: 8 };
+  let pageRoot = null;
+  const ownsPage = root => root?.isConnected && root === pageRoot;
+  const runningRules = new Set();
 
   function renderActions(actionsEl) {
     actionsEl.innerHTML = `
@@ -12,15 +15,20 @@ window.RulesModule = (function () {
       <button class="btn btn-accent" id="r-add">${Icon.plus({ size: 16 })}<span>新建规则</span></button>
     `;
     actionsEl.querySelector('#r-add').addEventListener('click', () => openForm());
-    actionsEl.querySelector('#r-refresh').addEventListener('click', async () => {
+    actionsEl.querySelector('#r-refresh').addEventListener('click', async event => {
+      const btn = event.currentTarget, root = pageRoot;
+      if (btn.disabled) return;
+      btn.disabled = true;
       try {
         await Store.refresh();
+        if (!ownsPage(root)) return;
         renderStats();
         renderList();
         UI.toast({ type: 'info', title: '已刷新' });
       } catch (error) {
-        UI.toast({ type: 'error', title: '刷新失败', desc: error.message });
+        if (ownsPage(root)) UI.toast({ type: 'error', title: '刷新失败', desc: error.message });
       }
+      finally { if (btn.isConnected) btn.disabled = false; }
     });
   }
 
@@ -33,6 +41,7 @@ window.RulesModule = (function () {
         <div id="r-table"></div>
       </div>
     `;
+    pageRoot = contentEl.querySelector('#r-stats');
     renderStats();
     renderToolbar();
     renderList();
@@ -205,12 +214,17 @@ window.RulesModule = (function () {
     });
     tableEl.querySelectorAll('input[data-action="toggle"]').forEach(inp => {
       inp.addEventListener('change', async () => {
+        if (inp.disabled) return;
+        const root = pageRoot;
+        inp.disabled = true;
         const r = Store.getRule(inp.dataset.id);
         try {
           await Store.enableRule(inp.dataset.id, inp.checked);
+          if (!ownsPage(root)) return;
           UI.toast({ type: inp.checked ? 'success' : 'info', title: inp.checked ? '已启用' : '已停用', desc: r.name });
           renderList(); renderStats();
-        } catch (error) { inp.checked = !inp.checked; UI.toast({ type: 'error', title: '调度同步失败', desc: error.message }); }
+        } catch (error) { if (ownsPage(root)) { inp.checked = !inp.checked; UI.toast({ type: 'error', title: '调度同步失败', desc: error.message }); } }
+        finally { if (inp.isConnected) inp.disabled = false; }
       });
     });
     tableEl.querySelectorAll('.page-btn[data-page]').forEach(btn => {
@@ -230,29 +244,39 @@ window.RulesModule = (function () {
   }
 
   async function runRule(id) {
+    if (runningRules.has(id)) return;
+    const root = pageRoot;
     const r = Store.getRule(id);
     if (!r) return;
+    runningRules.add(id);
+    const buttons = [...document.querySelectorAll(`[data-action="run"][data-id="${id}"]`)];
+    buttons.forEach(button => { button.disabled = true; });
     UI.toast({ type: 'info', title: '开始执行', desc: r.name });
     try {
       const run = await Store.executeRule(id);
+      if (!ownsPage(root)) return;
       const type = run.new_anomalies > 0 ? 'warning' : 'success';
       UI.toast({ type, title: run.new_anomalies > 0 ? '检测到异常' : '执行完成', desc: `扫描 ${run.scanned_rows} 行 · 新增 ${run.new_anomalies} 条` });
+      if (run.refreshWarning) UI.toast({ type: 'warning', title: '执行完成，页面刷新失败', desc: run.refreshWarning });
       renderList(); renderStats();
-    } catch (error) { UI.toast({ type: 'error', title: '执行失败', desc: error.message }); }
+    } catch (error) { if (ownsPage(root)) UI.toast({ type: 'error', title: '执行失败', desc: error.message }); }
+    finally { runningRules.delete(id); buttons.forEach(button => { if (button.isConnected) button.disabled = false; }); }
   }
 
   async function confirmDelete(id) {
+    const root = pageRoot;
     const r = Store.getRule(id);
     if (!r) return;
     const ok = await UI.confirm({ title: '删除规则', desc: `确定要删除「${r.name}」吗？历史异常记录将保留。`, confirmText: '删除', danger: true });
     if (ok) {
-      try { await Store.deleteRule(id); UI.toast({ type: 'success', title: '已删除', desc: r.name }); renderList(); renderStats(); }
-      catch (error) { UI.toast({ type: 'error', title: '删除失败', desc: error.message }); }
+      try { await Store.deleteRule(id); if (!ownsPage(root)) return; UI.toast({ type: 'success', title: '已删除', desc: r.name }); renderList(); renderStats(); }
+      catch (error) { if (ownsPage(root)) UI.toast({ type: 'error', title: '删除失败', desc: error.message }); }
     }
   }
 
   // ---------- Form (add/edit) ----------
   function openForm(id) {
+    const root = pageRoot;
     const editing = id ? Store.getRule(id) : null;
     const data = editing || {
       name: '', description: '', datasetId: '', severity: 'medium',
@@ -1190,21 +1214,27 @@ window.RulesModule = (function () {
 
     m.dialog.querySelector('#f-test').addEventListener('click', async () => {
       const btn = m.dialog.querySelector('#f-test');
+      if (btn.disabled || !m.dialog.isConnected || runningRules.has(id)) return;
+      runningRules.add(id);
       const original = btn.innerHTML;
       btn.innerHTML = `<span class="btn-spinner"></span>执行中…`;
       btn.disabled = true;
       try {
         if (!editing) throw new Error('请先保存规则，再执行真实检测');
         const run = await Store.executeRule(id);
+        if (!m.dialog.isConnected) return;
         UI.toast({ type: run.new_anomalies ? 'warning' : 'success', title: '真实检测完成', desc: `扫描 ${run.scanned_rows} 行 · 新增 ${run.new_anomalies} 条` });
-      } catch (error) { UI.toast({ type: 'error', title: '执行失败', desc: error.message }); }
+        if (run.refreshWarning) UI.toast({ type: 'warning', title: '检测完成，页面刷新失败', desc: run.refreshWarning });
+      } catch (error) { if (m.dialog.isConnected) UI.toast({ type: 'error', title: '执行失败', desc: error.message }); }
       finally {
-        btn.innerHTML = original;
-        btn.disabled = false;
+        runningRules.delete(id);
+        if (btn.isConnected) { btn.innerHTML = original; btn.disabled = false; }
       }
     });
 
     m.dialog.querySelector('#f-save').addEventListener('click', async () => {
+      const btn = m.dialog.querySelector('#f-save');
+      if (btn.disabled || !m.dialog.isConnected) return;
       const name = m.dialog.querySelector('#f-name').value.trim();
       const datasetId = m.dialog.querySelector('#f-dataset').value;
       if (!name) { revealField('#f-name'); UI.toast({ type: 'warning', title: '请填写规则名称' }); return; }
@@ -1448,11 +1478,16 @@ window.RulesModule = (function () {
         },
       };
 
+      const original = btn.innerHTML;
+      btn.disabled = true;
+      btn.innerHTML = '<span class="btn-spinner"></span>保存中…';
       try {
         if (editing) await Store.updateRule(id, payload); else await Store.addRule(payload);
+        if (!m.dialog.isConnected) return;
         UI.toast({ type: 'success', title: editing ? '已保存' : '已创建', desc: name });
-        m.close(); renderList(); renderStats();
-      } catch (error) { UI.toast({ type: 'error', title: '保存失败', desc: error.message }); }
+        m.close(); if (ownsPage(root)) { renderList(); renderStats(); }
+      } catch (error) { if (m.dialog.isConnected) UI.toast({ type: 'error', title: '保存失败', desc: error.message }); }
+      finally { if (btn.isConnected) { btn.disabled = false; btn.innerHTML = original; } }
     });
 
     if (data.datasetId) updateFieldsForDataset(data.datasetId, data.anomalyKeyFields || []);

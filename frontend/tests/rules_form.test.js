@@ -71,6 +71,64 @@ test('basic deadline uses seconds independently from severity and validation', a
   assert.equal(await page.evaluate(() => window.savedRule.validationEnabled), false);
 });
 
+test('rule save is single flight and does not repaint or report after the form closes', async t => {
+  const page = await openTabbedRule(t);
+  await page.evaluate(() => { window.saveCalls = 0; Store.updateRule = async () => { saveCalls++; return new Promise(resolve => { window.finishSave = resolve; }); }; });
+  await page.evaluate(() => { document.querySelector('#f-save').click(); document.querySelector('#f-save').click(); });
+  assert.equal(await page.evaluate(() => saveCalls), 1);
+  assert.equal(await page.locator('#f-save').isDisabled(), true);
+  await page.click('[data-action="cancel"]');
+  await page.evaluate(() => { document.querySelector('#content').innerHTML = '<div id="r-table">New page</div>'; finishSave(); });
+  await page.waitForTimeout(50);
+  assert.equal(await page.locator('#r-table').innerText(), 'New page');
+  assert.equal(await page.locator('#toast-container').innerText(), '');
+});
+
+test('rule execution keeps a committed result when refresh fails and blocks repeated tests', async t => {
+  const page = await openTabbedRule(t);
+  await page.evaluate(() => { window.runCalls = 0; Store.executeRule = async () => { runCalls++; return new Promise(resolve => { window.finishRun = () => resolve({ scanned_rows: 8, new_anomalies: 0, refreshWarning: 'refresh offline' }); }); }; });
+  await page.evaluate(() => { document.querySelector('#f-test').click(); document.querySelector('#f-test').click(); });
+  assert.equal(await page.evaluate(() => runCalls), 1);
+  await page.evaluate(() => finishRun());
+  await page.waitForFunction(() => document.querySelector('#toast-container').textContent.includes('刷新失败'));
+  assert.match(await page.locator('#toast-container').innerText(), /真实检测完成/);
+  assert.doesNotMatch(await page.locator('#toast-container').innerText(), /执行失败/);
+});
+
+test('rule refresh blocks repeat clicks and does not repaint a replaced route', async t => {
+  const page = await openTabbedRule(t);
+  await page.click('[data-action="cancel"]');
+  await page.evaluate(() => { window.refreshCalls = 0; Store.refresh = async () => { refreshCalls++; return new Promise(resolve => { window.finishRefresh = resolve; }); }; });
+  await page.evaluate(() => { document.querySelector('#r-refresh').click(); document.querySelector('#r-refresh').click(); });
+  assert.equal(await page.evaluate(() => refreshCalls), 1);
+  assert.equal(await page.locator('#r-refresh').isDisabled(), true);
+  await page.evaluate(() => { document.querySelector('#content').innerHTML = '<div id="r-table">New page</div>'; finishRefresh(); });
+  await page.waitForTimeout(50);
+  assert.equal(await page.locator('#r-table').innerText(), 'New page');
+  assert.equal(await page.locator('#toast-container').innerText(), '');
+});
+
+test('rule enable control stays pending and does not write into another route', async t => {
+  const page = await openTabbedRule(t);
+  await page.click('[data-action="cancel"]');
+  await page.evaluate(() => { Store.enableRule = async () => new Promise(resolve => { window.finishEnable = resolve; }); const checkbox = document.querySelector('input[data-action="toggle"]'); checkbox.click(); });
+  assert.equal(await page.locator('input[data-action="toggle"]').isDisabled(), true);
+  await page.evaluate(() => { document.querySelector('#content').innerHTML = '<div id="r-table">New page</div>'; finishEnable(); });
+  await page.waitForTimeout(50);
+  assert.equal(await page.locator('#r-table').innerText(), 'New page');
+  assert.equal(await page.locator('#toast-container').innerText(), '');
+});
+
+test('successful rule deletion cannot be reported as failed after leaving the page', async t => {
+  const page = await openTabbedRule(t);
+  await page.click('[data-action="cancel"]');
+  await page.evaluate(() => { Store.deleteRule = async () => new Promise(resolve => { window.finishDelete = resolve; }); });
+  await page.click('[data-action="delete"]'); await page.click('[data-action="confirm"]');
+  await page.evaluate(() => { document.querySelector('#content').innerHTML = '<h2>Other page</h2>'; finishDelete(); });
+  await page.waitForTimeout(50);
+  assert.equal(await page.locator('#toast-container').innerText(), '');
+});
+
 test('deadline rejects invalid components and focuses basic information', async t => {
   const page = await openTabbedRule(t);
   for (const values of [['0','0','0','0'], ['31','0','0','0'], ['1','24','0','0'],

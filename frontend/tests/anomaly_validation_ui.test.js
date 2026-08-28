@@ -31,6 +31,154 @@ function datasetFixture() {
   };
 }
 
+async function exportPage(t) {
+  return withPage(t, async page => {
+    await page.evaluate(() => {
+      window.exportRequests = []; window.statusCalls = 0; window.exportFailure = false;
+      window.apiRecords = ['selected', 'unselected'].map(id => ({ id, rule_id: 'rule-1', rule_name: id, dataset_name: 'Data', status: 'pending', severity: 'high', first_seen_at: '2026-08-28T00:00:00Z', matched_conditions: [], row_details: {} }));
+      window.fetch = async (input, options = {}) => {
+        const url = new URL(input, 'https://sentinel.test');
+        const json = value => ({ ok: true, status: 200, json: async () => value });
+        if (url.pathname.endsWith('/export')) {
+          exportRequests.push(url.searchParams.getAll('ids'));
+          if (exportFailure) return { ok: false, status: 503, json: async () => ({ detail: 'export offline' }) };
+          const ids = url.searchParams.getAll('ids');
+          return { ok: true, status: 200, blob: async () => new Blob(['\uFEFFid,note\r\n', ...apiRecords.filter(r => !ids.length || ids.includes(r.id)).map(r => `${r.id},"'=SUM(1,2)"\r\n`)], { type: 'text/csv' }) };
+        }
+        if (url.pathname.endsWith('/status')) {
+          statusCalls++;
+          return new Promise(resolve => { window.finishStatus = () => resolve(json({ ...apiRecords[0], status: 'resolved' })); });
+        }
+        if (url.pathname.endsWith('/overview')) return json({ stats: { pending_records: 2, processing_records: 0, timed_out_records: 0, resolved_records: 0 } });
+        if (url.pathname.endsWith('/anomalies')) return json({ items: apiRecords, total: 2, page: 1, page_size: 10 });
+        throw new Error(`unexpected ${url.pathname}`);
+      };
+    });
+    await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'data.js') });
+    await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'records.js') });
+    await page.evaluate(() => RecordsModule.render(document.querySelector('#content'), { actionsEl: document.querySelector('#actions') }));
+    await page.locator('.rec-row-check').first().waitFor();
+  });
+}
+
+test('selected export downloads backend CSV containing only selected IDs', async t => {
+  const { page, pageErrors } = await exportPage(t);
+  await page.locator('.rec-row-check[data-id="selected"]').check();
+  const promise = page.waitForEvent('download');
+  await page.click('[data-bulk="export"]');
+  const download = await promise;
+  const bytes = require('node:fs').readFileSync(await download.path());
+  assert.equal(bytes.subarray(0, 3).toString('hex'), 'efbbbf');
+  assert.match(bytes.toString('utf8'), /selected,"'=SUM\(1,2\)"/);
+  assert.doesNotMatch(bytes.toString('utf8'), /unselected/);
+  assert.deepEqual(await page.evaluate(() => exportRequests), [['selected']]);
+  assert.deepEqual(pageErrors, []);
+});
+
+test('export HTTP errors show failure without a success notification or a download', async t => {
+  const { page } = await exportPage(t);
+  const downloads = []; page.on('download', download => downloads.push(download));
+  await page.evaluate(() => { exportFailure = true; });
+  await page.click('#rec-export');
+  await page.waitForFunction(() => document.querySelector('#toast-container').textContent.includes('导出失败'));
+  assert.match(await page.locator('#toast-container').innerText(), /export offline/);
+  assert.doesNotMatch(await page.locator('#toast-container').innerText(), /导出已开始/);
+  assert.equal(downloads.length, 0);
+});
+
+test('an empty backend CSV never reports export success even if the earlier count was nonzero', async t => {
+  const { page } = await exportPage(t);
+  const downloads = []; page.on('download', download => downloads.push(download));
+  await page.evaluate(() => { Store.downloadExport = async () => new Blob(['\uFEFFid,note\r\n'], { type: 'text/csv' }); });
+  await page.click('#rec-export');
+  await page.waitForFunction(() => document.querySelector('#toast-container').textContent.includes('暂无数据可导出'));
+  assert.doesNotMatch(await page.locator('#toast-container').innerText(), /导出已开始/);
+  assert.equal(downloads.length, 0);
+});
+
+test('quick status mutation is single flight and cannot repaint a replaced records page', async t => {
+  const { page, pageErrors } = await exportPage(t);
+  await page.locator('[data-action="status"][data-id="selected"]').click();
+  await page.evaluate(() => { document.querySelector('[data-status="resolved"].radio-card').click(); document.querySelector('[data-status="resolved"].radio-card').click(); });
+  assert.equal(await page.evaluate(() => statusCalls), 1);
+  assert.equal(await page.locator('[data-status="resolved"].radio-card').isDisabled(), true);
+  await page.click('[data-action="cancel"]');
+  await page.evaluate(() => { document.querySelector('#content').innerHTML = '<div id="rec-table">New page</div>'; finishStatus(); });
+  await page.waitForTimeout(50);
+  assert.equal(await page.locator('#rec-table').innerText(), 'New page');
+  assert.equal(await page.locator('#toast-container').innerText(), '');
+  assert.deepEqual(pageErrors, []);
+});
+
+test('closed record detail cannot reopen after a pending successful resolution', async t => {
+  const { page, pageErrors } = await exportPage(t);
+  await page.evaluate(() => { Store.loadRecord = async () => ({ id: 'selected', ruleId: 'rule-1', ruleName: 'Rule', datasetName: 'Data', status: 'pending', severity: 'high', timeline: [], details: {} }); });
+  await page.evaluate(() => RecordsModule.openDetail('selected'));
+  await page.evaluate(() => { document.querySelector('#d-resolve').click(); document.querySelector('#d-resolve').click(); });
+  assert.equal(await page.evaluate(() => statusCalls), 1);
+  await page.click('#d-close');
+  await page.evaluate(() => finishStatus());
+  await page.waitForTimeout(50);
+  assert.equal(await page.getByRole('dialog').count(), 0);
+  assert.equal(await page.locator('#toast-container').innerText(), '');
+  assert.deepEqual(pageErrors, []);
+});
+
+test('a committed abort reports ancillary refresh failure separately', async t => {
+  const { page, pageErrors } = await exportPage(t);
+  await page.evaluate(() => {
+    Store.isSuperuser = () => true;
+    Store.abortAnomalyPushes = async () => ({ aborted_jobs: 1, deleted_ds_instances: 1, cleared_kafka_partitions: 1 });
+    Store.refresh = async () => { throw new Error('refresh offline'); };
+    RecordsModule.render(document.querySelector('#content'), { actionsEl: document.querySelector('#actions') });
+  });
+  await page.click('#rec-abort-push'); await page.click('[data-action="confirm"]');
+  await page.waitForFunction(() => document.querySelector('#toast-container').textContent.includes('刷新失败'));
+  assert.match(await page.locator('#toast-container').innerText(), /推送积压已中止/);
+  assert.doesNotMatch(await page.locator('#toast-container').innerText(), /未完全完成/);
+  assert.deepEqual(pageErrors, []);
+});
+
+test('records refresh is single flight and ignores responses after its page is replaced', async t => {
+  const { page, pageErrors } = await exportPage(t);
+  await page.evaluate(() => { window.refreshCalls = 0; Store.refresh = async () => { refreshCalls++; return new Promise(resolve => { window.finishRefresh = resolve; }); }; document.querySelector('#rec-refresh').click(); document.querySelector('#rec-refresh').click(); });
+  assert.equal(await page.evaluate(() => refreshCalls), 1);
+  assert.equal(await page.locator('#rec-refresh').isDisabled(), true);
+  await page.evaluate(() => { document.querySelector('#content').innerHTML = '<div id="rec-table">New page</div>'; finishRefresh(); });
+  await page.waitForTimeout(50);
+  assert.equal(await page.locator('#rec-table').innerText(), 'New page');
+  assert.equal(await page.locator('#toast-container').innerText(), '');
+  assert.deepEqual(pageErrors, []);
+});
+
+test('a late export preparation failure does not notify a different route', async t => {
+  const { page } = await exportPage(t);
+  await page.evaluate(() => { Store.peekRecordsPage = async () => new Promise((resolve, reject) => { window.failExport = () => reject(new Error('late failure')); }); });
+  await page.click('#rec-export');
+  await page.evaluate(() => { document.querySelector('#content').innerHTML = '<h2>Other page</h2>'; failExport(); });
+  await page.waitForTimeout(50);
+  assert.equal(await page.locator('#toast-container').innerText(), '');
+});
+
+for (const [buttonId, method] of [['rec-abort-push', 'abortAnomalyPushes'], ['rec-recover-push', 'recoverAnomalyPushes'], ['rec-clear-in-transit', 'clearInTransitPushes']]) {
+  test(`${method} cannot report or repaint after leaving its originating page`, async t => {
+    const { page, pageErrors } = await exportPage(t);
+    await page.evaluate(method => {
+      Store.isSuperuser = () => true;
+      Store[method] = async () => new Promise(resolve => { window.finishOperation = () => resolve({}); });
+      Store.refresh = async () => {};
+      RecordsModule.render(document.querySelector('#content'), { actionsEl: document.querySelector('#actions') });
+    }, method);
+    await page.click(`#${buttonId}`);
+    assert.equal(await page.locator(`#${buttonId}`).isDisabled(), true);
+    await page.click('[data-action="confirm"]');
+    await page.evaluate(() => { document.querySelector('#content').innerHTML = '<h2>Other page</h2>'; finishOperation(); });
+    await page.waitForTimeout(50);
+    assert.equal(await page.locator('#toast-container').innerText(), '');
+    assert.deepEqual(pageErrors, []);
+  });
+}
+
 test('rule field selectors preserve hostile names and types as inert option text', async t => {
   const fieldName = 'owner" data-pwned="yes"><img src=x onerror="window.ruleXss=1">';
   const fieldType = 'varchar</option><option id="field-type-xss" value="pwned" onerror="window.ruleXss=1">owned</option><option>';

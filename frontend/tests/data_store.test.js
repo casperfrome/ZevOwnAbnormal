@@ -4,6 +4,87 @@ const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
 
+function createStore(fetch) {
+  const context = { window: {}, fetch };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'scripts', 'data.js'), 'utf8'), context);
+  return context.window.Store;
+}
+const okResponse = body => ({ ok: true, status: 200, json: async () => body });
+
+test('saved datasource test omits blank password and sends saved identity; SQL validation uses the API', async () => {
+  const calls = [];
+  const store = createStore(async (url, options) => { calls.push([url, JSON.parse(options.body)]); return okResponse({ valid: true }); });
+  await store.testDatasourceConfig({ id: 'source-1', type: 'mysql', password: '', port: 3306 });
+  assert.equal(calls[0][1].datasource_id, 'source-1');
+  assert.equal(Object.hasOwn(calls[0][1], 'password'), false);
+  await store.validateDatasetSql('SELECT 1');
+  assert.deepEqual(calls[1], ['/api/v1/datasets/validate', { sql: 'SELECT 1' }]);
+});
+
+test('out-of-order full refresh cannot overwrite newer lists or a newer overview range', async () => {
+  const pending = [];
+  const store = createStore((url) => new Promise(resolve => pending.push({ url, resolve })));
+  const older = store.refresh();
+  const newer = store.refresh();
+  const body = (url, name) => url.includes('/anomalies?') ? { items: [] } : url.endsWith('/overview') ? { days: 14, marker: name } : url.endsWith('/datasources') ? [{ id: name, name }] : [];
+  pending.slice(5).forEach(call => call.resolve(okResponse(body(call.url, 'newer'))));
+  await newer;
+  pending.slice(0, 5).forEach(call => call.resolve(okResponse(body(call.url, 'older'))));
+  await older;
+  assert.equal(store.getDatasources()[0].name, 'newer');
+  assert.equal(store.getOverview().marker, 'newer');
+  const thirty = store.refreshOverview(30);
+  const ninety = store.refreshOverview(90);
+  pending.at(-1).resolve(okResponse({ days: 90 })); await ninety;
+  pending.at(-2).resolve(okResponse({ days: 30 })); await thirty;
+  assert.equal(store.getOverview().days, 90);
+  assert.equal(pending.at(-1).url, '/api/v1/overview?days=90');
+});
+
+for (const [method, args] of [['executeDataset', ['dataset-1']], ['executeRule', ['rule-1']], ['testDatasource', ['source-1']], ['bulkUpdateRecords', [['record-1'], 'resolved']]]) {
+  test(`${method} preserves successful operation result when ancillary refresh fails`, async () => {
+    const store = createStore(async (url, options) => options.method === 'POST' ? okResponse({ ok: true, scanned_rows: 7 }) : { ok: false, status: 503, json: async () => ({ detail: 'refresh offline' }) });
+    const result = await store[method](...args);
+    assert.equal(result.ok, true);
+    assert.match(result.refreshWarning, /refresh offline/);
+  });
+}
+
+test('selected anomaly export encodes only requested IDs alongside current filters', () => {
+  const store = createStore(() => {});
+  const url = new URL(store.exportUrl({ ids: ['a&1', 'b/2'], severity: 'high' }), 'https://example.test');
+  assert.deepEqual(url.searchParams.getAll('ids'), ['a&1', 'b/2']);
+  assert.equal(url.searchParams.get('severity'), 'high');
+});
+
+test('an older list refresh cannot remove a datasource created while it was pending', async () => {
+  const pending = [];
+  const store = createStore((url, options = {}) => options.method === 'POST'
+    ? Promise.resolve(okResponse({ id: 'created', name: 'Created', type: 'mysql' }))
+    : new Promise(resolve => pending.push({ url, resolve })));
+  const refresh = store.refresh();
+  await store.addDatasource({ name: 'Created', type: 'mysql', port: 3306 });
+  pending.forEach(call => call.resolve(okResponse(call.url.includes('/anomalies?') ? { items: [] } : call.url.endsWith('/overview') ? { stats: {} } : [])));
+  await refresh;
+  assert.equal(store.getDatasource('created').name, 'Created');
+});
+
+test('an older record page cannot restore a stale status after a successful mutation', async () => {
+  let resolvePage;
+  const record = { id: 'record-1', status: 'pending' };
+  let pendingPage = false;
+  const store = createStore(async (url, options = {}) => {
+    if (options.method === 'PATCH') return okResponse({ ...record, status: 'resolved' });
+    if (url.includes('/anomalies?')) return pendingPage ? new Promise(resolve => { resolvePage = resolve; }) : okResponse({ items: [record] });
+    return okResponse({ stats: {} });
+  });
+  await store.loadRecordsPage(); pendingPage = true;
+  const page = store.loadRecordsPage();
+  await store.updateRecord('record-1', { status: 'resolved' });
+  resolvePage(okResponse({ items: [record] })); await page;
+  assert.equal(store.getRecord('record-1').status, 'resolved');
+});
+
 
 test('login posts credentials, returns the authenticated user, and exposes an HTTP status for rejected credentials', async () => {
   const requests = [];
