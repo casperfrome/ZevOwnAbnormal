@@ -264,11 +264,13 @@ window.RulesModule = (function () {
       privateMessageTemplate: '',
       validationEnabled: false,
       validationTargets: [],
-      validationTimeoutMinutes: 1440,
+      deadlineSeconds: 86400,
       validationMethod: 'pseudo',
       sqlValidationConfig: null,
       groupBroadcast: { enabled: false, webhookUrl: '', mentionTargets: [], messageTemplate: '' },
     };
+    const duration = data.deadlineSeconds ?? (data.validationTimeoutMinutes ?? 1440) * 60;
+    const deadlineParts = [Math.floor(duration / 86400), Math.floor(duration % 86400 / 3600), Math.floor(duration % 3600 / 60), duration % 60];
     const groupBroadcast = data.groupBroadcast || { enabled: false, webhookUrl: '', mentionTargets: [], messageTemplate: '' };
     const situationBroadcast = groupBroadcast.situation || groupBroadcast;
     const timeoutBroadcast = groupBroadcast.timeout || {};
@@ -304,12 +306,14 @@ window.RulesModule = (function () {
             ${UI.field('规则名称', `<input class="input" id="f-name" value="${escapeHtml(data.name)}" placeholder="例如：订单金额突增检测" />`, { required: true })}
             ${UI.field('严重程度', `
               <select class="select" id="f-severity">
-                <option value="critical" ${data.severity === 'critical' ? 'selected' : ''}>严重 — 立即响应</option>
-                <option value="high" ${data.severity === 'high' ? 'selected' : ''}>高 — 工作时间内响应</option>
-                <option value="medium" ${data.severity === 'medium' ? 'selected' : ''}>中 — 当日响应</option>
-                <option value="low" ${data.severity === 'low' ? 'selected' : ''}>低 — 周度复盘</option>
+                <option value="low" ${data.severity === 'low' ? 'selected' : ''}>低</option>
+                <option value="medium" ${data.severity === 'medium' ? 'selected' : ''}>中</option>
+                <option value="high" ${['high', 'critical'].includes(data.severity) ? 'selected' : ''}>高</option>
               </select>
             `, { required: true })}
+            ${UI.field('截止时间', `<div class="deadline-inputs"><span>收到异常推送后</span>${[
+              ['days', '天', 30], ['hours', '小时', 23], ['minutes', '分钟', 59], ['seconds', '秒', 59],
+            ].map(([unit, label, max], index) => `<label class="deadline-unit"><input class="input mono" id="f-deadline-${unit}" aria-label="截止时间${label}" type="number" min="0" max="${max}" step="1" required value="${deadlineParts[index]}" /><span>${label}</span></label>`).join('')}</div>`, { required: true, span2: true, help: '首次推送成功后开始计时；总时长 1 秒至 30 天，与严重程度、实时校验开关无关' })}
             ${UI.field('异常描述', `<input class="input" id="f-desc" value="${escapeHtml(data.description || '')}" placeholder="说明异常现象与验证人需要确认的内容" />`, { optional: true, span2: true })}
           </div>
         </div>
@@ -394,7 +398,6 @@ window.RulesModule = (function () {
             </div>
           </div>
           <div class="form-grid validation-fields-grid">
-            ${UI.field('超时时间（分钟）', `<input class="input mono" id="f-validation-timeout" type="number" min="1" max="43200" value="${data.validationTimeoutMinutes ?? 1440}" />`, { required: true, help: '1–43200 分钟；到期未提交将标记为已超时' })}
             ${UI.field('固定处理人 user_id', `<div class="tag-input" id="f-validation-userids"><input type="text" placeholder="输入 user_id 后回车" id="f-validation-userids-input" /></div>`, { optional: true, help: '可配置多个；保存时会自动收录尚未回车的内容' })}
             ${UI.field('数据集字段处理人', `<select class="select" id="f-validation-fields" multiple size="4"><option value="">请先选择数据集…</option></select>`, { optional: true, span2: true, help: '可多选；每行从所选字段读取 user_id' })}
           </div>
@@ -480,7 +483,7 @@ window.RulesModule = (function () {
           ${[['group', situationBroadcast, '异常情况播报'], ['timeout', timeoutBroadcast, '异常超时播报']].map(([context, config, title]) => `
             <section class="broadcast-kind-section" aria-label="${title}">
               <div class="validation-toggle-row">
-                <div><div class="cell-strong">${title}</div><div class="cell-muted">${context === 'group' ? '规则检测完成后播报异常情况；艾特目标可留空' : '实时校验超时后播报，自动艾特全部相关验证处理人'}</div></div>
+                <div><div class="cell-strong">${title}</div><div class="cell-muted">${context === 'group' ? '规则检测完成后播报异常情况；艾特目标可留空' : '异常超时后分次汇总播报，自动艾特相关验证处理人及额外配置目标'}</div></div>
                 <label class="switch"><input type="checkbox" id="f-${context}-broadcast-enabled" ${config.enabled ? 'checked' : ''} aria-label="启用${title}" /><span class="switch-slider"></span></label>
               </div>
               ${context === 'timeout' ? '<label class="timeout-validator-note"><input id="f-timeout-all-validators" type="checkbox" checked disabled />自动艾特全部验证处理人（不可关闭）</label>' : ''}
@@ -1299,7 +1302,16 @@ window.RulesModule = (function () {
         ...validationFields.map(field => ({ source: 'field', field })),
       ];
       const validationEnabled = m.dialog.querySelector('#f-validation-enabled').checked;
-      const validationTimeoutMinutes = Number(m.dialog.querySelector('#f-validation-timeout').value);
+      const units = ['days', 'hours', 'minutes', 'seconds'];
+      const values = units.map(unit => m.dialog.querySelector(`#f-deadline-${unit}`).value);
+      const numbers = values.map(Number);
+      const deadlineSeconds = numbers[0] * 86400 + numbers[1] * 3600 + numbers[2] * 60 + numbers[3];
+      const invalidUnit = numbers.findIndex((value, i) => !values[i].trim() || !Number.isInteger(value) || value < 0 || value > [30, 23, 59, 59][i]);
+      if (invalidUnit >= 0 || deadlineSeconds < 1 || deadlineSeconds > 2592000) {
+        revealField(`#f-deadline-${units[Math.max(0, invalidUnit)]}`);
+        UI.toast({ type: 'warning', title: '截止时间需填写整数，总时长为 1 秒至 30 天' });
+        return;
+      }
       const parseSqlOperand = raw => {
         const value = raw.trim();
         if (!value) return null;
@@ -1323,10 +1335,7 @@ window.RulesModule = (function () {
       const validationError = m.dialog.querySelector('#f-validation-target-error');
       let validationMessage = '';
       let validationControl = '#f-validation-sql';
-      if (!Number.isInteger(validationTimeoutMinutes) || validationTimeoutMinutes < 1 || validationTimeoutMinutes > 43200) {
-        validationMessage = '超时时间必须是 1–43200 之间的整数分钟';
-        validationControl = '#f-validation-timeout';
-      } else if (validationEnabled && !validationTargets.length) {
+      if (validationEnabled && !validationTargets.length) {
         validationMessage = '启用实时校验时，请至少配置一个验证目标';
         validationControl = '#f-validation-userids-input';
       } else if (validationMethod === 'sql') {
@@ -1380,8 +1389,7 @@ window.RulesModule = (function () {
       let groupBroadcastMessage = '';
       if ((groupBroadcastEnabled || timeoutBroadcastEnabled) && !groupWebhookUrl) {
         groupBroadcastMessage = '启用群聊播报时必须配置 webhook';
-      } else if (timeoutBroadcastEnabled && !validationEnabled) {
-        groupBroadcastMessage = '异常超时播报需要先启用实时校验';
+
       }
       groupBroadcastError.querySelector('span').textContent = groupBroadcastMessage;
       groupBroadcastError.style.display = groupBroadcastMessage ? 'flex' : 'none';
@@ -1404,7 +1412,7 @@ window.RulesModule = (function () {
         privateMessageTemplate: privateMessageTemplate || null,
         validationEnabled,
         validationTargets,
-        validationTimeoutMinutes,
+        deadlineSeconds,
         validationMethod,
         sqlValidationConfig,
         groupBroadcast: {

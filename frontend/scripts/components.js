@@ -457,8 +457,7 @@ window.UI = (function () {
 
   const severityBadge = (sev) => {
     const map = {
-      critical: { cls: 'danger',  label: '严重' },
-      high:     { cls: 'accent',  label: '高' },
+      high:     { cls: 'danger',  label: '高' },
       medium:   { cls: 'warning', label: '中' },
       low:      { cls: 'info',    label: '低' },
     };
@@ -467,11 +466,11 @@ window.UI = (function () {
   };
 
   const severityMeter = (sev) => {
-    const levels = { critical: 4, high: 3, medium: 2, low: 1 };
+    const levels = { high: 3, medium: 2, low: 1 };
     const lvl = levels[sev] || 2;
-    const cls = ['low', 'low', 'med', 'high', 'high'];
+    const cls = ['low', 'low', 'med', 'high'];
     let html = '<span class="severity-meter">';
-    for (let i = 1; i <= 4; i++) {
+    for (let i = 1; i <= 3; i++) {
       html += `<span class="seg ${i <= lvl ? 'on ' + cls[i] : ''}"></span>`;
     }
     html += '</span>';

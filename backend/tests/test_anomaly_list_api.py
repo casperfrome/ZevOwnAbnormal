@@ -13,7 +13,7 @@ from app.models import AnomalyRecord, NotificationDelivery
 
 def seed_anomalies(client: TestClient) -> None:
     base = datetime(2026, 8, 22, 8, 0, 0)
-    severities = ["low", "critical", "medium", "high"] * 3
+    severities = ["low", "high", "medium", "high"] * 3
     with client.app.state.session_factory() as session:
         for index, severity in enumerate(severities):
             rule_name = "Revenue check" if index == 0 else f"Rule {index:02d}"
@@ -62,7 +62,7 @@ def test_anomaly_sorting_is_global_before_pagination():
     assert first.status_code == 200
     assert second.status_code == 200
     severities = [item["severity"] for item in first.json()["items"] + second.json()["items"]]
-    rank = {"critical": 4, "high": 3, "medium": 2, "low": 1}
+    rank = { "high": 3, "medium": 2, "low": 1}
     assert [rank[item] for item in severities] == sorted((rank[item] for item in severities), reverse=True)
     assert first.json()["total"] == 12
 
@@ -191,5 +191,5 @@ def test_anomaly_export_uses_the_same_server_filters_and_global_sort_as_the_list
 
     assert response.status_code == 200
     rows = list(csv.DictReader(io.StringIO(response.text)))
-    assert [row["id"] for row in rows] == ["record-11", "record-07"]
+    assert [row["id"] for row in rows] == ["record-11", "record-09", "record-07", "record-05", "record-01"]
     assert all(row["status"] == "pending" and row["severity"] == "high" for row in rows)

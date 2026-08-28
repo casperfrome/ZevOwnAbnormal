@@ -53,6 +53,49 @@ async function openTabbedRule(t, { editing = true, viewport = { width: 1280, hei
   return page;
 }
 
+test('basic deadline uses seconds independently from severity and validation', async t => {
+  const page = await openTabbedRule(t, { rulePatch: { deadlineSeconds: 93784 } });
+  assert.deepEqual(await page.locator('#f-severity option').allTextContents(), ['低', '中', '高']);
+  for (const [unit, value] of [['days', '1'], ['hours', '2'], ['minutes', '3'], ['seconds', '4']]) {
+    assert.equal(await page.locator(`#f-deadline-${unit}`).inputValue(), value);
+  }
+  await page.selectOption('#f-severity', 'low');
+  await page.getByRole('tab', { name: '实时校验', exact: true }).click();
+  assert.equal(await page.locator('#f-validation-timeout').count(), 0);
+  await page.getByRole('tab', { name: '基本信息', exact: true }).click();
+  assert.equal(await page.locator('#f-deadline-seconds').inputValue(), '4');
+  assert.equal((await page.locator('#f-deadline-days').boundingBox()).y,
+    (await page.locator('#f-deadline-seconds').boundingBox()).y);
+  await page.click('#f-save');
+  assert.equal(await page.evaluate(() => window.savedRule.deadlineSeconds), 93784);
+  assert.equal(await page.evaluate(() => window.savedRule.validationEnabled), false);
+});
+
+test('deadline rejects invalid components and focuses basic information', async t => {
+  const page = await openTabbedRule(t);
+  for (const values of [['0','0','0','0'], ['31','0','0','0'], ['1','24','0','0'],
+    ['1','0','60','0'], ['1','0','0','60'], ['-1','0','0','0'], ['1.5','0','0','0'], ['', '0','0','0']]) {
+    await page.evaluate(values => ['days','hours','minutes','seconds'].forEach((unit, i) => {
+      document.querySelector(`#f-deadline-${unit}`).value = values[i];
+    }), values);
+    await page.getByRole('tab', { name: '调度规则', exact: true }).click();
+    await page.click('#f-save');
+    assert.equal(await page.evaluate(() => window.savedRule), null);
+    assert.equal(await page.getByRole('tab', { selected: true }).textContent(), '基本信息');
+    assert.match(await page.evaluate(() => document.activeElement.id), /^f-deadline-/);
+  }
+});
+
+test('deadline accepts one second and exactly thirty days', async t => {
+  for (const [seconds, expectedDays, expectedSeconds] of [[1, '0', '1'], [2592000, '30', '0']]) {
+    const page = await openTabbedRule(t, { rulePatch: { deadlineSeconds: seconds } });
+    assert.equal(await page.locator('#f-deadline-days').inputValue(), expectedDays);
+    assert.equal(await page.locator('#f-deadline-seconds').inputValue(), expectedSeconds);
+    await page.click('#f-save');
+    assert.equal(await page.evaluate(() => window.savedRule.deadlineSeconds), seconds);
+  }
+});
+
 test('rule tabs isolate sections and preserve drafts for both create and edit', async t => {
   for (const editing of [false, true]) {
     const page = await openTabbedRule(t, { editing });
@@ -159,7 +202,7 @@ test('saving opens the hidden tab containing an error and focuses its input', as
     ['异常条件', '.condition-row [data-c="field"]', '', 'amount'],
     ['私聊通知', '#f-private-message-template', '[不安全](http://example.com)', ''],
     ['群聊播报', '#f-group-message-template', '{不存在}', ''],
-    ['实时校验', '#f-validation-timeout', '0', '30'],
+    ['基本信息', '#f-deadline-days', '31', '1'],
   ];
   for (const [name, selector, invalid, valid] of cases) {
     await page.getByRole('tab', { name, exact: true }).click();
@@ -879,7 +922,7 @@ test('SQL result field operands persist and hide for null operators without losi
   assert.equal(condition.upperValueField, 'high');
 });
 
-test('group broadcasts save independently with optional situation mentions and mandatory timeout validators', async t => {
+test('group broadcasts save independently without requiring validation', async t => {
   const page = await openTabbedRule(t);
   await page.getByRole('tab', { name: '群聊播报' }).click();
   assert.equal(await page.getByText('异常情况播报', { exact: true }).count(), 1);
@@ -891,12 +934,7 @@ test('group broadcasts save independently with optional situation mentions and m
   assert.equal(await page.locator('#f-timeout-all-validators').isChecked(), true);
   assert.equal(await page.locator('#f-timeout-all-validators').isDisabled(), true);
   await page.click('#f-save');
-  assert.equal(await page.evaluate(() => window.savedRule), null);
-  assert.match(await page.locator('#f-group-broadcast-error').textContent(), /实时校验/);
-  await page.getByRole('tab', { name: '实时校验' }).click();
-  await page.locator('label').filter({ has: page.locator('#f-validation-enabled') }).click();
-  await page.fill('#f-validation-userids-input', 'validator');
-  await page.click('#f-save');
+  assert.equal(await page.evaluate(() => window.savedRule.validationEnabled), false);
   assert.deepEqual(await page.evaluate(() => window.savedRule.groupBroadcast), {
     webhookUrl: 'https://open.feishu.cn/open-apis/bot/v2/hook/example',
     situation: { enabled: true, mentionTargets: [], messageTemplate: null },

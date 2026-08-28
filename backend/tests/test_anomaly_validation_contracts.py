@@ -17,6 +17,17 @@ from app.models import (
 from app.schemas import FeishuCardActionCallback, RuleValidationConfig, ValidationTarget
 
 
+def test_deadline_seconds_preserves_precision_and_legacy_minutes():
+    assert RuleValidationConfig().deadline_seconds == 86400
+    assert RuleValidationConfig(validation_timeout_minutes=31).deadline_seconds == 1860
+    assert RuleValidationConfig(deadline_seconds=93784, validation_timeout_minutes=1).deadline_seconds == 93784
+    for invalid in (0, -1, 2592001, 1.5, True, "1"):
+        with pytest.raises(ValidationError):
+            RuleValidationConfig(deadline_seconds=invalid)
+    assert RuleValidationConfig(deadline_seconds=1).deadline_seconds == 1
+    assert RuleValidationConfig(deadline_seconds=2592000).deadline_seconds == 2592000
+
+
 def test_broadcast_config_splits_modes_and_keeps_legacy_situation_inputs():
     from app.schemas import GroupBroadcastConfig
     nested = GroupBroadcastConfig(situation={"enabled": True}, timeout={"enabled": True,
@@ -110,7 +121,7 @@ def test_validation_models_persist_defaults_and_enforce_first_submission():
 def test_validation_schema_requires_complete_enabled_target_configuration():
     """Missing configured targets, literal values, or field names must be rejected."""
     assert RuleValidationConfig(validation_enabled=False).model_dump() == {
-        "validation_enabled": False, "validation_targets": [], "validation_timeout_minutes": 1440,
+        "validation_enabled": False, "validation_targets": [], "deadline_seconds": 86400,
         "validation_method": "pseudo", "sql_validation_config": None,
     }
     assert RuleValidationConfig(
@@ -190,7 +201,7 @@ def test_rule_and_anomaly_serializers_keep_existing_fields_and_add_validation_fi
     try:
         rule.validation_enabled = True
         rule.validation_targets = [{"source": "literal", "value": "user-1"}]
-        rule.validation_timeout_minutes = 30
+        rule.deadline_seconds = 1800
         rule.validation_method = "sql"
         rule.sql_validation_config = {
             "query_template": "SELECT status FROM t WHERE id='{目标ID}'",
@@ -210,7 +221,7 @@ def test_rule_and_anomaly_serializers_keep_existing_fields_and_add_validation_fi
         assert rule_body["notification_targets"] == []
         assert rule_body["validation_enabled"] is True
         assert rule_body["validation_targets"] == [{"source": "literal", "value": "user-1"}]
-        assert rule_body["validation_timeout_minutes"] == 30
+        assert rule_body["deadline_seconds"] == 1800
         assert rule_body["validation_method"] == "sql"
         assert rule_body["sql_validation_config"]["parameters"][0]["field"] == "store_id"
 

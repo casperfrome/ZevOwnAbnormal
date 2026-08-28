@@ -12,6 +12,26 @@ from app.main import create_app
 from app.models import AnomalyPushJob, AnomalyRecord, AnomalyValidationRequest
 
 
+def test_deadline_scan_expires_without_running_network_maintenance(monkeypatch):
+    from app.main import run_deadline_scan_cycle
+    engine, factory = make_session_factory("sqlite+pysqlite:///:memory:", testing=True)
+    Base.metadata.create_all(engine)
+    with factory() as session:
+        anomaly = AnomalyRecord(rule_id="rule", rule_name="rule", dataset_name="data", severity="high",
+            fingerprint="f" * 64, status="pending", business_key={}, row_details={}, matched_conditions=[],
+            validation_deadline=datetime(2020, 1, 1))
+        session.add(anomaly)
+        session.commit()
+        anomaly_id = anomaly.id
+    def unexpected(*args, **kwargs):
+        raise AssertionError("deadline scan must not perform network requests")
+    monkeypatch.setattr("app.main.reconcile_validation_cards", unexpected)
+    run_deadline_scan_cycle(factory, Settings(_env_file=None))
+    with factory() as session:
+        assert session.get(AnomalyRecord, anomaly_id).status == "timed_out"
+    engine.dispose()
+
+
 def test_maintenance_cycle_uses_a_fresh_closed_session_and_runs_domain_operations(monkeypatch):
     from app.main import run_validation_maintenance_cycle
 
@@ -55,13 +75,9 @@ def test_maintenance_cycle_uses_a_fresh_closed_session_and_runs_domain_operation
     assert sessions[0] is not sessions[1]
     assert events == [
         ("open", sessions[0]),
-        ("timeout_broadcast", sessions[0], {"limit": 50, "should_stop": None}),
-        ("expire", sessions[0], {"limit": 50, "should_stop": None}),
         ("queue", sessions[0], {"limit": 50}),
         ("reconcile", sessions[0], {"limit": 50, "should_stop": None}), ("close", sessions[0]),
         ("open", sessions[1]),
-        ("timeout_broadcast", sessions[1], {"limit": 50, "should_stop": None}),
-        ("expire", sessions[1], {"limit": 50, "should_stop": None}),
         ("queue", sessions[1], {"limit": 50}),
         ("reconcile", sessions[1], {"limit": 50, "should_stop": None}), ("close", sessions[1]),
     ]
@@ -170,7 +186,7 @@ def test_validation_runtime_settings_have_safe_local_defaults():
 
     assert settings.sentinel_public_base_url == "http://localhost:8000"
     assert settings.sentinel_api_base_url == "http://127.0.0.1:8000"
-    assert settings.validation_timeout_scan_interval_seconds == 60
+    assert settings.validation_timeout_scan_interval_seconds == 1
     assert settings.validation_maintenance_batch_size == 50
     assert settings.feishu_http_timeout_seconds == 10
     assert settings.kafka_bootstrap_servers == "localhost:9092"

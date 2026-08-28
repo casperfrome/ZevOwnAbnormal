@@ -37,7 +37,7 @@ async function mountApp(t, scenario = {}, initialHash = '') {
   await page.evaluate(testScenario => {
     const record = {
       id: 'record-1', ruleId: 'rule-1', ruleName: '门店 GMV 异常', datasetName: '门店日经营',
-      severity: 'critical', status: 'pending', occurredAt: '2026-08-22 10:00', field: 'gmv', value: 999,
+      severity: 'high', status: 'pending', occurredAt: '2026-08-22 10:00', field: 'gmv', value: 999,
     };
     let initCalls = 0;
     window.searchRecordQueries = [];

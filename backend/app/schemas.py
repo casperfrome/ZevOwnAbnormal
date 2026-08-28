@@ -241,11 +241,26 @@ class SqlValidationConfig(BaseModel):
 
 
 class RuleValidationConfig(BaseModel):
+    deadline_seconds: int = Field(default=86400, ge=1, le=2592000, strict=True)
     validation_enabled: bool = False
     validation_targets: list[ValidationTarget] = Field(default_factory=list)
-    validation_timeout_minutes: int = Field(default=1440, ge=1, le=43200)
+    validation_timeout_minutes: int = Field(default=1440, ge=1, le=43200, exclude=True)
     validation_method: Literal["pseudo", "sql"] = "pseudo"
     sql_validation_config: SqlValidationConfig | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_legacy_deadline(cls, value):
+        if isinstance(value, dict) and "deadline_seconds" not in value and "validation_timeout_minutes" in value:
+            value = dict(value)
+            minutes = value["validation_timeout_minutes"]
+            if isinstance(minutes, bool) or not isinstance(minutes, int) or not 1 <= minutes <= 43200:
+                raise ValueError("超时时间必须是 1–43200 之间的整数分钟")
+            value["deadline_seconds"] = minutes * 60
+        elif isinstance(value, dict) and "deadline_seconds" in value:
+            value = dict(value)
+            value.pop("validation_timeout_minutes", None)
+        return value
 
     @model_validator(mode="after")
     def validate_enabled_targets(self):
@@ -305,7 +320,7 @@ class RuleCreate(RuleValidationConfig):
     name: str
     description: str = ""
     dataset_id: str
-    severity: Literal["critical", "high", "medium", "low"] = "medium"
+    severity: Literal["high", "medium", "low"] = "medium"
     logic: Literal["AND", "OR"] = "AND"
     conditions: list[Condition] = Field(min_length=1)
     anomaly_key_fields: list[str] = Field(min_length=1)

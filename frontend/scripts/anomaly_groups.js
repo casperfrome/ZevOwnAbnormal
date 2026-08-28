@@ -7,7 +7,8 @@ window.AnomalyGroupsModule = (function () {
 
   const broadcastLabels = {
     disabled: ['neutral', '未启用'],
-    waiting: ['neutral', '等待超时'],
+    waiting: ['neutral', '等待到期'],
+    waiting_delivery: ['neutral', '等待推送成功'],
     skipped: ['neutral', '已跳过'],
     pending: ['warning', '待发送'],
     in_transit: ['info', '发送中'],
@@ -21,6 +22,14 @@ window.AnomalyGroupsModule = (function () {
   function broadcastBadge(status) {
     const [cls, label] = broadcastLabels[status] || broadcastLabels.disabled;
     return `<span class="badge ${cls}">${escapeHtml(label)}</span>`;
+  }
+
+  function timeoutSummary(group) {
+    const unsent = group.timeoutWaitingDeliveryCount || 0;
+    const waiting = (group.timeoutWaitingCount || 0) - unsent;
+    return broadcastBadge(group.timeoutBroadcastStatus) +
+      (unsent ? `<div class="cell-muted">${unsent} 条等待推送成功</div>` : '') +
+      (waiting ? `<div class="cell-muted">${waiting} 条等待到期播报</div>` : '');
   }
 
   function statusSummary(counts = {}) {
@@ -58,7 +67,7 @@ window.AnomalyGroupsModule = (function () {
                 <td><span class="text-mono">${group.scannedRows} / ${group.matchedRows} / ${group.newAnomalies}</span></td>
                 <td><div class="group-status-summary">${statusSummary(group.statusCounts)}</div></td>
                 <td>${broadcastBadge(group.situationBroadcastStatus || group.broadcastStatus)}</td>
-                <td>${broadcastBadge(group.timeoutBroadcastStatus)}</td>
+                <td>${timeoutSummary(group)}</td>
               </tr>
             `).join('')}</tbody>
           </table>
@@ -105,14 +114,14 @@ window.AnomalyGroupsModule = (function () {
           <div class="detail-label">扫描 / 命中 / 新增</div><div class="detail-value text-mono">${group.scannedRows} / ${group.matchedRows} / ${group.newAnomalies}</div>
           <div class="detail-label">处理状态</div><div class="detail-value"><div class="group-status-summary">${statusSummary(group.statusCounts)}</div></div>
           <div class="detail-label">异常情况播报</div><div class="detail-value">${broadcastBadge(group.situationBroadcastStatus || group.broadcastStatus)}</div>
-          <div class="detail-label">异常超时播报</div><div class="detail-value">${broadcastBadge(group.timeoutBroadcastStatus)}</div>
+          <div class="detail-label">异常超时播报</div><div class="detail-value">${timeoutSummary(group)}</div>
         </div>
         ${(result.deliveries || []).length ? `
           <div class="results-wrap" style="margin-top:var(--space-4);">
             <table class="results-table" data-table-id="anomaly-group-deliveries">
               <thead><tr><th>播报类型</th><th>状态</th><th>尝试次数</th><th>错误 / message_id</th></tr></thead>
               <tbody>${result.deliveries.map(item => `<tr>
-                <td>${item.broadcast_kind === 'timeout' ? '异常超时播报' : '异常情况播报'}</td>
+                <td>${item.broadcast_kind === 'timeout' ? `异常超时播报 · 第 ${item.round_index || 1} 轮` : '异常情况播报'}</td>
                 <td>${broadcastBadge(item.status)}</td><td>${Number(item.attempts || 0)}</td>
                 <td>${escapeHtml(item.last_error || item.message_id || '—')}</td>
               </tr>`).join('')}</tbody>

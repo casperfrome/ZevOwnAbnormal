@@ -178,7 +178,7 @@ test('validation rule fields and anomaly audit details map between API and UI co
     '/api/v1/overview': {
       stats: {
         pending_records: 2, processing_records: 3, timed_out_records: 4, resolved_records: 5,
-        critical_anomalies: 1, active_rules: 1, total_rules: 1, online_datasources: 0,
+        high_anomalies: 1, active_rules: 1, total_rules: 1, online_datasources: 0,
         total_datasources: 0, total_datasets: 1, push_in_transit_anomalies: 6,
       }, recent_anomalies: [], top_rules: [],
     },
@@ -215,7 +215,7 @@ test('validation rule fields and anomaly audit details map between API and UI co
             id: 'rule-2', name: body.name, description: body.description,
             validation_enabled: body.validation_enabled,
             validation_targets: body.validation_targets,
-            validation_timeout_minutes: body.validation_timeout_minutes,
+            deadline_seconds: body.deadline_seconds,
             validation_method: body.validation_method,
             sql_validation_config: body.sql_validation_config,
             private_message_template: body.private_message_template,
@@ -234,7 +234,7 @@ test('validation rule fields and anomaly audit details map between API and UI co
 
   const rule = store.getRule('rule-1');
   assert.equal(rule.validationEnabled, true);
-  assert.equal(rule.validationTimeoutMinutes, 30);
+  assert.equal(rule.deadlineSeconds, 1800);
   assert.equal(rule.validationMethod, 'sql');
   assert.equal(rule.sqlValidationConfig.queryTemplate, "SELECT status FROM repair_state WHERE owner_id='{目标ID}'");
   assert.deepEqual(JSON.parse(JSON.stringify(rule.validationTargets)), [
@@ -297,7 +297,7 @@ test('validation rule fields and anomaly audit details map between API and UI co
   const createRequest = requests.find(item => item.url === '/api/v1/rules' && item.options.method === 'POST');
   const body = JSON.parse(createRequest.options.body);
   assert.equal(body.validation_enabled, false);
-  assert.equal(body.validation_timeout_minutes, 43200);
+  assert.equal(body.deadline_seconds, 2592000);
   assert.equal(body.validation_method, 'sql');
   assert.deepEqual(body.sql_validation_config, {
     query_template: "SELECT status FROM repair_state WHERE owner_id='{目标ID}'",
@@ -379,7 +379,7 @@ test('updating one record refreshes authoritative overview counts immediately', 
   const overview = () => ({
     stats: {
       pending_records: 0, processing_records: 0, timed_out_records: resolved ? 0 : 1,
-      resolved_records: resolved ? 1 : 0, critical_anomalies: 0, active_rules: 0,
+      resolved_records: resolved ? 1 : 0, high_anomalies: 0, active_rules: 0,
       total_rules: 0, online_datasources: 0, total_datasources: 0, total_datasets: 0,
     }, recent_anomalies: [], top_rules: [],
   });
@@ -416,7 +416,7 @@ test('a successful record mutation remains successful when the overview refresh 
   let overviewRequests = 0;
   const apiRecord = status => ({
     id: 'record-1', rule_id: 'rule-1', rule_name: 'GMV check', dataset_name: 'Orders',
-    severity: 'critical', status, business_key: {}, row_details: { gmv: 999 },
+    severity: 'high', status, business_key: {}, row_details: { gmv: 999 },
     matched_conditions: [{ field: 'gmv', operator: 'gt', actual: 999 }], hit_count: 1,
     first_seen_at: '2026-08-22T09:00:00', last_seen_at: '2026-08-22T09:10:00',
     resolved_at: status === 'resolved' ? '2026-08-22T09:20:00' : null, assignee: null,
@@ -438,7 +438,7 @@ test('a successful record mutation remains successful when the overview refresh 
         body = {
           stats: {
             pending_records: 0, processing_records: 0, timed_out_records: 1,
-            resolved_records: 0, critical_anomalies: 1, active_rules: 0,
+            resolved_records: 0, high_anomalies: 1, active_rules: 0,
             total_rules: 0, online_datasources: 0, total_datasources: 0, total_datasets: 0,
           }, recent_anomalies: [], top_rules: [],
         };
@@ -456,7 +456,7 @@ test('a successful record mutation remains successful when the overview refresh 
   assert.equal(store.getRecord('record-1').status, 'resolved');
   assert.equal(store.getStats().timedOutRecords, 0);
   assert.equal(store.getStats().resolvedToday, 1);
-  assert.equal(store.getStats().criticalAnomalies, 0);
+  assert.equal(store.getStats().highAnomalies, 0);
   assert.equal(store.getStats().unresolvedRecords, 0);
 });
 

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import select, func, update, text
 from sqlalchemy.orm import Session
 
 from .config import Settings
@@ -179,7 +179,7 @@ def create_anomaly_group(
     new_ids = set(new_record_ids)
     new_records = [record for record in unique_records if record.id in new_ids]
     fields = {str(field["name"]) for field in (rule.dataset.fields or []) if field.get("name") is not None}
-    timeout_enabled = bool(rule.validation_enabled and rule.timeout_broadcast_enabled)
+    timeout_enabled = bool(rule.timeout_broadcast_enabled)
     deadlines = [record.validation_deadline for record in new_records if record.validation_deadline is not None]
     group = AnomalyRecordGroup(
         rule_id=rule.id,
@@ -221,7 +221,7 @@ def create_anomaly_group(
     return group
 
 
-def _queue_group_messages(session, settings, group, records, mentions, webhook, template, fields, kind):
+def _queue_group_messages(session, settings, group, records, mentions, webhook, template, fields, kind, round_index=0):
     pipeline = session.scalar(
         select(AnomalyPushPipelineState)
         .where(AnomalyPushPipelineState.id == 1)
@@ -245,6 +245,7 @@ def _queue_group_messages(session, settings, group, records, mentions, webhook, 
             detected_at=group.detected_at,
             part_index=part_index,
             broadcast_kind=kind,
+            round_index=round_index,
             total_parts=len(messages),
             webhook_url=webhook,
             payload=payload,
@@ -261,21 +262,32 @@ def _queue_group_messages(session, settings, group, records, mentions, webhook, 
 
 def queue_due_timeout_broadcasts(session: Session, settings: Settings, *, now: datetime | None = None,
                                limit: int = 50, should_stop=None) -> int:
-    """Materialize each original cohort once, including all members atomically.
+    """Materialize newly due members once, with independent delivery rounds.
 
     The limit bounds groups, never members. The pipeline singleton is locked
     before groups/records, matching detection and administrative cancellation.
     """
     scan_time = now or utcnow()
-    keys = list(session.execute(select(AnomalyRecordGroup.rule_id, AnomalyRecordGroup.detected_at).where(
-        AnomalyRecordGroup.timeout_deadline <= scan_time,
-        AnomalyRecordGroup.timeout_processed_at.is_(None),
-    ).order_by(AnomalyRecordGroup.timeout_deadline, AnomalyRecordGroup.run_id).limit(limit)))
+    keys = list(session.execute(select(AnomalyRecordGroup.rule_id, AnomalyRecordGroup.detected_at)
+        .join(AnomalyRecordGroupMember).join(AnomalyRecord,
+            AnomalyRecord.id == AnomalyRecordGroupMember.anomaly_id).where(
+            AnomalyRecordGroup.timeout_processed_at.is_(None),
+            AnomalyRecordGroupMember.is_new.is_(True),
+            AnomalyRecordGroupMember.timeout_notified_at.is_(None),
+            AnomalyRecord.validation_deadline <= scan_time,
+            AnomalyRecord.status.in_(["pending", "processing", "timed_out"]),
+        ).group_by(AnomalyRecordGroup.rule_id, AnomalyRecordGroup.detected_at)
+        .order_by(func.min(AnomalyRecord.validation_deadline), AnomalyRecordGroup.rule_id,
+                  AnomalyRecordGroup.detected_at).limit(limit)))
     session.commit()
     queued = 0
     for rule_id, detected_at in keys:
         if should_stop is not None and should_stop():
             break
+        if session.get_bind().dialect.name == "sqlite":
+            # SQLite ignores FOR UPDATE. Reserve the writer before reading
+            # the cohort so concurrent processes cannot materialize it twice.
+            session.execute(text("BEGIN IMMEDIATE"))
         pipeline = session.scalar(select(AnomalyPushPipelineState).where(
             AnomalyPushPipelineState.id == 1).execution_options(populate_existing=True).with_for_update())
         if pipeline is not None and pipeline.abort_in_progress:
@@ -294,6 +306,7 @@ def queue_due_timeout_broadcasts(session: Session, settings: Settings, *, now: d
             AnomalyRecordGroupMember.rule_id == rule_id,
             AnomalyRecordGroupMember.detected_at == detected_at,
             AnomalyRecordGroupMember.is_new.is_(True),
+            AnomalyRecordGroupMember.timeout_notified_at.is_(None),
             AnomalyRecord.validation_deadline <= scan_time,
             AnomalyRecord.status.in_(["pending", "processing", "timed_out"]),
         ).order_by(AnomalyRecordGroupMember.position).execution_options(populate_existing=True).with_for_update()))
@@ -302,7 +315,7 @@ def queue_due_timeout_broadcasts(session: Session, settings: Settings, *, now: d
                 record.status = "timed_out"
                 record.timed_out_at = scan_time
                 session.add(AnomalyEvent(anomaly_id=record.id, event_type="validation_timed_out",
-                    description="实时验证已超过截止时间，仍可补充提交", created_at=scan_time))
+                    description="异常已超过截止时间，仍可继续处理", created_at=scan_time))
         if records and snapshot.get("enabled") and snapshot.get("webhook_url"):
             handlers = list(session.scalars(select(AnomalyValidationRequest.recipient_user_id).where(
                 AnomalyValidationRequest.anomaly_id.in_([record.id for record in records]),
@@ -311,10 +324,28 @@ def queue_due_timeout_broadcasts(session: Session, settings: Settings, *, now: d
                 SimpleNamespace(row=record.row_details) for record in records
             ])
             mentions = list(dict.fromkeys([*handlers, *extras]))
+            round_index = 1 + (session.scalar(select(func.max(AnomalyGroupBroadcastDelivery.round_index)).where(
+                AnomalyGroupBroadcastDelivery.rule_id == rule_id,
+                AnomalyGroupBroadcastDelivery.detected_at == detected_at,
+                AnomalyGroupBroadcastDelivery.broadcast_kind == "timeout")) or 0)
             _queue_group_messages(session, settings, group, records, mentions, snapshot["webhook_url"],
-                                  snapshot.get("message_template"), set(snapshot.get("field_names", [])), "timeout")
+                                  snapshot.get("message_template"), set(snapshot.get("field_names", [])),
+                                  "timeout", round_index)
+            session.execute(update(AnomalyRecordGroupMember).where(
+                AnomalyRecordGroupMember.rule_id == rule_id,
+                AnomalyRecordGroupMember.detected_at == detected_at,
+                AnomalyRecordGroupMember.anomaly_id.in_([record.id for record in records]),
+            ).values(timeout_notified_at=scan_time))
             queued += 1
-        group.timeout_processed_at = scan_time
+        remaining = session.scalar(select(func.count()).select_from(AnomalyRecordGroupMember).join(
+            AnomalyRecord, AnomalyRecord.id == AnomalyRecordGroupMember.anomaly_id).where(
+            AnomalyRecordGroupMember.rule_id == rule_id,
+            AnomalyRecordGroupMember.detected_at == detected_at,
+            AnomalyRecordGroupMember.is_new.is_(True),
+            AnomalyRecordGroupMember.timeout_notified_at.is_(None),
+            AnomalyRecord.status != "resolved"))
+        if not remaining or not snapshot.get("enabled"):
+            group.timeout_processed_at = scan_time
         session.commit()
     return queued
 

@@ -97,7 +97,7 @@ window.Store = (function () {
     privateMessageTemplate: r.private_message_template || '',
     validationEnabled: !!r.validation_enabled,
     validationTargets: r.validation_targets || [],
-    validationTimeoutMinutes: r.validation_timeout_minutes ?? 1440,
+    deadlineSeconds: r.deadline_seconds ?? (r.validation_timeout_minutes ?? 1440) * 60,
     validationMethod: r.validation_method || 'pseudo',
     sqlValidationConfig: mapSqlValidationConfig(r.sql_validation_config),
     groupBroadcast: {
@@ -152,6 +152,7 @@ window.Store = (function () {
       matchedConditions: r.matched_conditions || [], hitCount: r.hit_count || 1,
       deliveryStatus: r.delivery_status, assignee: r.assignee,
       description: r.description || '', validationDeadline: r.validation_deadline || null,
+      deadlineSecondsSnapshot: r.deadline_seconds_snapshot ?? null, firstDeliveredAt: r.first_delivered_at || null,
       timedOutAt: r.timed_out_at || null, resolvedAt: r.resolved_at || null,
       resolutionSource: r.resolution_source || null, resolvedByUserId: r.resolved_by_user_id || null,
       validationMethod: r.validation_method || null,
@@ -183,6 +184,8 @@ window.Store = (function () {
     broadcastStatus: item.broadcast_status || 'disabled',
     situationBroadcastStatus: item.situation_broadcast_status || item.broadcast_status || 'disabled',
     timeoutBroadcastStatus: item.timeout_broadcast_status || 'disabled',
+    timeoutWaitingCount: item.timeout_waiting_count || 0,
+    timeoutWaitingDeliveryCount: item.timeout_waiting_delivery_count || 0,
   });
 
   function anomalyQuery(filters = {}, includePagination = false) {
@@ -286,8 +289,8 @@ window.Store = (function () {
     if (nextKey && Number.isFinite(stats[nextKey])) stats[nextKey] += 1;
     const wasUnresolved = previous.status !== 'resolved';
     const isUnresolved = next.status !== 'resolved';
-    if (next.severity === 'critical' && wasUnresolved !== isUnresolved && Number.isFinite(stats.critical_anomalies)) {
-      stats.critical_anomalies = Math.max(0, stats.critical_anomalies + (isUnresolved ? 1 : -1));
+    if (next.severity === 'high' && wasUnresolved !== isUnresolved && Number.isFinite(stats.high_anomalies)) {
+      stats.high_anomalies = Math.max(0, stats.high_anomalies + (isUnresolved ? 1 : -1));
     }
   }
 
@@ -349,7 +352,7 @@ window.Store = (function () {
       private_message_template: data.privateMessageTemplate?.trim() || null,
       validation_enabled: !!data.validationEnabled,
       validation_targets: data.validationTargets || [],
-      validation_timeout_minutes: Number(data.validationTimeoutMinutes ?? 1440),
+      deadline_seconds: Number(data.deadlineSeconds ?? (data.validationTimeoutMinutes ?? 1440) * 60),
       validation_method: data.validationMethod || 'pseudo',
       sql_validation_config: data.validationMethod === 'sql' && data.sqlValidationConfig ? {
         query_template: data.sqlValidationConfig.queryTemplate,
@@ -439,7 +442,7 @@ window.Store = (function () {
         totalDatasources: server.total_datasources ?? state.datasources.length,
         totalDatasets: server.total_datasets ?? state.datasets.length,
         pushInTransitAnomalies: server.push_in_transit_anomalies ?? 0,
-        criticalAnomalies: server.critical_anomalies ?? state.records.filter(r => r.severity === 'critical' && r.status !== 'resolved').length,
+        highAnomalies: server.high_anomalies ?? state.records.filter(r => r.severity === 'high' && r.status !== 'resolved').length,
         resolvedToday: server.resolved_records ?? state.records.filter(r => r.status === 'resolved').length,
       };
     },

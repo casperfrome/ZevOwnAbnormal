@@ -8,7 +8,7 @@ window.RecordsModule = (function () {
     search: '', statusFilter: 'all', pushStatusFilter: 'all', severityFilter: 'all', ruleFilter: 'all',
     sortKey: 'occurredAt', sortDir: 'desc', page: 1, pageSize: 10,
     selected: new Set(), requestSequence: 0, searchTimer: null, total: 0,
-    criticalTotal: null, criticalCountSequence: 0, criticalCountFailed: false,
+    highTotal: null, highCountSequence: 0, highCountFailed: false,
   };
 
   function renderActions(actionsEl) {
@@ -141,7 +141,7 @@ window.RecordsModule = (function () {
       processingRecords: records.filter(r => r.status === 'processing').length,
       timedOutRecords: records.filter(r => r.status === 'timed_out').length,
       resolvedToday: records.filter(r => r.status === 'resolved').length,
-      criticalAnomalies: records.filter(r => r.severity === 'critical' && r.status !== 'resolved').length,
+      highAnomalies: records.filter(r => r.severity === 'high' && r.status !== 'resolved').length,
     };
     const overview = typeof Store.getStats === 'function' ? Store.getStats() : {};
     return {
@@ -149,13 +149,13 @@ window.RecordsModule = (function () {
       ...overview,
       // The overview metric is unresolved-only. Without a server count, keep the
       // severity card aligned with its all-status list by deriving from local data.
-      criticalAnomalies: typeof Store.peekRecordsPage === 'function'
-        ? overview.criticalAnomalies
-        : derived.criticalAnomalies,
+      highAnomalies: typeof Store.peekRecordsPage === 'function'
+        ? overview.highAnomalies
+        : derived.highAnomalies,
     };
   }
 
-  function renderStats({ refreshCritical = true } = {}) {
+  function renderStats({ refreshHigh = true } = {}) {
     const statsEl = document.getElementById('rec-stats');
     if (!statsEl) return;
     const counts = recordCounts();
@@ -164,13 +164,13 @@ window.RecordsModule = (function () {
     const timedOut = counts.timedOutRecords;
     const resolved = counts.resolvedToday;
     const inTransit = counts.pushInTransitAnomalies ?? 0;
-    const hasCriticalCountApi = typeof Store.peekRecordsPage === 'function';
-    const critical = hasCriticalCountApi ? state.criticalTotal : counts.criticalAnomalies;
-    const criticalKnown = Number.isFinite(critical);
-    const criticalLabel = criticalKnown ? critical : '—';
-    const criticalAria = criticalKnown
-      ? `筛选严重异常，共 ${critical} 条`
-      : (state.criticalCountFailed ? '筛选严重异常，数量暂不可用' : '筛选严重异常，正在统计数量');
+    const hasHighCountApi = typeof Store.peekRecordsPage === 'function';
+    const high = hasHighCountApi ? state.highTotal : counts.highAnomalies;
+    const highKnown = Number.isFinite(high);
+    const highLabel = highKnown ? high : '—';
+    const highAria = highKnown
+      ? `筛选高严重程度异常，共 ${high} 条`
+      : (state.highCountFailed ? '筛选高严重程度异常，数量暂不可用' : '筛选高严重程度异常，正在统计数量');
 
     statsEl.classList.remove('five-up');
     statsEl.classList.add('six-up');
@@ -195,10 +195,10 @@ window.RecordsModule = (function () {
         <div class="stat-card-value">${resolved}</div>
         <div class="stat-card-delta up">已闭环</div>
       </button>
-      <button type="button" class="stat-card stat-filter animate-rise" data-filter-severity="critical" aria-label="${criticalAria}" aria-pressed="false" style="animation-delay:270ms;${criticalKnown && critical > 0 ? 'border-left:3px solid var(--color-danger);' : ''}">
-        <div class="stat-card-header"><span class="stat-card-label">严重异常</span><div class="stat-card-icon" style="background:var(--color-danger-soft);color:var(--color-danger);">${Icon.bug({ size: 16 })}</div></div>
-        <div class="stat-card-value">${criticalLabel}</div>
-        <div class="stat-card-delta ${criticalKnown && critical > 0 ? 'down' : 'neutral'}">${criticalKnown ? (critical > 0 ? '需紧急响应' : '无严重') : (state.criticalCountFailed ? '统计暂不可用' : '正在统计')}</div>
+      <button type="button" class="stat-card stat-filter animate-rise" data-filter-severity="high" aria-label="${highAria}" aria-pressed="false" style="animation-delay:270ms;${highKnown && high > 0 ? 'border-left:3px solid var(--color-danger);' : ''}">
+        <div class="stat-card-header"><span class="stat-card-label">高严重程度异常</span><div class="stat-card-icon" style="background:var(--color-danger-soft);color:var(--color-danger);">${Icon.bug({ size: 16 })}</div></div>
+        <div class="stat-card-value">${highLabel}</div>
+        <div class="stat-card-delta ${highKnown && high > 0 ? 'down' : 'neutral'}">${highKnown ? (high > 0 ? '需重点关注' : '无高严重程度异常') : (state.highCountFailed ? '统计暂不可用' : '正在统计')}</div>
       </button>
       <button type="button" class="stat-card stat-filter animate-rise" data-filter-push-status="in_transit" aria-label="筛选推送途中异常，共 ${inTransit} 条" aria-pressed="false" style="animation-delay:330ms;${inTransit > 0 ? 'border-left:3px solid var(--color-warning);' : ''}">
         <div class="stat-card-header"><span class="stat-card-label">推送途中</span><div class="stat-card-icon" style="background:var(--color-warning-soft);color:var(--color-warning);">${Icon.send({ size: 16 })}</div></div>
@@ -221,40 +221,40 @@ window.RecordsModule = (function () {
     });
     syncFilterUi();
 
-    if (refreshCritical && hasCriticalCountApi) {
-      const countSequence = ++state.criticalCountSequence;
-      state.criticalCountFailed = false;
-      Store.peekRecordsPage({ severity: 'critical', page: 1, pageSize: 1 })
+    if (refreshHigh && hasHighCountApi) {
+      const countSequence = ++state.highCountSequence;
+      state.highCountFailed = false;
+      Store.peekRecordsPage({ severity: 'high', page: 1, pageSize: 1 })
         .then(result => {
-          if (countSequence !== state.criticalCountSequence) return;
-          state.criticalTotal = result.total;
-          updateCriticalStatCard();
+          if (countSequence !== state.highCountSequence) return;
+          state.highTotal = result.total;
+          updateHighStatCard();
         })
         .catch(() => {
-          if (countSequence !== state.criticalCountSequence) return;
-          state.criticalTotal = null;
-          state.criticalCountFailed = true;
-          updateCriticalStatCard();
+          if (countSequence !== state.highCountSequence) return;
+          state.highTotal = null;
+          state.highCountFailed = true;
+          updateHighStatCard();
         });
     }
   }
 
-  function updateCriticalStatCard() {
-    const card = document.querySelector('#rec-stats [data-filter-severity="critical"]');
+  function updateHighStatCard() {
+    const card = document.querySelector('#rec-stats [data-filter-severity="high"]');
     if (!card) return;
-    const critical = state.criticalTotal;
-    const criticalKnown = Number.isFinite(critical);
-    card.setAttribute('aria-label', criticalKnown
-      ? `筛选严重异常，共 ${critical} 条`
-      : (state.criticalCountFailed ? '筛选严重异常，数量暂不可用' : '筛选严重异常，正在统计数量'));
-    card.style.borderLeft = criticalKnown && critical > 0 ? '3px solid var(--color-danger)' : '';
-    card.querySelector('.stat-card-value').textContent = criticalKnown ? critical : '—';
+    const high = state.highTotal;
+    const highKnown = Number.isFinite(high);
+    card.setAttribute('aria-label', highKnown
+      ? `筛选高严重程度异常，共 ${high} 条`
+      : (state.highCountFailed ? '筛选高严重程度异常，数量暂不可用' : '筛选高严重程度异常，正在统计数量'));
+    card.style.borderLeft = highKnown && high > 0 ? '3px solid var(--color-danger)' : '';
+    card.querySelector('.stat-card-value').textContent = highKnown ? high : '—';
     const delta = card.querySelector('.stat-card-delta');
-    delta.classList.toggle('down', criticalKnown && critical > 0);
-    delta.classList.toggle('neutral', !criticalKnown || critical <= 0);
-    delta.textContent = criticalKnown
-      ? (critical > 0 ? '需紧急响应' : '无严重')
-      : (state.criticalCountFailed ? '统计暂不可用' : '正在统计');
+    delta.classList.toggle('down', highKnown && high > 0);
+    delta.classList.toggle('neutral', !highKnown || high <= 0);
+    delta.textContent = highKnown
+      ? (high > 0 ? '需重点关注' : '无高严重程度异常')
+      : (state.highCountFailed ? '统计暂不可用' : '正在统计');
   }
 
   function syncFilterUi() {
@@ -329,7 +329,6 @@ window.RecordsModule = (function () {
       </div>
       <select class="filter-select" id="rec-severity-filter">
         <option value="all">全部严重程度</option>
-        <option value="critical" ${state.severityFilter === 'critical' ? 'selected' : ''}>严重</option>
         <option value="high" ${state.severityFilter === 'high' ? 'selected' : ''}>高</option>
         <option value="medium" ${state.severityFilter === 'medium' ? 'selected' : ''}>中</option>
         <option value="low" ${state.severityFilter === 'low' ? 'selected' : ''}>低</option>
@@ -375,7 +374,7 @@ window.RecordsModule = (function () {
       const dir = state.sortDir === 'asc' ? 1 : -1;
       if (state.sortKey === 'occurredAt') return (a.occurredAt || '').localeCompare(b.occurredAt || '') * dir;
       if (state.sortKey === 'severity') {
-        const order = { critical: 4, high: 3, medium: 2, low: 1 };
+        const order = { high: 3, medium: 2, low: 1 };
         return ((order[a.severity] || 0) - (order[b.severity] || 0)) * dir;
       }
       return 0;
@@ -470,7 +469,7 @@ window.RecordsModule = (function () {
           </thead>
           <tbody>
             ${pageItems.map((r, i) => `
-              <tr class="animate-fade" style="animation-delay:${i * 25}ms;${r.severity === 'critical' && r.status !== 'resolved' ? 'background: rgba(220, 38, 38, 0.025);' : ''}">
+              <tr class="animate-fade" style="animation-delay:${i * 25}ms;${r.severity === 'high' && r.status !== 'resolved' ? 'background: rgba(220, 38, 38, 0.025);' : ''}">
                 <td><label class="checkbox"><input type="checkbox" class="rec-row-check" data-id="${r.id}" ${state.selected.has(r.id) ? 'checked' : ''} /><span class="checkbox-box">${Icon.check({ size: 12 })}</span></label></td>
                 <td>
                   <div class="flex items-center gap-2">
@@ -694,8 +693,8 @@ window.RecordsModule = (function () {
               <div class="detail-value">${r.assignee ? escapeHtml(r.assignee) : '<span class="text-muted">未分配</span>'}</div>
               <div class="detail-label">异常描述</div>
               <div class="detail-value">${r.description ? escapeHtml(r.description) : '<span class="text-muted">—</span>'}</div>
-              <div class="detail-label">校验截止时间</div>
-              <div class="detail-value text-mono">${escapeHtml(formatTime(r.validationDeadline))}</div>
+              <div class="detail-label">截止时间</div>
+              <div class="detail-value text-mono">${escapeHtml(r.validationDeadline ? formatTime(r.validationDeadline) : (r.deadlineSecondsSnapshot != null && r.status !== 'resolved' ? '等待推送成功' : '—'))}</div>
               <div class="detail-label">校验方式</div>
               <div class="detail-value">${r.validationMethod === 'sql' ? 'SQL 校验' : r.validationMethod === 'pseudo' ? '伪校验' : '—'}</div>
               <div class="detail-label">超时时间</div>

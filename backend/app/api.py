@@ -385,6 +385,7 @@ def rule_dict(item: Rule) -> dict:
         "dataset_id": item.dataset_id,
         "dataset_name": item.dataset.name,
         "severity": item.severity,
+        "deadline_seconds": item.deadline_seconds,
         "logic": item.logic,
         "conditions": item.conditions,
         "anomaly_key_fields": item.anomaly_key_fields,
@@ -394,7 +395,6 @@ def rule_dict(item: Rule) -> dict:
         "private_message_template": item.private_message_template,
         "validation_enabled": item.validation_enabled,
         "validation_targets": item.validation_targets,
-        "validation_timeout_minutes": item.validation_timeout_minutes,
         "validation_method": item.validation_method,
         "sql_validation_config": item.sql_validation_config,
         "group_broadcast": {
@@ -463,8 +463,6 @@ def _validate_group_broadcast_configuration(
 ) -> None:
     config = payload.group_broadcast
     timeout_enabled = config.timeout.enabled if config.timeout is not None else bool(existing and existing.timeout_broadcast_enabled)
-    if timeout_enabled and not payload.validation_enabled:
-        raise HTTPException(422, "启用超时播报必须开启实时验证")
     if "group_broadcast" not in payload.model_fields_set:
         return
     webhook_was_supplied = "webhook_url" in config.model_fields_set
@@ -602,6 +600,18 @@ def _group_summaries(session: Session, groups: list[AnomalyRecordGroup]) -> list
     ):
         delivery_statuses.setdefault((rule_id, detected_at, kind), []).append(delivery_status)
     result = []
+    waiting_counts = {}
+    for rule_id, detected_at, waiting, unsent in session.execute(
+        select(AnomalyRecordGroupMember.rule_id, AnomalyRecordGroupMember.detected_at,
+               func.count(), func.sum(case((AnomalyRecord.validation_deadline.is_(None), 1), else_=0)))
+        .join(AnomalyRecord, AnomalyRecord.id == AnomalyRecordGroupMember.anomaly_id)
+        .where(tuple_(AnomalyRecordGroupMember.rule_id, AnomalyRecordGroupMember.detected_at).in_(keys),
+               AnomalyRecordGroupMember.is_new.is_(True),
+               AnomalyRecordGroupMember.timeout_notified_at.is_(None),
+               AnomalyRecord.status != "resolved")
+        .group_by(AnomalyRecordGroupMember.rule_id, AnomalyRecordGroupMember.detected_at)
+    ):
+        waiting_counts[(rule_id, detected_at)] = (waiting, int(unsent or 0))
     for group in groups:
         key = (group.rule_id, group.detected_at)
         counts = status_counts.get(key, {})
@@ -609,12 +619,17 @@ def _group_summaries(session: Session, groups: list[AnomalyRecordGroup]) -> list
         situation_status = ("skipped" if group.broadcast_enabled and group.new_anomalies == 0 and not situation_statuses
                             else _group_broadcast_status(group.broadcast_enabled, situation_statuses))
         timeout_statuses = delivery_statuses.get((*key, "timeout"), [])
+        waiting, unsent = waiting_counts.get(key, (0, 0))
+        if group.timeout_processed_at is not None or not (group.timeout_broadcast_snapshot or {}).get("enabled"):
+            waiting, unsent = 0, 0
         if not (group.timeout_broadcast_snapshot or {}).get("enabled"):
             timeout_status = "disabled"
         elif timeout_statuses:
             timeout_status = _group_broadcast_status(True, timeout_statuses)
-        elif group.timeout_processed_at is not None or group.timeout_deadline is None:
+        elif not waiting:
             timeout_status = "skipped"
+        elif waiting == unsent:
+            timeout_status = "waiting_delivery"
         else:
             timeout_status = "waiting"
         result.append({
@@ -632,6 +647,8 @@ def _group_summaries(session: Session, groups: list[AnomalyRecordGroup]) -> list
             "broadcast_status": situation_status,
             "situation_broadcast_status": situation_status,
             "timeout_broadcast_status": timeout_status,
+            "timeout_waiting_count": waiting,
+            "timeout_waiting_delivery_count": unsent,
         })
     return result
 
@@ -646,6 +663,8 @@ def anomaly_dict(item: AnomalyRecord, delivery_status: str | None = None) -> dic
         "resolved_at": item.resolved_at, "assignee": item.assignee,
         "description": item.description,
         "validation_deadline": item.validation_deadline,
+        "deadline_seconds_snapshot": item.deadline_seconds_snapshot,
+        "first_delivered_at": item.first_delivered_at,
         "timed_out_at": item.timed_out_at,
         "resolution_source": item.resolution_source,
         "resolved_by_user_id": item.resolved_by_user_id,
@@ -1060,6 +1079,7 @@ def get_anomaly_group(
     return {
         "group": _group_summaries(session, [group])[0],
         "deliveries": [{"id": delivery.id, "broadcast_kind": delivery.broadcast_kind,
+            "round_index": delivery.round_index,
             "part_index": delivery.part_index, "total_parts": delivery.total_parts,
             "status": delivery.status, "attempts": delivery.attempts, "last_error": delivery.last_error,
             "delivered_at": delivery.delivered_at}
@@ -1115,7 +1135,6 @@ def _apply_anomaly_filters(
 
 def _anomaly_ordering(sort_key: str, sort_order: str):
     severity_rank = case(
-        (AnomalyRecord.severity == "critical", 4),
         (AnomalyRecord.severity == "high", 3),
         (AnomalyRecord.severity == "medium", 2),
         (AnomalyRecord.severity == "low", 1),
@@ -1420,7 +1439,8 @@ def overview(
             "processing_records": sum(a.status == "processing" for a in anomalies),
             "timed_out_records": sum(a.status == "timed_out" for a in anomalies),
             "resolved_records": sum(a.status == "resolved" for a in anomalies),
-            "critical_anomalies": sum(a.severity == "critical" and a.status != "resolved" for a in anomalies),
+            "high_anomalies": sum(a.severity == "high" and a.status != "resolved" for a in anomalies),
+            "critical_anomalies": sum(a.severity == "high" and a.status != "resolved" for a in anomalies),
             "push_in_transit_anomalies": push_in_transit_anomalies,
             "active_rules": sum(r.enabled for r in rules), "total_rules": len(rules),
             "online_datasources": sum(d.status == "online" for d in datasources), "total_datasources": len(datasources),

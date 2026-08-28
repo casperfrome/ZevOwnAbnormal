@@ -185,7 +185,7 @@ def queue_due_notification_push_jobs(
         .where(
             NotificationDelivery.status.in_(["pending", "failed"]),
             NotificationDelivery.attempts < MAX_NOTIFICATION_DELIVERY_ATTEMPTS,
-            AnomalyRecord.status.in_(["pending", "processing"]),
+            AnomalyRecord.status.in_(["pending", "processing", "timed_out"]),
         )
         .order_by(NotificationDelivery.updated_at, NotificationDelivery.id)
         .limit(limit)
@@ -310,7 +310,7 @@ def recover_failed_push_jobs(
                 and delivery.status in {"pending", "failed"}
                 and delivery.attempts < MAX_NOTIFICATION_DELIVERY_ATTEMPTS
                 and anomaly is not None
-                and anomaly.status in {"pending", "processing"}
+                and anomaly.status in {"pending", "processing", "timed_out"}
             )
         elif job.kind == "validation":
             request = session.get(AnomalyValidationRequest, job.delivery_id)

@@ -36,7 +36,7 @@ TEST_SESSION_SECRET = "test-session-secret-that-is-long-enough"
 logger = logging.getLogger(__name__)
 
 
-def run_validation_maintenance_cycle(
+def run_deadline_scan_cycle(
     session_factory,
     settings: Settings,
     stop_event: threading.Event | None = None,
@@ -50,6 +50,12 @@ def run_validation_maintenance_cycle(
             limit=settings.validation_maintenance_batch_size,
             should_stop=should_stop,
         )
+
+
+def run_validation_maintenance_cycle(session_factory, settings: Settings,
+                                     stop_event: threading.Event | None = None) -> None:
+    should_stop = stop_event.is_set if stop_event is not None else None
+    with session_factory() as session:
         if should_stop is not None and should_stop():
             logger.warning("异常验证维护已取消，初始投递与卡片收敛留待下一轮")
             return
@@ -69,10 +75,20 @@ def run_validation_maintenance_cycle(
 
 
 async def validation_maintenance_loop(session_factory, settings: Settings) -> None:
+    await _maintenance_loop(session_factory, settings, run_validation_maintenance_cycle,
+                            settings.validation_card_sync_interval_seconds)
+
+
+async def deadline_scan_loop(session_factory, settings: Settings) -> None:
+    await _maintenance_loop(session_factory, settings, run_deadline_scan_cycle,
+                            settings.validation_timeout_scan_interval_seconds)
+
+
+async def _maintenance_loop(session_factory, settings: Settings, run_cycle, interval: int) -> None:
     while True:
         stop_event = threading.Event()
         cycle = asyncio.create_task(asyncio.to_thread(
-            run_validation_maintenance_cycle,
+            run_cycle,
             session_factory,
             settings,
             stop_event,
@@ -88,7 +104,7 @@ async def validation_maintenance_loop(session_factory, settings: Settings) -> No
             raise cancelled
         except Exception:
             logger.exception("异常验证超时维护周期执行失败")
-        await asyncio.sleep(settings.validation_timeout_scan_interval_seconds)
+        await asyncio.sleep(interval)
 
 
 def run_push_pipeline_cycle(session_factory, settings: Settings, app_state) -> None:
@@ -174,8 +190,10 @@ def create_app(testing: bool = False) -> FastAPI:
             if not testing and settings.reconcile_on_startup:
                 reconcile_enabled_rules(session, settings)
         maintenance_task = None
+        deadline_task = None
         push_pipeline_task = None
         if not testing:
+            deadline_task = asyncio.create_task(deadline_scan_loop(session_factory, settings), name="deadline-scan")
             maintenance_task = asyncio.create_task(
                 validation_maintenance_loop(session_factory, settings),
                 name="validation-maintenance",
@@ -185,10 +203,15 @@ def create_app(testing: bool = False) -> FastAPI:
                 name="anomaly-push-pipeline",
             )
         app_instance.state.validation_maintenance_task = maintenance_task
+        app_instance.state.deadline_scan_task = deadline_task
         app_instance.state.push_pipeline_task = push_pipeline_task
         try:
             yield
         finally:
+            if deadline_task is not None:
+                deadline_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await deadline_task
             if maintenance_task is not None:
                 maintenance_task.cancel()
                 with suppress(asyncio.CancelledError):

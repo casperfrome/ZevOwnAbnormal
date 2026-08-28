@@ -98,9 +98,9 @@ test('group list and detail distinguish situation and timeout status including w
   const text = await page.locator('#content').textContent();
   assert.match(text, /异常情况/);
   assert.match(text, /异常超时/);
-  assert.match(text, /等待超时/);
+  assert.match(text, /等待到期/);
   assert.match(text, /已跳过/);
   await page.evaluate(() => AnomalyGroupsModule.openDetail('waiting'));
-  assert.match(await page.locator('.drawer').textContent(), /等待超时/);
+  assert.match(await page.locator('.drawer').textContent(), /等待到期/);
   assert.match(await page.locator('.drawer').textContent(), /retry later/);
 });

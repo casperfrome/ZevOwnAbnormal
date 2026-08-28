@@ -12,6 +12,7 @@ from .config import Settings
 from .feishu import FeishuClient
 from .message_templates import render_private_markdown
 from .models import AnomalyRecord, NotificationDelivery, Rule, RuleRun, utcnow
+from .deadline_service import start_deadline
 from .query_service import connect_to_datasource, fetch_rule_rows
 from .rule_engine import evaluate_rows
 from .security import CredentialCipher
@@ -60,7 +61,7 @@ def _password(rule: Rule, settings: Settings) -> str:
 def _message(record: AnomalyRecord) -> str:
     return (
         f"【Sentinel 数据异常】{record.rule_name}\n"
-        f"严重程度：{record.severity}\n"
+        f"严重程度：{ {'low': '低', 'medium': '中', 'high': '高'}.get(record.severity, '高')}\n"
         f"数据集：{record.dataset_name}\n"
         f"异常主键：{record.business_key}\n"
         f"检出时间：{record.first_seen_at:%Y-%m-%d %H:%M:%S}\n"
@@ -72,7 +73,7 @@ def _notification_card(record: AnomalyRecord, template: str, public_base_url: st
     record_url = f"{public_base_url.rstrip('/')}/#records/{record.id}"
     markdown = render_private_markdown(template, record.row_details, record_url)
     header_templates = {
-        "critical": "red", "high": "orange", "medium": "yellow", "low": "blue",
+        "high": "red", "medium": "yellow", "low": "blue",
     }
     return {
         "schema": "2.0",
@@ -91,7 +92,7 @@ def deliver_notifications(session: Session, settings: Settings, delivery_ids: li
         Rule, AnomalyRecord.rule_id == Rule.id
     ).where(
         NotificationDelivery.status.in_(["pending", "failed"]),
-        AnomalyRecord.status.in_(["pending", "processing"]),
+        AnomalyRecord.status.in_(["pending", "processing", "timed_out"]),
     )
     if delivery_ids is not None:
         if not delivery_ids:
@@ -135,6 +136,7 @@ def deliver_notifications(session: Session, settings: Settings, delivery_ids: li
                         )
                     delivery.status = "sent"
                     delivery.last_error = None
+                    start_deadline(session, record.id, utcnow())
                     break
                 except Exception as exc:
                     delivery.status = "failed"

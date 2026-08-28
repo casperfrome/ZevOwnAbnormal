@@ -15,6 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .config import Settings
+from .deadline_service import start_deadline
 from .feishu import FeishuClient, FeishuConfigurationError, FeishuDeliveryUncertainError, FeishuError
 from .message_templates import render_private_markdown
 from .models import (
@@ -98,9 +99,8 @@ def snapshot_validation(
         return []
     snapshot_time = now or utcnow()
     recipients = resolve_validation_targets(rule.validation_targets, anomaly.row_details)
-    if anomaly.validation_deadline is None:
+    if anomaly.validation_method_snapshot is None:
         anomaly.description = rule.description
-        anomaly.validation_deadline = snapshot_time + timedelta(minutes=rule.validation_timeout_minutes)
         anomaly.validation_method_snapshot = rule.validation_method
         config_snapshot = deepcopy(rule.sql_validation_config or {})
         if rule.private_message_template:
@@ -140,6 +140,17 @@ def snapshot_validation(
 
 def _format_time(value: datetime | None) -> str:
     return value.strftime("%Y-%m-%d %H:%M:%S") if value else "-"
+
+
+def deadline_label(anomaly: AnomalyRecord) -> str:
+    if anomaly.validation_deadline is not None:
+        return _format_time(anomaly.validation_deadline)
+    if anomaly.deadline_seconds_snapshot is None:
+        return "—"
+    days, rest = divmod(anomaly.deadline_seconds_snapshot, 86400)
+    hours, rest = divmod(rest, 3600)
+    minutes, seconds = divmod(rest, 60)
+    return f"首次推送成功后 {days} 天 {hours} 小时 {minutes} 分钟 {seconds} 秒"
 
 
 _SQL_RESULT_REASONS = {
@@ -211,12 +222,14 @@ def build_validation_card(anomaly: AnomalyRecord, public_base_url: str) -> dict:
             f"**异常描述：** {anomaly.description or '-'}\n"
             f"**规则：** {anomaly.rule_name}\n"
             f"**数据集：** {anomaly.dataset_name}\n"
-            f"**严重程度：** {anomaly.severity}\n"
+            f"**严重程度：** { {'low': '低', 'medium': '中', 'high': '高'}.get(anomaly.severity, '高')}\n"
             f"**验证状态：** {state}\n"
-            f"**截止时间：** {_format_time(anomaly.validation_deadline)}\n"
+            f"**截止时间：** {deadline_label(anomaly)}\n"
             f"[查看异常详情]({link})"
         )
     )
+    if private_template:
+        facts += f"\n**截止时间：** {deadline_label(anomaly)}"
     elements: list[dict] = [{"tag": "markdown", "content": facts}]
     if anomaly.validation_method_snapshot == "sql":
         elements.append({"tag": "markdown", "content": _sql_result_markdown(anomaly)})
@@ -684,6 +697,7 @@ def _finish_validation_delivery(
             request.last_error = None
             request.delivered_at = finished_at
             request.updated_at = finished_at
+            start_deadline(session, request.anomaly_id, finished_at)
             session.commit()
             return True
         except Exception:
@@ -835,7 +849,7 @@ def expire_due_anomalies(
             session.add(AnomalyEvent(
                 anomaly_id=anomaly_id,
                 event_type="validation_timed_out",
-                description="实时验证已超过截止时间，仍可补充提交",
+                description="异常已超过截止时间，仍可继续处理",
                 created_at=timeout_time,
             ))
         session.commit()

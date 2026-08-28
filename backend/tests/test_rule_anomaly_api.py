@@ -53,6 +53,13 @@ def test_rule_modes_field_comparisons_and_legacy_updates_preserve_timeout():
         assert response.status_code == 201, response.text
         created = response.json()
         assert created["repeat_push_enabled"] is True
+        assert created["deadline_seconds"] == 86400
+        assert "validation_timeout_minutes" not in created
+        assert client.post("/api/v1/rules", json={**payload, "name": "obsolete severity", "severity": "critical"}).status_code == 422
+        precision = client.put(f"/api/v1/rules/{created['id']}", json={**payload,
+            "deadline_seconds": 93784, "validation_timeout_minutes": 1})
+        assert precision.status_code == 200
+        assert precision.json()["deadline_seconds"] == 93784
         assert created["group_broadcast"]["situation"]["enabled"] is True
         assert created["group_broadcast"]["timeout"]["message_template"] == "超时 {id列表}"
         legacy = {**payload, "group_broadcast": {"enabled": False}}
@@ -60,7 +67,8 @@ def test_rule_modes_field_comparisons_and_legacy_updates_preserve_timeout():
         assert updated.status_code == 200, updated.text
         assert updated.json()["group_broadcast"]["timeout"]["enabled"] is True
         invalid = client.put(f"/api/v1/rules/{created['id']}", json={**legacy, "validation_enabled": False})
-        assert invalid.status_code == 422
+        assert invalid.status_code == 200
+        assert invalid.json()["group_broadcast"]["timeout"]["enabled"] is True
         bad_field = client.post("/api/v1/rules", json={**payload, "name": "bad field",
             "conditions": [{"field": "actual", "operator": "eq", "value_source": "field", "value_field": "missing"}]})
         assert bad_field.status_code == 422

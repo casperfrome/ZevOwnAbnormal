@@ -1004,3 +1004,8 @@
   .rule-form .condition-row [data-remove] { grid-column: 2; }
   .sql-true-condition { grid-template-columns: minmax(0, 1fr); }
 }
+
+.deadline-inputs { display:flex; flex-wrap:wrap; align-items:center; gap:12px; }
+#rule-panel-basic .field:has(.deadline-inputs) { grid-column:1 / -1; }
+.deadline-unit { display:flex; align-items:center; gap:6px; }
+.deadline-unit .input { width:80px; }

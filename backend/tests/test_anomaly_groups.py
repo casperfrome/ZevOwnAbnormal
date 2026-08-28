@@ -12,6 +12,7 @@ from app.anomaly_group_service import (
     deliver_group_broadcasts,
 )
 from app.anomaly_service import persist_matches
+from app.deadline_service import start_deadline
 from app.config import Settings
 from app.models import (
     AnomalyGroupBroadcastDelivery,
@@ -35,6 +36,73 @@ from app.push_pipeline import (
 
 
 DETECTED_AT = datetime(2026, 8, 23, 9, 30, 0)
+
+
+def test_timeout_broadcasts_follow_each_delivery_in_independent_rounds(db_session):
+    from datetime import timedelta
+    from app.anomaly_group_service import queue_due_timeout_broadcasts
+    settings = Settings(_env_file=None)
+    rule = _group_rule(db_session, settings, mention_targets=[])
+    rule.timeout_broadcast_enabled = True
+    rule.deadline_seconds = 1
+    db_session.commit()
+    matches = _matches(3)
+    result = persist_matches(db_session, rule, matches)
+    run = RuleRun(rule_id=rule.id, trigger_source="manual", status="success", started_at=DETECTED_AT,
+                  scanned_rows=3, matched_rows=3, new_anomalies=3)
+    db_session.add(run)
+    db_session.flush()
+    group = create_anomaly_group(db_session, settings, rule, run, result.records, matches,
+                                 new_record_ids=result.new_record_ids)
+    result.records[0].validation_deadline = DETECTED_AT + timedelta(seconds=1)
+    result.records[1].validation_deadline = DETECTED_AT + timedelta(seconds=10)
+    db_session.commit()
+    assert queue_due_timeout_broadcasts(db_session, settings, now=DETECTED_AT + timedelta(seconds=1)) == 1
+    assert queue_due_timeout_broadcasts(db_session, settings, now=DETECTED_AT + timedelta(seconds=2)) == 0
+    assert queue_due_timeout_broadcasts(db_session, settings, now=DETECTED_AT + timedelta(seconds=10)) == 1
+    deliveries = list(db_session.scalars(select(AnomalyGroupBroadcastDelivery).where(
+        AnomalyGroupBroadcastDelivery.broadcast_kind == "timeout").order_by(AnomalyGroupBroadcastDelivery.round_index)))
+    assert [d.round_index for d in deliveries] == [1, 2]
+    assert result.records[2].status == "pending"
+
+
+def test_concurrent_timeout_scans_enqueue_each_member_once(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    from datetime import timedelta
+    from app.database import Base, make_session_factory
+    from app.anomaly_group_service import queue_due_timeout_broadcasts
+    engine, factory = make_session_factory(f"sqlite+pysqlite:///{tmp_path / 'group-race.sqlite'}")
+    Base.metadata.create_all(engine)
+    settings = Settings(_env_file=None)
+    with factory() as session:
+        rule = _group_rule(session, settings, mention_targets=[])
+        rule.group_broadcast_enabled = False
+        rule.timeout_broadcast_enabled = True
+        session.commit()
+        matches = _matches(1)
+        result = persist_matches(session, rule, matches)
+        run = RuleRun(rule_id=rule.id, trigger_source="manual", status="success", started_at=DETECTED_AT,
+                      scanned_rows=1, matched_rows=1, new_anomalies=1)
+        session.add(run)
+        session.flush()
+        create_anomaly_group(session, settings, rule, run, result.records, matches,
+                             new_record_ids=result.new_record_ids)
+        start_deadline(session, result.records[0].id, DETECTED_AT)
+        session.commit()
+    gate = Barrier(2)
+    def scan():
+        with factory() as session:
+            gate.wait(timeout=5)
+            return queue_due_timeout_broadcasts(session, settings, now=DETECTED_AT + timedelta(days=2))
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda _: scan(), range(2)))
+        assert sorted(results) == [0, 1]
+        with factory() as session:
+            assert len(list(session.scalars(select(AnomalyGroupBroadcastDelivery)))) == 1
+    finally:
+        engine.dispose()
 
 
 def _group_rule(session, settings, *, mention_targets):
@@ -250,6 +318,8 @@ def test_only_new_members_get_situation_and_timeout_broadcasts(db_session):
     rule.timeout_mention_targets = [{"source": "literal", "value": "new-supervisor"}]
     rule.timeout_message_template = "CHANGED"
     records = list(db_session.scalars(select(AnomalyRecord).order_by(AnomalyRecord.id)))
+    for record in records:
+        start_deadline(db_session, record.id, DETECTED_AT)
     records[0].status = "resolved"
     deadline = records[1].validation_deadline
     db_session.commit()
@@ -294,6 +364,8 @@ def test_repeated_detections_at_identical_time_keep_independent_batches(db_sessi
         db_session.commit()
         assert run.started_at == DETECTED_AT
         assert persisted.records[0].first_seen_at == DETECTED_AT
+        start_deadline(db_session, persisted.records[0].id, DETECTED_AT)
+        db_session.commit()
     assert len({group.detected_at for group in groups}) == 3
     assert len(list(db_session.scalars(select(AnomalyValidationRequest)))) == 3
     assert queue_due_timeout_broadcasts(db_session, settings, now=DETECTED_AT + timedelta(days=2)) == 3
@@ -322,6 +394,7 @@ def test_timeout_scan_observes_abort_between_groups_without_consuming_second_gro
     for index in range(2):
         matches = _matches(1)
         persisted = persist_matches(db_session, rule, matches)
+        start_deadline(db_session, persisted.records[0].id, DETECTED_AT)
         run = RuleRun(rule_id=rule.id, trigger_source="manual", started_at=DETECTED_AT + timedelta(minutes=index),
                       status="success", scanned_rows=1, matched_rows=1, new_anomalies=1)
         db_session.add(run)

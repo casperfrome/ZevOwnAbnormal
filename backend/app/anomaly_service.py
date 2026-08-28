@@ -118,6 +118,8 @@ def persist_matches(
             rule_name=rule.name,
             dataset_name=rule.dataset.name,
             severity=rule.severity,
+            deadline_seconds_snapshot=rule.deadline_seconds,
+            description=rule.description,
             fingerprint=fingerprint,
             active_fingerprint=fingerprint,
             business_key=business_key,

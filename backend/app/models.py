@@ -73,6 +73,7 @@ class Rule(Base, TimestampMixin):
     description: Mapped[str] = mapped_column(Text, default="", nullable=False)
     dataset_id: Mapped[str] = mapped_column(ForeignKey("datasets.id"), nullable=False)
     severity: Mapped[str] = mapped_column(String(20), default="medium", nullable=False)
+    deadline_seconds: Mapped[int] = mapped_column(Integer, default=86400, server_default=text("86400"), nullable=False)
     logic: Mapped[str] = mapped_column(String(3), default="AND", nullable=False)
     conditions: Mapped[list[dict]] = mapped_column(JSON, nullable=False)
     anomaly_key_fields: Mapped[list[str]] = mapped_column(JSON, nullable=False)
@@ -152,7 +153,9 @@ class AnomalyRecord(Base):
     first_seen_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    validation_deadline: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    validation_deadline: Mapped[datetime | None] = mapped_column(PRECISE_DATETIME, nullable=True)
+    deadline_seconds_snapshot: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    first_delivered_at: Mapped[datetime | None] = mapped_column(PRECISE_DATETIME, nullable=True)
     timed_out_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     resolution_source: Mapped[str | None] = mapped_column(String(30), nullable=True)
     resolved_by_user_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -206,6 +209,7 @@ class AnomalyRecordGroupMember(Base):
     anomaly_id: Mapped[str] = mapped_column(ForeignKey("anomaly_records.id"), primary_key=True)
     position: Mapped[int] = mapped_column(Integer, nullable=False)
     is_new: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("0"), nullable=False)
+    timeout_notified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class AnomalyGroupBroadcastDelivery(Base, TimestampMixin):
@@ -216,7 +220,7 @@ class AnomalyGroupBroadcastDelivery(Base, TimestampMixin):
             ["anomaly_record_groups.rule_id", "anomaly_record_groups.detected_at"],
             name="fk_anomaly_group_delivery_group",
         ),
-        UniqueConstraint("rule_id", "detected_at", "broadcast_kind", "part_index", name="uq_anomaly_group_delivery_kind_part"),
+        UniqueConstraint("rule_id", "detected_at", "broadcast_kind", "round_index", "part_index", name="uq_anomaly_group_delivery_round_part"),
         Index("ix_anomaly_group_deliveries_retry", "status", "next_attempt_at", "updated_at"),
     )
 
@@ -225,6 +229,7 @@ class AnomalyGroupBroadcastDelivery(Base, TimestampMixin):
     detected_at: Mapped[datetime] = mapped_column(PRECISE_DATETIME, nullable=False)
     part_index: Mapped[int] = mapped_column(Integer, nullable=False)
     broadcast_kind: Mapped[str] = mapped_column(String(20), default="situation", server_default=text("'situation'"), nullable=False)
+    round_index: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"), nullable=False)
     total_parts: Mapped[int] = mapped_column(Integer, nullable=False)
     webhook_url: Mapped[str] = mapped_column(Text, nullable=False)
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)

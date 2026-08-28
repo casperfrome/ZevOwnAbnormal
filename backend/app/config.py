@@ -57,7 +57,8 @@ class Settings(BaseSettings):
     feishu_app_secret: str = ""
     sentinel_public_base_url: str = "http://localhost:8000"
     sentinel_api_base_url: str = "http://127.0.0.1:8000"
-    validation_timeout_scan_interval_seconds: int = Field(default=60, ge=1)
+    validation_timeout_scan_interval_seconds: int = Field(default=1, ge=1)
+    validation_card_sync_interval_seconds: int = Field(default=60, ge=1)
     validation_maintenance_batch_size: int = Field(default=50, ge=1, le=500)
     feishu_http_timeout_seconds: float = Field(default=10, ge=1, le=60)
     kafka_bootstrap_servers: str = "localhost:9092"

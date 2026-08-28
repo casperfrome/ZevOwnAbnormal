@@ -44,6 +44,44 @@ MESSAGE_TEMPLATE_MIGRATION_PATH = MIGRATION_PATH.with_name(
 )
 
 
+def test_deadline_migration_preserves_history_and_prevents_duplicate_broadcasts():
+    path = MIGRATION_PATH.with_name("20260828_0013_independent_deadlines.py")
+    spec = importlib.util.spec_from_file_location("deadline_migration", path)
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+    engine = sa.create_engine("sqlite+pysqlite:///:memory:")
+    with engine.begin() as connection:
+        for sql in [
+            "CREATE TABLE rules (id TEXT PRIMARY KEY, severity TEXT, validation_timeout_minutes INTEGER)",
+            "CREATE TABLE anomaly_records (id TEXT PRIMARY KEY, severity TEXT, validation_deadline DATETIME)",
+            "CREATE TABLE anomaly_record_groups (rule_id TEXT, detected_at DATETIME, timeout_processed_at DATETIME)",
+            "CREATE TABLE anomaly_record_group_members (rule_id TEXT, detected_at DATETIME, anomaly_id TEXT)",
+            "CREATE TABLE anomaly_group_broadcast_deliveries (rule_id TEXT, detected_at DATETIME, broadcast_kind TEXT, part_index INTEGER, CONSTRAINT uq_anomaly_group_delivery_kind_part UNIQUE(rule_id,detected_at,broadcast_kind,part_index))",
+            "INSERT INTO rules VALUES ('r','critical',31)",
+            "INSERT INTO anomaly_records VALUES ('old','critical','2026-08-28 10:00:00'), ('unsent','low',NULL)",
+            "INSERT INTO anomaly_record_groups VALUES ('r','2026-08-28 09:00:00','2026-08-28 10:00:00')",
+            "INSERT INTO anomaly_record_group_members VALUES ('r','2026-08-28 09:00:00','old')",
+        ]:
+            connection.execute(sa.text(sql))
+        migration.op = Operations(MigrationContext.configure(connection))
+        migration.upgrade()
+        assert connection.execute(sa.text("SELECT severity, deadline_seconds FROM rules")).one() == ("high", 1860)
+        rows = connection.execute(sa.text("SELECT severity, validation_deadline, deadline_seconds_snapshot, first_delivered_at FROM anomaly_records ORDER BY id")).all()
+        assert rows == [("high", "2026-08-28 10:00:00", None, None), ("low", None, None, None)]
+        assert connection.execute(sa.text("SELECT timeout_notified_at FROM anomaly_record_group_members")).scalar_one() is not None
+        connection.execute(sa.text("UPDATE rules SET deadline_seconds=61"))
+        migration.upgrade()
+        assert connection.execute(sa.text("SELECT deadline_seconds FROM rules")).scalar_one() == 61
+    engine.dispose()
+
+
+def test_deadline_timestamps_preserve_fractional_delivery_seconds_on_mysql():
+    from app.models import AnomalyRecord
+    for name in ("first_delivered_at", "validation_deadline"):
+        ddl = str(CreateColumn(AnomalyRecord.__table__.c[name]).compile(dialect=mysql.dialect()))
+        assert "DATETIME(6)" in ddl
+
+
 def test_rule_enhancement_migration_preserves_legacy_data_and_separates_broadcast_kinds():
     path = MIGRATION_PATH.with_name("20260828_0012_rule_enhancements.py")
     spec = importlib.util.spec_from_file_location("rule_enhancements_0012", path)

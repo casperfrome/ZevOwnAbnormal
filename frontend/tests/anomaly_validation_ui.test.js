@@ -115,7 +115,10 @@ test('rule form saves real-time validation targets and reports an inline error w
   await page.fill('#f-openids-input', 'ou_notify');
   await page.getByRole('tab', { name: '实时校验', exact: true }).click();
   await page.check('#f-validation-enabled');
-  await page.fill('#f-validation-timeout', '30');
+  await page.getByRole('tab', { name: '基本信息', exact: true }).click();
+  await page.fill('#f-deadline-days', '0');
+  await page.fill('#f-deadline-minutes', '30');
+  await page.getByRole('tab', { name: '实时校验', exact: true }).click();
   await page.getByRole('tab', { name: '基本信息' }).click();
   await page.click('#f-save');
 
@@ -134,7 +137,7 @@ test('rule form saves real-time validation targets and reports an inline error w
 
   const created = await page.evaluate(() => window.createdRule);
   assert.equal(created.validationEnabled, true);
-  assert.equal(created.validationTimeoutMinutes, 30);
+  assert.equal(created.deadlineSeconds, 1800);
   assert.deepEqual(created.validationTargets, [
     { source: 'literal', value: 'u_typed_not_entered' },
     { source: 'field', field: 'owner_id' },
@@ -260,7 +263,7 @@ test('records expose timed-out filtering and render escaped validation audit det
 
   const drawerText = await page.locator('.drawer').textContent();
   assert.match(drawerText, /异常描述/);
-  assert.match(drawerText, /校验截止时间/);
+  assert.match(drawerText, /截止时间/);
   assert.match(drawerText, /解决来源/);
   assert.match(drawerText, /u_1/);
   assert.match(drawerText, /SQL 校验/);
@@ -307,7 +310,7 @@ test('record list and anomaly detail hide expected conditions while SQL audit ke
         isSuperuser: () => false,
         getStats: () => ({
           pendingRecords: 1, processingRecords: 0, timedOutRecords: 0,
-          resolvedToday: 0, criticalAnomalies: 0,
+          resolvedToday: 0, highAnomalies: 0,
         }),
         getRecords: () => [record], getRules: () => [], getRecord: () => record,
         getRule: () => ({ id: 'rule-1', name: 'Temperature check' }),
@@ -454,7 +457,7 @@ test('record tabs use overview totals and request status-filtered backend pages'
       window.Store = {
         getStats: () => ({
           pendingRecords: 12, processingRecords: 8, timedOutRecords: 27,
-          resolvedToday: 23, criticalAnomalies: 4, pushInTransitAnomalies: 5,
+          resolvedToday: 23, highAnomalies: 4, pushInTransitAnomalies: 5,
         }),
         getRecords: () => window.currentPageRecords,
         getRules: () => [],
@@ -521,16 +524,16 @@ test('record KPI cards apply their corresponding status and severity filters', a
   const { page, pageErrors } = await withPage(t, async page => {
     await page.evaluate(() => {
       const record = {
-        id: 'record-1', ruleId: 'rule-1', ruleName: 'GMV check', datasetName: 'Orders', severity: 'critical',
+        id: 'record-1', ruleId: 'rule-1', ruleName: 'GMV check', datasetName: 'Orders', severity: 'high',
         status: 'pending', occurredAt: '2026-08-22T09:00:00', field: 'gmv', value: 999,
         expected: 'gt', assignee: null,
       };
       window.recordQueries = [];
-      window.criticalCountQueries = [];
+      window.highCountQueries = [];
       window.Store = {
         getStats: () => ({
           pendingRecords: 12, processingRecords: 8, timedOutRecords: 2,
-          resolvedToday: 23, criticalAnomalies: 4, pushInTransitAnomalies: 5,
+          resolvedToday: 23, highAnomalies: 4, pushInTransitAnomalies: 5,
         }),
         getRecords: () => [record],
         getRules: () => [{ id: 'rule-1', name: 'GMV check' }],
@@ -544,7 +547,7 @@ test('record KPI cards apply their corresponding status and severity filters', a
           };
         },
         peekRecordsPage: async query => {
-          window.criticalCountQueries.push({ ...query });
+          window.highCountQueries.push({ ...query });
           return { items: [], total: 7, page: 1, pageSize: query.pageSize };
         },
         refresh: async () => {}, exportUrl: '/export',
@@ -573,25 +576,25 @@ test('record KPI cards apply their corresponding status and severity filters', a
   assert.equal(await page.evaluate(() => window.recordQueries.at(-1).pushStatus), null);
   assert.equal(await inTransitCard.getAttribute('aria-pressed'), 'false');
 
-  await page.getByRole('button', { name: /筛选严重异常.*7/ }).click();
+  await page.getByRole('button', { name: /筛选高严重程度异常.*7/ }).click();
   await page.waitForTimeout(20);
   assert.equal(await page.getByRole('tab', { name: /^全部/ }).getAttribute('aria-selected'), 'true');
-  assert.equal(await page.locator('#rec-severity-filter').inputValue(), 'critical');
-  assert.equal(await page.evaluate(() => window.recordQueries.at(-1).severity), 'critical');
+  assert.equal(await page.locator('#rec-severity-filter').inputValue(), 'high');
+  assert.equal(await page.evaluate(() => window.recordQueries.at(-1).severity), 'high');
   assert.equal(await page.evaluate(() => window.recordQueries.at(-1).status), null);
-  assert.deepEqual(await page.evaluate(() => window.criticalCountQueries[0]), {
-    severity: 'critical', page: 1, pageSize: 1,
+  assert.deepEqual(await page.evaluate(() => window.highCountQueries[0]), {
+    severity: 'high', page: 1, pageSize: 1,
   });
   assert.deepEqual(pageErrors, []);
 });
 
-test('late critical KPI counts preserve focus and do not update after records unmounts', async t => {
+test('late high KPI counts preserve focus and do not update after records unmounts', async t => {
   const { page, pageErrors } = await withPage(t, async page => {
     await page.evaluate(() => {
       let resolveCount;
-      window.resolveCriticalCount = total => resolveCount({ items: [], total, page: 1, pageSize: 1 });
+      window.resolveHighCount = total => resolveCount({ items: [], total, page: 1, pageSize: 1 });
       window.Store = {
-        getStats: () => ({ pendingRecords: 1, processingRecords: 0, timedOutRecords: 0, resolvedToday: 0, criticalAnomalies: 0 }),
+        getStats: () => ({ pendingRecords: 1, processingRecords: 0, timedOutRecords: 0, resolvedToday: 0, highAnomalies: 0 }),
         getRecords: () => [], getRules: () => [],
         loadRecordsPage: async () => ({ items: [], total: 0, page: 1, pageSize: 10 }),
         peekRecordsPage: () => new Promise(resolve => { resolveCount = resolve; }),
@@ -604,18 +607,18 @@ test('late critical KPI counts preserve focus and do not update after records un
     }));
   });
 
-  const criticalCard = page.getByRole('button', { name: /筛选严重异常，正在统计数量/ });
-  await criticalCard.focus();
-  await page.evaluate(() => window.resolveCriticalCount(9));
-  await page.getByRole('button', { name: /筛选严重异常，共 9 条/ }).waitFor();
-  assert.equal(await page.evaluate(() => document.activeElement?.dataset.filterSeverity), 'critical');
+  const highCard = page.getByRole('button', { name: /筛选高严重程度异常，正在统计数量/ });
+  await highCard.focus();
+  await page.evaluate(() => window.resolveHighCount(9));
+  await page.getByRole('button', { name: /筛选高严重程度异常，共 9 条/ }).waitFor();
+  assert.equal(await page.evaluate(() => document.activeElement?.dataset.filterSeverity), 'high');
 
   await page.evaluate(() => {
     RecordsModule.render(document.getElementById('content'), {
       actionsEl: document.getElementById('actions'), navigate: () => {},
     });
     document.getElementById('content').innerHTML = '<main id="replacement">其他模块</main>';
-    window.resolveCriticalCount(11);
+    window.resolveHighCount(11);
   });
   await page.waitForTimeout(20);
   assert.equal(await page.locator('#replacement').textContent(), '其他模块');
@@ -631,14 +634,14 @@ test('mobile records render as readable summary cards that open the existing det
     await page.evaluate(() => {
       const record = {
         id: 'record-mobile', ruleId: 'rule-1', ruleName: '门店 GMV 异常', datasetName: '门店日经营',
-        severity: 'critical', status: 'pending', occurredAt: '2026-08-22 09:00', field: 'gmv', value: 999,
+        severity: 'high', status: 'pending', occurredAt: '2026-08-22 09:00', field: 'gmv', value: 999,
         expected: 'gt 500', assignee: '沈一鸣', description: '检查门店营业额', validationDeadline: null,
         timedOutAt: null, resolutionSource: null, resolvedByUserId: null, businessKey: {}, details: { gmv: 999 },
         hitCount: 1, lastSeenAt: '2026-08-22 09:00', deliveries: [], validationRequests: [],
         validationSubmission: null, timeline: [],
       };
       window.Store = {
-        getStats: () => ({ pendingRecords: 1, processingRecords: 0, timedOutRecords: 0, resolvedToday: 0, criticalAnomalies: 1 }),
+        getStats: () => ({ pendingRecords: 1, processingRecords: 0, timedOutRecords: 0, resolvedToday: 0, highAnomalies: 1 }),
         getRecords: () => [record], getRules: () => [{ id: 'rule-1', name: '门店 GMV 异常' }],
         getRecord: id => id === record.id ? record : null, getRule: () => null,
         loadRecord: async id => id === record.id ? record : Promise.reject(new Error('not found')),
@@ -675,7 +678,7 @@ test('mobile records retain pagination after a desktop row selection', async t =
         expected: 'gt 500', assignee: null,
       };
       window.Store = {
-        getStats: () => ({ pendingRecords: 20, processingRecords: 0, timedOutRecords: 0, resolvedToday: 0, criticalAnomalies: 0 }),
+        getStats: () => ({ pendingRecords: 20, processingRecords: 0, timedOutRecords: 0, resolvedToday: 0, highAnomalies: 0 }),
         getRecords: () => [record], getRules: () => [],
         loadRecordsPage: async query => ({ items: [record], total: 20, page: query.page, pageSize: query.pageSize }),
         refresh: async () => {}, exportUrl: '/export',
@@ -700,7 +703,7 @@ test('record search debounces rapid typing into one server request', async t => 
     await page.evaluate(() => {
       window.recordQueries = [];
       window.Store = {
-        getStats: () => ({ pendingRecords: 0, processingRecords: 0, timedOutRecords: 0, resolvedToday: 0, criticalAnomalies: 0 }),
+        getStats: () => ({ pendingRecords: 0, processingRecords: 0, timedOutRecords: 0, resolvedToday: 0, highAnomalies: 0 }),
         getRecords: () => [],
         getRules: () => [],
         loadRecordsPage: async query => {
@@ -747,7 +750,7 @@ test('record export sends current server filters and reports the server total', 
       };
       exportUrl.toString = () => '#export';
       window.Store = {
-        getStats: () => ({ pendingRecords: 42, processingRecords: 0, timedOutRecords: 0, resolvedToday: 0, criticalAnomalies: 0 }),
+        getStats: () => ({ pendingRecords: 42, processingRecords: 0, timedOutRecords: 0, resolvedToday: 0, highAnomalies: 0 }),
         getRecords: () => window.currentPageRecords,
         getRules: () => [],
         loadRecordsPage: async query => ({
@@ -795,7 +798,7 @@ test('record export keeps one immutable search snapshot while its count request 
       };
       exportUrl.toString = () => '#export-snapshot';
       window.Store = {
-        getStats: () => ({ pendingRecords: 0, processingRecords: 0, timedOutRecords: 0, resolvedToday: 0, criticalAnomalies: 0 }),
+        getStats: () => ({ pendingRecords: 0, processingRecords: 0, timedOutRecords: 0, resolvedToday: 0, highAnomalies: 0 }),
         getRecords: () => [],
         getRules: () => [],
         loadRecordsPage: async query => {
@@ -865,7 +868,7 @@ test('production Store export on page two preserves the rendered record and its 
             pending_records: 10, processing_records: 0,
             timed_out_records: window.pageTwoStatus === 'timed_out' ? 1 : 0,
             resolved_records: window.pageTwoStatus === 'resolved' ? 1 : 0,
-            critical_anomalies: 0,
+            high_anomalies: 0,
           } });
         }
         if (url.pathname.endsWith('/anomalies')) {
@@ -920,7 +923,7 @@ test('selection is scoped to the current server result and never leaks into a la
       window.currentPageRecords = [];
       window.bulkCalls = [];
       window.Store = {
-        getStats: () => ({ pendingRecords: 2, processingRecords: 0, timedOutRecords: 0, resolvedToday: 0, criticalAnomalies: 0 }),
+        getStats: () => ({ pendingRecords: 2, processingRecords: 0, timedOutRecords: 0, resolvedToday: 0, highAnomalies: 0 }),
         getRecords: () => window.currentPageRecords,
         getRules: () => [],
         loadRecordsPage: async query => {
@@ -965,7 +968,7 @@ test('resolving the final item on the final page refetches the nearest valid pag
       window.currentPageRecords = [];
       window.finalResolved = false;
       window.Store = {
-        getStats: () => ({ pendingRecords: 10, processingRecords: 0, timedOutRecords: window.finalResolved ? 0 : 1, resolvedToday: window.finalResolved ? 1 : 0, criticalAnomalies: 0 }),
+        getStats: () => ({ pendingRecords: 10, processingRecords: 0, timedOutRecords: window.finalResolved ? 0 : 1, resolvedToday: window.finalResolved ? 1 : 0, highAnomalies: 0 }),
         getRecords: () => window.currentPageRecords,
         getRecord: id => window.currentPageRecords.find(record => record.id === id),
         getRules: () => [],
@@ -1008,7 +1011,7 @@ test('quick status resolution refreshes list classifications and the navigation 
       document.body.insertAdjacentHTML('afterbegin', '<span id="nav-anomaly-count">1</span>');
       window.summaryStats = {
         pendingRecords: 0, processingRecords: 0, timedOutRecords: 1,
-        resolvedToday: 0, criticalAnomalies: 0, unresolvedRecords: 1,
+        resolvedToday: 0, highAnomalies: 0, unresolvedRecords: 1,
       };
       window.currentRecord = {
         id: 'record-timeout', ruleId: 'rule-1', ruleName: 'GMV check', datasetName: 'Orders',
@@ -1052,7 +1055,7 @@ test('abort push action is left of export, confirms danger, and prevents duplica
       window.resolveAbort = null;
       window.Store = {
         isSuperuser: () => true,
-        getStats: () => ({ pendingRecords: 0, processingRecords: 0, timedOutRecords: 0, resolvedToday: 0, criticalAnomalies: 0 }),
+        getStats: () => ({ pendingRecords: 0, processingRecords: 0, timedOutRecords: 0, resolvedToday: 0, highAnomalies: 0 }),
         getRecords: () => [], getRules: () => [],
         loadRecordsPage: async () => ({ items: [], total: 0, page: 1, pageSize: 10 }),
         abortAnomalyPushes: () => {
@@ -1096,7 +1099,7 @@ test('recover push action confirms scope, prevents duplicates, and reports recov
       window.resolveRecovery = null;
       window.Store = {
         isSuperuser: () => true,
-        getStats: () => ({ pendingRecords: 0, processingRecords: 0, timedOutRecords: 0, resolvedToday: 0, criticalAnomalies: 0 }),
+        getStats: () => ({ pendingRecords: 0, processingRecords: 0, timedOutRecords: 0, resolvedToday: 0, highAnomalies: 0 }),
         getRecords: () => [], getRules: () => [],
         loadRecordsPage: async () => ({ items: [], total: 0, page: 1, pageSize: 10 }),
         recoverAnomalyPushes: () => {
@@ -1142,7 +1145,7 @@ test('record administrative actions fit the mobile viewport without clipping', a
       document.getElementById('mobile-header').append(actions);
       window.Store = {
         isSuperuser: () => true,
-        getStats: () => ({ pendingRecords: 0, processingRecords: 0, timedOutRecords: 0, resolvedToday: 0, criticalAnomalies: 0 }),
+        getStats: () => ({ pendingRecords: 0, processingRecords: 0, timedOutRecords: 0, resolvedToday: 0, highAnomalies: 0 }),
         getRecords: () => [], getRules: () => [],
         loadRecordsPage: async () => ({ items: [], total: 0, page: 1, pageSize: 10 }),
         recoverAnomalyPushes: async () => ({}), abortAnomalyPushes: async () => ({}),
@@ -1225,7 +1228,7 @@ test('abort push action is hidden from non-superadmin readers', async t => {
     await page.evaluate(() => {
       window.Store = {
         isSuperuser: () => false,
-        getStats: () => ({ pendingRecords: 0, processingRecords: 0, timedOutRecords: 0, resolvedToday: 0, criticalAnomalies: 0 }),
+        getStats: () => ({ pendingRecords: 0, processingRecords: 0, timedOutRecords: 0, resolvedToday: 0, highAnomalies: 0 }),
         getRecords: () => [], getRules: () => [],
         loadRecordsPage: async () => ({ items: [], total: 0, page: 1, pageSize: 10 }),
         refresh: async () => {}, exportUrl: '/export',

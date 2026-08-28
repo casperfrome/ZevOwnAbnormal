@@ -88,6 +88,144 @@ def make_anomaly(rule: Rule, *, status="pending") -> AnomalyRecord:
     return anomaly
 
 
+def test_new_anomaly_waits_for_delivery_and_snapshots_deadline(monkeypatch):
+    from app.anomaly_service import persist_matches
+    from app.rule_engine import EvaluationMatch
+    from app.validation_service import snapshot_validation
+
+    engine, _, session, rule = build_session()
+    try:
+        rule.validation_enabled = True
+        rule.validation_targets = [{"source": "literal", "value": "owner"}]
+        rule.deadline_seconds = 61
+        session.commit()
+        result = persist_matches(session, rule, [EvaluationMatch(
+            row={"store_id": "S1"}, business_key={"store_id": "S1"}, matched_conditions=[]
+        )])
+        anomaly = result.records[0]
+        assert anomaly.validation_deadline is None
+        assert anomaly.deadline_seconds_snapshot == 61
+        rule.deadline_seconds = 900
+        snapshot_validation(session, rule, anomaly, now=NOW)
+        assert anomaly.deadline_seconds_snapshot == 61
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_delivery_starts_shared_deadline_once_and_refreshes_card():
+    from app.validation_service import _finish_validation_delivery, _card_needs_update
+    engine, _, session, rule = build_session()
+    try:
+        anomaly = make_anomaly(rule)
+        anomaly.deadline_seconds_snapshot = 61
+        session.add(anomaly)
+        session.flush()
+        requests = [AnomalyValidationRequest(anomaly_id=anomaly.id, recipient_user_id=user,
+                    delivery_status="sending") for user in ("a", "b")]
+        session.add_all(requests)
+        session.commit()
+        assert _finish_validation_delivery(session, requests[0].id, "pending", "m-a", NOW)
+        session.refresh(anomaly)
+        assert anomaly.first_delivered_at == NOW
+        assert anomaly.validation_deadline == NOW + timedelta(seconds=61)
+        assert _finish_validation_delivery(session, requests[1].id, "pending", "m-b", NOW + timedelta(seconds=20))
+        session.refresh(anomaly)
+        assert anomaly.validation_deadline == NOW + timedelta(seconds=61)
+        assert session.scalar(select(AnomalyValidationRequest.id).join(AnomalyRecord).where(_card_needs_update()))
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_ordinary_delivery_starts_deadline_only_after_success(monkeypatch):
+    from types import SimpleNamespace
+    from app.anomaly_service import persist_matches
+    from app.rule_engine import EvaluationMatch
+    from app.execution_service import deliver_notifications
+    engine, _, session, rule = build_session()
+    try:
+        rule.deadline_seconds = 93784
+        rule.notification_targets = [{"receive_id_type": "user_id", "source": "literal", "value": "owner"}]
+        session.commit()
+        record = persist_matches(session, rule, [EvaluationMatch(row={"store_id": "S1"},
+            business_key={"store_id": "S1"}, matched_conditions=[])]).records[0]
+        monkeypatch.setattr("app.execution_service.FeishuClient", lambda *a, **k: SimpleNamespace(close=lambda: None))
+        monkeypatch.setattr("app.execution_service.time.sleep", lambda _: None)
+        def fail(*args, **kwargs):
+            raise RuntimeError("delivery rejected")
+        monkeypatch.setattr("app.execution_service.feishu_gateway.send_configured_text", fail)
+        assert deliver_notifications(session, Settings(_env_file=None)) == 1
+        session.refresh(record)
+        assert record.validation_deadline is None
+        rule.deadline_seconds = 10
+        session.commit()
+        monkeypatch.setattr("app.execution_service.feishu_gateway.send_configured_text", lambda *a, **k: "message")
+        monkeypatch.setattr("app.execution_service.utcnow", lambda: NOW)
+        assert deliver_notifications(session, Settings(_env_file=None)) == 0
+        session.refresh(record)
+        assert record.first_delivered_at == NOW
+        assert record.validation_deadline == NOW + timedelta(days=1, hours=2, minutes=3, seconds=4)
+        assert record.validation_method_snapshot is None
+        record.status = "timed_out"
+        late = NotificationDelivery(anomaly_id=record.id, receive_id_type="user_id", recipient="late-owner")
+        session.add(late)
+        session.commit()
+        assert deliver_notifications(session, Settings(_env_file=None)) == 0
+        session.refresh(late)
+        assert late.status == "sent"
+        assert record.validation_deadline == NOW + timedelta(days=1, hours=2, minutes=3, seconds=4)
+    finally:
+        session.close()
+        engine.dispose()
+
+
+@pytest.mark.parametrize("status,snapshot", [("resolved", 1), ("pending", None)])
+def test_deadline_does_not_start_for_resolved_or_historical_records(status, snapshot):
+    from app.deadline_service import start_deadline
+    engine, _, session, rule = build_session()
+    try:
+        record = make_anomaly(rule, status=status)
+        record.deadline_seconds_snapshot = snapshot
+        session.add(record)
+        session.commit()
+        assert start_deadline(session, record.id, NOW) is False
+        session.commit()
+        assert record.validation_deadline is None
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_concurrent_delivery_confirmations_only_start_one_deadline(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    from app.deadline_service import start_deadline
+    engine, factory, session, rule = build_session(f"sqlite+pysqlite:///{tmp_path / 'delivery-race.sqlite'}", testing=False)
+    try:
+        record = make_anomaly(rule)
+        record.deadline_seconds_snapshot = 1
+        session.add(record)
+        session.commit()
+        record_id = record.id
+        gate = Barrier(2)
+        def confirm():
+            with factory() as contender:
+                gate.wait(timeout=5)
+                changed = start_deadline(contender, record_id, NOW)
+                contender.commit()
+                return changed
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda _: confirm(), range(2)))
+        assert sorted(results) == [False, True]
+        session.refresh(record)
+        assert record.validation_deadline == NOW + timedelta(seconds=1)
+        assert record.validation_result_version == 1
+    finally:
+        session.close()
+        engine.dispose()
+
+
 def test_snapshot_creates_ordered_unique_requests_and_suppresses_matching_legacy_text():
     """Removing target normalization, snapshots, or same-user suppression must fail."""
     from app.validation_service import snapshot_validation
@@ -116,7 +254,7 @@ def test_snapshot_creates_ordered_unique_requests_and_suppresses_matching_legacy
 
         assert recipients == ["user-1", "user-2"]
         assert anomaly.description == "GMV exceeded the expected range"
-        assert anomaly.validation_deadline == NOW + timedelta(minutes=30)
+        assert anomaly.validation_deadline is None
         assert anomaly.validation_method_snapshot == "pseudo"
         assert anomaly.validation_config_snapshot == {}
         assert [request.recipient_user_id for request in session.scalars(
@@ -229,7 +367,8 @@ def test_persisting_a_match_initializes_validation_before_legacy_notifications()
         result = persist_matches(session, rule, [match])
 
         assert result.records[0].description == rule.description
-        assert result.records[0].validation_deadline is not None
+        assert result.records[0].validation_deadline is None
+        assert result.records[0].deadline_seconds_snapshot == 86400
         assert [item.recipient_user_id for item in session.scalars(select(AnomalyValidationRequest))] == ["user-1"]
         assert [(item.receive_id_type, item.recipient) for item in session.scalars(select(NotificationDelivery))] == [
             ("open_id", "ou_ops"),
@@ -309,6 +448,7 @@ def test_sql_snapshot_is_immutable_and_card_only_exposes_processed_action():
             "true_condition": {"field": "status", "operator": "eq", "value": "normal"},
         }
         anomaly = make_anomaly(rule)
+        anomaly.deadline_seconds_snapshot = 61
         anomaly.row_details["store_id"] = "S1"
         anomaly.row_details["gmv"] = 500
         session.add(anomaly)
@@ -333,6 +473,7 @@ def test_sql_snapshot_is_immutable_and_card_only_exposes_processed_action():
         assert anomaly.validation_config_snapshot["private_message_template"] == rule.private_message_template
         assert "异常记录：S1" in card_text
         assert "GMV：500" in card_text
+        assert "首次推送成功后 0 天 0 小时 1 分钟 1 秒" in card_text
         assert f"https://sentinel.example/#records/{anomaly.id}" in card_text
         assert "validation_text" not in card_text
         assert button["text"]["content"] == "已处理"
