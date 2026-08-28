@@ -1,4 +1,21 @@
+from datetime import datetime, timedelta, timezone
+
+import jwt
 from cryptography.fernet import Fernet
+
+
+def issue_session_token(username: str, is_superuser: bool, secret: str, now: datetime | None = None) -> str:
+    issued_at = now or datetime.now(timezone.utc)
+    return jwt.encode(
+        {
+            "sub": username,
+            "role": "superadmin" if is_superuser else "user",
+            "iat": issued_at,
+            "exp": issued_at + timedelta(hours=24),
+        },
+        secret,
+        algorithm="HS256",
+    )
 
 
 class CredentialCipher:

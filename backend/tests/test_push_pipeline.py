@@ -190,7 +190,7 @@ def test_notification_cancellation_stops_immediate_retries(db_session, monkeypat
             raise FeishuError("definitive rejection")
         def close(self): pass
     monkeypatch.setattr("app.execution_service.FeishuClient", CancellingClient)
-    assert execute_push_job(db_session, Settings(), job.id) == "aborted"
+    assert execute_push_job(db_session, Settings(feishu_app_id="test-app", feishu_app_secret="test-secret"), job.id) == "aborted"
     assert calls == ["send"]
     assert db_session.get(NotificationDelivery, job.delivery_id).status == "aborted"
 
@@ -216,7 +216,7 @@ def test_notification_persists_delivery_before_locking_anomaly_for_deadline(db_s
         return original(session, anomaly_id, delivered_at)
     monkeypatch.setattr(execution_service, "FeishuClient", SentClient)
     monkeypatch.setattr(execution_service, "start_deadline", inspect_deadline)
-    assert execute_push_job(db_session, Settings(), job.id) == "sent"
+    assert execute_push_job(db_session, Settings(feishu_app_id="test-app", feishu_app_secret="test-secret"), job.id) == "sent"
     assert seen == ["sent"]
 
 

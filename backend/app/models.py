@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime, timezone as utc_timezone
 
 from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, ForeignKeyConstraint, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.dialects import mysql
@@ -16,7 +16,7 @@ def new_id() -> str:
 
 def utcnow() -> datetime:
     """Return naive UTC for MySQL DATETIME without deprecated datetime.utcnow()."""
-    return datetime.now(UTC).replace(tzinfo=None)
+    return datetime.now(utc_timezone.utc).replace(tzinfo=None)
 
 
 PRECISE_DATETIME = DateTime().with_variant(mysql.DATETIME(fsp=6), "mysql")

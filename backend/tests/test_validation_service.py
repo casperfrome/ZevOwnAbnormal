@@ -1960,6 +1960,8 @@ def test_terminal_card_reconciliation_is_bounded_commits_before_http_and_stops_b
             AnomalyValidationRequest(
                 anomaly_id=anomaly.id, recipient_user_id=f"user-{index}",
                 delivery_status="sent", message_id=f"om_{index}",
+                created_at=NOW + timedelta(seconds=index),
+                updated_at=NOW + timedelta(seconds=index),
             )
             for index in range(3)
         ]

@@ -7,7 +7,6 @@ from pathlib import Path
 import threading
 
 import bcrypt
-import jwt
 from fastapi import Depends, FastAPI, Header, HTTPException, Response
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
@@ -17,6 +16,7 @@ from .anomaly_group_service import queue_due_timeout_broadcasts
 from .config import SESSION_COOKIE, Settings, get_settings
 from .database import Base, make_session_factory
 from .models import AnomalyPushPipelineState, User
+from .security import issue_session_token
 from .push_pipeline import (
     ConfluentKafkaGateway,
     DolphinPushScheduler,
@@ -245,11 +245,7 @@ def create_app(testing: bool = False) -> FastAPI:
     @app.get("/api/v1/auth/me")
     def me(response: Response, user: User = Depends(get_current_user)) -> dict[str, object]:
         if settings.auto_login:
-            token = jwt.encode(
-                {"sub": user.username, "role": "superadmin" if user.is_superuser else "user"},
-                settings.session_secret,
-                algorithm="HS256",
-            )
+            token = issue_session_token(user.username, user.is_superuser, settings.session_secret)
             response.set_cookie(
                 SESSION_COOKIE,
                 token,
@@ -266,7 +262,7 @@ def create_app(testing: bool = False) -> FastAPI:
             user = session.scalar(select(User).where(User.username == payload.get("username", "")))
             if not user or not bcrypt.checkpw(str(payload.get("password", "")).encode(), user.password_hash.encode()):
                 raise HTTPException(401, "用户名或密码错误")
-            token = jwt.encode({"sub": user.username, "role": "superadmin" if user.is_superuser else "user"}, settings.session_secret, algorithm="HS256")
+            token = issue_session_token(user.username, user.is_superuser, settings.session_secret)
             response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax", secure=False, max_age=86400)
             return {"id": user.id, "username": user.username, "is_superuser": user.is_superuser}
 

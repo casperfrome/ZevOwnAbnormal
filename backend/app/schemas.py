@@ -1,3 +1,4 @@
+from datetime import date, time
 from typing import Literal
 from urllib.parse import urlparse
 
@@ -5,6 +6,17 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 DatasourceType = Literal["mysql", "starrocks"]
+
+
+def _required_text(value, field_name: str = "字段"):
+    if value is None:
+        raise ValueError(f"{field_name} 不能为空")
+    if not isinstance(value, str):
+        return value
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError(f"{field_name} 不能为空")
+    return normalized
 
 
 class DatasourceCreate(BaseModel):
@@ -18,6 +30,11 @@ class DatasourceCreate(BaseModel):
     ssl: bool = False
     description: str = ""
 
+    @field_validator("name", mode="before")
+    @classmethod
+    def normalize_name(cls, value):
+        return _required_text(value, "数据源名称")
+
 
 class DatasourceUpdate(BaseModel):
     name: str | None = None
@@ -29,6 +46,22 @@ class DatasourceUpdate(BaseModel):
     ssl: bool | None = None
     description: str | None = None
 
+    @field_validator("name", "host", "database", "username", "password", "description", mode="before")
+    @classmethod
+    def reject_null_text(cls, value, info):
+        if value is None:
+            raise ValueError(f"{info.field_name} 不能为空")
+        if info.field_name == "name":
+            return _required_text(value, "数据源名称")
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("port", "ssl", mode="before")
+    @classmethod
+    def reject_null_scalars(cls, value, info):
+        if value is None:
+            raise ValueError(f"{info.field_name} 不能为空")
+        return value
+
 
 class DatasetCreate(BaseModel):
     name: str = Field(min_length=1, max_length=150)
@@ -36,12 +69,64 @@ class DatasetCreate(BaseModel):
     sql: str = Field(min_length=1)
     description: str = ""
 
+    @field_validator("name", mode="before")
+    @classmethod
+    def normalize_name(cls, value):
+        return _required_text(value, "数据集名称")
+
 
 class DatasetUpdate(BaseModel):
     name: str | None = None
     datasource_id: str | None = None
     sql: str | None = None
     description: str | None = None
+
+    @field_validator("name", "datasource_id", "sql", "description", mode="before")
+    @classmethod
+    def reject_null_fields(cls, value, info):
+        if value is None:
+            raise ValueError(f"{info.field_name} 不能为空")
+        if info.field_name == "name":
+            return _required_text(value, "数据集名称")
+        return value.strip() if isinstance(value, str) else value
+
+
+class DatasourceTestRequest(BaseModel):
+    datasource_id: str | None = None
+    name: str | None = Field(default=None, max_length=150)
+    type: DatasourceType | None = None
+    host: str | None = None
+    port: int | None = Field(default=None, gt=0, le=65535)
+    database: str | None = None
+    username: str | None = None
+    password: str | None = None
+    ssl: bool | None = None
+    description: str | None = None
+
+    @field_validator("datasource_id", "name", "host", "database", "username", mode="before")
+    @classmethod
+    def normalize_optional_text(cls, value, info):
+        if value is None:
+            return value
+        return _required_text(value, info.field_name)
+
+    @model_validator(mode="after")
+    def require_unsaved_connection_fields(self):
+        if self.datasource_id is None:
+            required = ("name", "type", "host", "port", "database", "username")
+            missing = [field for field in required if getattr(self, field) is None]
+            if missing:
+                raise ValueError(f"缺少数据源连接字段: {', '.join(missing)}")
+        return self
+
+
+class DatasetExecuteRequest(BaseModel):
+    datasource_id: str = Field(min_length=1)
+    sql: str = Field(min_length=1)
+
+
+class DatasetValidateRequest(BaseModel):
+    sql: str = Field(min_length=1)
 
 
 class ComparisonOperands(BaseModel):
@@ -303,6 +388,34 @@ class RuleSchedule(BaseModel):
     start_date: str
     end_date: str | None = None
 
+    @field_validator("start_date", "end_date", mode="before")
+    @classmethod
+    def normalize_iso_date(cls, value):
+        if value is None:
+            return value
+        if isinstance(value, str) and not value.strip():
+            return None
+        if not isinstance(value, str) or len(value) != 10:
+            raise ValueError("日期必须为 YYYY-MM-DD")
+        try:
+            date.fromisoformat(value)
+        except ValueError as exc:
+            raise ValueError("日期必须为 YYYY-MM-DD") from exc
+        return value
+
+    @field_validator("time", mode="before")
+    @classmethod
+    def validate_time(cls, value):
+        if value is None or value == "":
+            return value
+        if not isinstance(value, str) or len(value) != 5:
+            raise ValueError("执行时间必须为 HH:MM")
+        try:
+            time.fromisoformat(value)
+        except ValueError as exc:
+            raise ValueError("执行时间必须为 HH:MM") from exc
+        return value
+
     @model_validator(mode="after")
     def validate_frequency(self):
         if self.frequency == "min" and self.interval > 59:
@@ -313,11 +426,13 @@ class RuleSchedule(BaseModel):
             raise ValueError("按天调度固定每日一次")
         if self.frequency == "day" and not self.time:
             raise ValueError("按天调度必须填写执行时间")
+        if self.end_date and self.end_date < self.start_date:
+            raise ValueError("结束日期不能早于开始日期")
         return self
 
 
 class RuleCreate(RuleValidationConfig):
-    name: str
+    name: str = Field(min_length=1, max_length=150)
     description: str = ""
     dataset_id: str
     severity: Literal["high", "medium", "low"] = "medium"
@@ -330,6 +445,11 @@ class RuleCreate(RuleValidationConfig):
     private_message_template: str | None = Field(default=None, max_length=10000)
     group_broadcast: GroupBroadcastConfig = Field(default_factory=GroupBroadcastConfig)
     enabled: bool = False
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def normalize_name(cls, value):
+        return _required_text(value, "规则名称")
 
     @field_validator("private_message_template", mode="before")
     @classmethod

@@ -1,4 +1,5 @@
 import bcrypt
+import jwt
 from fastapi.testclient import TestClient
 import pytest
 from sqlalchemy import select
@@ -157,3 +158,16 @@ def test_production_settings_disable_auto_login_by_default(monkeypatch):
     monkeypatch.delenv("AUTO_LOGIN", raising=False)
 
     assert Settings(_env_file=None).auto_login is False
+
+
+def test_session_cookie_has_24_hour_claims_and_rejects_legacy_no_exp_token():
+    app = create_app(testing=True)
+    app.state.settings.auto_login = False
+    with TestClient(app) as client:
+        login = client.post("/api/v1/auth/login", json={"username": "admin", "password": "Admin@123456"})
+        claims = jwt.decode(login.cookies.get("sentinel_session"), app.state.settings.session_secret, algorithms=["HS256"])
+        assert {"sub", "role", "iat", "exp"} <= claims.keys()
+        assert claims["exp"] - claims["iat"] == 86400
+        client.cookies.delete("sentinel_session")
+        client.cookies.set("sentinel_session", jwt.encode({"sub": "admin", "role": "superadmin"}, app.state.settings.session_secret, algorithm="HS256"))
+        assert client.get("/api/v1/auth/me").status_code == 401

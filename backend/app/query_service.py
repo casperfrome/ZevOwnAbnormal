@@ -54,17 +54,18 @@ def execute_readonly_query(connection, sql: str, limit: int = 200) -> dict[str, 
     wrapped = f"SELECT * FROM ({normalized}) AS sentinel_preview LIMIT %s"
     started = perf_counter()
     with connection.cursor() as cursor:
-        cursor.execute(wrapped, (limit,))
+        cursor.execute(wrapped, (limit + 1,))
         rows = list(cursor.fetchall())
         fields = [
             {"name": column[0], "type": TYPE_NAMES.get(column[1], "VARCHAR")}
             for column in (cursor.description or ())
         ]
+    has_extra_row = len(rows) > limit
     return {
         "fields": fields,
-        "rows": rows,
-        "row_count": len(rows),
-        "truncated": len(rows) == limit,
+        "rows": rows[:limit],
+        "row_count": min(len(rows), limit),
+        "truncated": has_extra_row,
         "elapsed_ms": round((perf_counter() - started) * 1000, 2),
     }
 

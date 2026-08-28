@@ -86,9 +86,6 @@ def evaluate_static_condition(actual: Any, condition: dict[str, Any]) -> bool:
         raise ValueError("比较值类型不兼容") from exc
 
 
-_static_match = evaluate_static_condition
-
-
 def _date_value(value: Any) -> date | None:
     if isinstance(value, datetime):
         return value.date()
@@ -125,7 +122,8 @@ def _baseline_value(
     if baseline == "prev_period":
         if not prior:
             return None
-        return float(_comparable(prior[-1].get(field)))
+        previous_value = prior[-1].get(field)
+        return float(_comparable(previous_value)) if previous_value is not None else None
     days = 7 if baseline == "7d_avg" else 30 if baseline == "30d_avg" else None
     if days is None:
         raise ValueError(f"不支持的基线: {baseline}")
@@ -159,7 +157,11 @@ def evaluate_rows(
         raise ValueError("基线规则要求异常主键中恰好包含一个日期时间字段")
     time_field = time_fields[0] if time_fields else ""
     if baseline_conditions:
-        rows = sorted(rows, key=lambda row: tuple(row.get(k) for k in key_fields if k != time_field) + (_date_value(row.get(time_field)),))
+        rows = sorted(
+            rows,
+            key=lambda row: tuple(str(row.get(k, "")) for k in key_fields if k != time_field)
+            + ((_date_value(row.get(time_field)) or date.min).isoformat(),),
+        )
 
     matches: list[EvaluationMatch] = []
     for index, row in enumerate(rows):
@@ -183,7 +185,7 @@ def evaluate_rows(
                         raise ValueError("基线比较值类型不兼容") from exc
                     passed = actual > baseline * ratio if operator.startswith("gt_") else actual < baseline * ratio
             else:
-                passed = _static_match(row.get(condition["field"]), detail)
+                passed = evaluate_static_condition(row.get(condition["field"]), detail)
             detail["matched"] = passed
             evaluations.append((passed, detail))
         is_match = all(item[0] for item in evaluations) if logic == "AND" else any(item[0] for item in evaluations)

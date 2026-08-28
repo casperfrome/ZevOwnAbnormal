@@ -190,6 +190,22 @@ def test_anomaly_export_uses_the_same_server_filters_and_global_sort_as_the_list
         })
 
     assert response.status_code == 200
-    rows = list(csv.DictReader(io.StringIO(response.text)))
+    rows = list(csv.DictReader(io.StringIO(response.content.decode("utf-8-sig"))))
     assert [row["id"] for row in rows] == ["record-11", "record-09", "record-07", "record-05", "record-01"]
     assert all(row["status"] == "pending" and row["severity"] == "high" for row in rows)
+
+
+def test_anomaly_export_ids_intersect_filters_and_escape_formula_cells():
+    with TestClient(create_app(testing=True)) as client:
+        seed_anomalies(client)
+        with client.app.state.session_factory() as session:
+            session.get(AnomalyRecord, "record-01").rule_name = " \t=SUM(1,1)"
+            session.commit()
+        response = client.get(
+            "/api/v1/anomalies/export",
+            params=[("ids", "record-01"), ("ids", "record-02"), ("severity", "high")],
+        )
+    assert response.content.startswith(b"\xef\xbb\xbf")
+    rows = list(csv.DictReader(io.StringIO(response.content.decode("utf-8-sig"))))
+    assert [row["id"] for row in rows] == ["record-01"]
+    assert rows[0]["rule_name"].startswith("'")

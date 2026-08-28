@@ -38,9 +38,18 @@ def test_execute_query_wraps_preview_limit_and_returns_real_metadata():
 
     sql, params = connection.cursor_instance.executed
     assert "sentinel_preview" in sql
-    assert params == (200,)
+    assert params == (201,)
     assert result["rows"] == [{"store_id": "S001", "gmv": 123.45}]
     assert result["fields"] == [
         {"name": "store_id", "type": "VARCHAR"},
         {"name": "gmv", "type": "DECIMAL"},
     ]
+
+
+def test_execute_query_marks_preview_truncated_only_when_extra_row_exists():
+    connection = FakeConnection()
+    connection.cursor_instance.fetchall = lambda: [{"store_id": "S001", "gmv": 1}, {"store_id": "S002", "gmv": 2}]
+    result = execute_readonly_query(connection, "SELECT store_id, gmv FROM ads", limit=1)
+    assert connection.cursor_instance.executed[1] == (2,)
+    assert result["rows"] == [{"store_id": "S001", "gmv": 1}]
+    assert result["row_count"] == 1 and result["truncated"] is True

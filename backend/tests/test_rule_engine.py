@@ -3,6 +3,7 @@ from datetime import date
 import pytest
 
 from app.rule_engine import evaluate_rows
+from app.schemas import RuleSchedule
 
 
 def test_static_operators_and_and_logic():
@@ -127,3 +128,28 @@ def test_missing_condition_field_is_not_treated_as_null(operator):
         evaluate_rows([{"id": 1, "target": 2}], [
             {"field": "actual", "operator": operator, "value_source": "field", "value_field": "target"}
         ], "AND", ["id"])
+
+
+def test_invalid_baselines_are_nonmatches_without_blocking_or_conditions():
+    rows = [{"id": 1, "day": "invalid", "actual": 100, "other": 0}, {"id": 2, "day": "2026-08-02", "actual": 100, "other": 1}]
+    conditions = [
+        {"field": "actual", "operator": "gt_threshold_ratio", "value": 2, "baseline": "prev_period"},
+        {"field": "other", "operator": "eq", "value": 1},
+    ]
+    matches = evaluate_rows(rows, conditions, "OR", ["id", "day"], {"day": "DATE"})
+    assert [match.row["id"] for match in matches] == [2]
+    assert evaluate_rows(
+        [{"id": 1, "day": "2026-08-01", "actual": None}, {"id": 2, "day": "2026-08-02", "actual": 10}],
+        [conditions[0]], "AND", ["id", "day"], {"day": "DATE"},
+    ) == []
+
+
+@pytest.mark.parametrize("payload", [
+    {"frequency": "day", "interval": 1, "time": "25:00", "start_date": "2026-02-30"},
+    {"frequency": "day", "interval": 1, "time": "09:30:00", "start_date": "2026-08-01"},
+    {"frequency": "day", "interval": 1, "time": "09:30", "start_date": "2026-08-02", "end_date": "2026-08-01"},
+])
+def test_rule_schedule_requires_real_iso_dates_hh_mm_and_order(payload):
+    with pytest.raises(ValueError):
+        RuleSchedule(**payload)
+    assert RuleSchedule(frequency="day", interval=1, time="09:30", start_date="2026-08-01", end_date="").end_date is None

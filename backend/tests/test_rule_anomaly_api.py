@@ -407,6 +407,23 @@ def test_daily_schedule_rejects_interval_greater_than_one():
         assert response.status_code == 422
 
 
+def test_rule_names_are_trimmed_bounded_and_conflicts_are_reported():
+    with TestClient(create_app(testing=True)) as client:
+        dataset = create_dependencies(client)
+        payload = {
+            "name": "  unique rule  ", "dataset_id": dataset["id"],
+            "conditions": [{"field": "gmv", "operator": "gt", "value": 1}],
+            "anomaly_key_fields": ["store_id"],
+            "schedule": {"frequency": "day", "interval": 1, "time": "09:00", "start_date": "2026-08-09"},
+            "notification_targets": [{"receive_id_type": "open_id", "source": "literal", "value": "owner"}],
+        }
+        first = client.post("/api/v1/rules", json=payload)
+        assert first.status_code == 201 and first.json()["name"] == "unique rule"
+        second = client.post("/api/v1/rules", json={**payload, "name": "other rule"}).json()
+        assert client.put(f"/api/v1/rules/{second['id']}", json={**payload, "name": "unique rule"}).status_code == 409
+        assert client.post("/api/v1/rules", json={**payload, "name": " " * 151}).status_code == 422
+
+
 def test_manual_execution_reports_failed_run_as_http_error(monkeypatch):
     failed_run = SimpleNamespace(status="failed", error_message="invalid numeric threshold")
     monkeypatch.setattr("app.api.execute_rule", lambda *_args, **_kwargs: failed_run)

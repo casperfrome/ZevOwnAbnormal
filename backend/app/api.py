@@ -1,11 +1,13 @@
 import csv
 import io
 import secrets
+from datetime import datetime, timedelta
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 import httpx
 import jwt
-from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request, Response, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 from sqlalchemy import and_, case, exists, func, or_, select, tuple_
 from sqlalchemy.exc import IntegrityError
@@ -44,7 +46,10 @@ from .schemas import (
     DatasourceCreate,
     DatasourceUpdate,
     DatasetCreate,
+    DatasetExecuteRequest,
     DatasetUpdate,
+    DatasetValidateRequest,
+    DatasourceTestRequest,
     FeishuCardActionCallback,
     FeishuMessageTestRequest,
     RuleCreate,
@@ -99,7 +104,12 @@ def get_current_user(
     if not token:
         raise HTTPException(401, "未登录")
     try:
-        claims = jwt.decode(token, settings.session_secret, algorithms=["HS256"])
+        claims = jwt.decode(
+            token,
+            settings.session_secret,
+            algorithms=["HS256"],
+            options={"require": ["exp", "iat", "sub", "role"]},
+        )
     except jwt.PyJWTError as exc:
         raise HTTPException(401, "登录状态无效") from exc
     username = claims.get("sub")
@@ -380,6 +390,14 @@ def _datasource_password(item: Datasource, settings: Settings) -> str:
     return CredentialCipher(settings.datasource_encryption_key).decrypt(item.password_encrypted)
 
 
+def _dataset_field_names(dataset: Dataset) -> set[str]:
+    return {
+        str(field["name"])
+        for field in (dataset.fields or [])
+        if field.get("name") is not None
+    }
+
+
 def rule_dict(item: Rule) -> dict:
     return {
         "id": item.id,
@@ -431,7 +449,7 @@ def _sync_rule(item: Rule, settings: Settings, session: Session) -> None:
 
 
 def _validate_rule_sql_configuration(payload: RuleCreate, dataset: Dataset) -> None:
-    fields = {str(field["name"]) for field in (dataset.fields or []) if field.get("name") is not None}
+    fields = _dataset_field_names(dataset)
     if payload.repeat_push_enabled and {"__detected_at", "__occurrence_id"} & set(payload.anomaly_key_fields):
         raise HTTPException(422, "异常主键不能使用系统保留字段 __detected_at、__occurrence_id")
     for condition in payload.conditions:
@@ -443,11 +461,7 @@ def _validate_rule_sql_configuration(payload: RuleCreate, dataset: Dataset) -> N
                 raise HTTPException(422, f"比较目标字段不存在：{getattr(condition, f'{name}_field')}")
     if payload.validation_method != "sql" or payload.sql_validation_config is None:
         return
-    fields = {
-        str(field.get("name"))
-        for field in (dataset.fields or [])
-        if field.get("name") is not None
-    }
+    fields = _dataset_field_names(dataset)
     try:
         validate_sql_validation_config(
             payload.sql_validation_config.model_dump(mode="json"),
@@ -474,11 +488,7 @@ def _validate_group_broadcast_configuration(
     situation_enabled = config.situation.enabled if situation_supplied else bool(existing and existing.group_broadcast_enabled)
     if (situation_enabled or timeout_enabled) and not effective_webhook:
         raise HTTPException(422, "启用群聊播报时必须配置 webhook")
-    fields = {
-        str(field.get("name"))
-        for field in (dataset.fields or [])
-        if field.get("name") is not None
-    }
+    fields = _dataset_field_names(dataset)
     missing = sorted({
         target.field
         for mode in [config.situation, config.timeout] if mode is not None
@@ -490,11 +500,7 @@ def _validate_group_broadcast_configuration(
 
 
 def _validate_message_templates(payload: RuleCreate, dataset: Dataset) -> None:
-    fields = {
-        str(field.get("name"))
-        for field in (dataset.fields or [])
-        if field.get("name") is not None
-    }
+    fields = _dataset_field_names(dataset)
     templates = [(payload.private_message_template, "private")]
     if "group_broadcast" in payload.model_fields_set:
         templates.extend((mode.message_template, "group") for mode in
@@ -701,17 +707,45 @@ def create_datasource(payload: DatasourceCreate, session: Session = Depends(get_
 
 
 @router.post("/datasources/test")
-def test_datasource_config(payload: DatasourceCreate, _admin_username: str = Depends(get_current_admin)):
-    item = Datasource(**payload.model_dump(exclude={"password"}), password_encrypted="")
+def test_datasource_config(
+    payload: DatasourceTestRequest,
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_app_settings),
+    _admin_username: str = Depends(get_current_admin),
+):
+    saved = session.get(Datasource, payload.datasource_id) if payload.datasource_id else None
+    if payload.datasource_id and saved is None:
+        raise HTTPException(404, "数据源不存在")
+    if saved is not None:
+        item = Datasource(
+            name=saved.name, type=saved.type, host=saved.host, port=saved.port,
+            database=saved.database, username=saved.username, ssl=saved.ssl,
+            description=saved.description, password_encrypted="",
+        )
+        for key, value in payload.model_dump(
+            exclude_unset=True, exclude={"datasource_id", "password"},
+        ).items():
+            setattr(item, key, value)
+        password = payload.password if "password" in payload.model_fields_set else _datasource_password(saved, settings)
+    else:
+        item = Datasource(
+            name=payload.name, type=payload.type, host=payload.host, port=payload.port,
+            database=payload.database, username=payload.username, ssl=payload.ssl or False,
+            description=payload.description or "", password_encrypted="",
+        )
+        password = payload.password or ""
+    connection = None
     try:
-        connection = connect_to_datasource(item, payload.password)
+        connection = connect_to_datasource(item, password)
         with connection.cursor() as cursor:
             cursor.execute("SELECT 1 AS ok")
             cursor.fetchone()
-        connection.close()
         return {"ok": True}
     except Exception as exc:
         raise HTTPException(502, f"连接失败: {exc}") from exc
+    finally:
+        if connection is not None:
+            connection.close()
 
 
 @router.get("/datasources/{datasource_id}")
@@ -737,7 +771,11 @@ def update_datasource(datasource_id: str, payload: DatasourceUpdate, session: Se
         setattr(item, key, value)
     if password is not None:
         item.password_encrypted = CredentialCipher(settings.datasource_encryption_key).encrypt(password) if password else ""
-    session.commit()
+    try:
+        session.commit()
+    except IntegrityError as exc:
+        session.rollback()
+        raise HTTPException(409, "数据源名称已存在") from exc
     return datasource_dict(item)
 
 
@@ -757,12 +795,13 @@ def test_datasource(datasource_id: str, session: Session = Depends(get_session),
     item = session.get(Datasource, datasource_id)
     if not item:
         raise HTTPException(404, "数据源不存在")
+    connection = None
+    item.last_checked = utcnow()
     try:
         connection = connect_to_datasource(item, _datasource_password(item, settings))
         with connection.cursor() as cursor:
             cursor.execute("SELECT 1 AS ok")
             cursor.fetchone()
-        connection.close()
         item.status = "online"
         item.error_message = None
     except Exception as exc:
@@ -770,7 +809,9 @@ def test_datasource(datasource_id: str, session: Session = Depends(get_session),
         item.error_message = str(exc)[:1000]
         session.commit()
         raise HTTPException(502, f"连接失败: {exc}") from exc
-    item.last_checked = utcnow()
+    finally:
+        if connection is not None:
+            connection.close()
     session.commit()
     return {"ok": True, "checked_at": item.last_checked}
 
@@ -793,7 +834,11 @@ def create_dataset(payload: DatasetCreate, session: Session = Depends(get_sessio
         raise HTTPException(422, str(exc)) from exc
     item = Dataset(**payload.model_dump(exclude={"sql"}), sql=normalized)
     session.add(item)
-    session.commit()
+    try:
+        session.commit()
+    except IntegrityError as exc:
+        session.rollback()
+        raise HTTPException(409, "数据集名称已存在") from exc
     session.refresh(item)
     return dataset_dict(item)
 
@@ -821,9 +866,15 @@ def update_dataset(dataset_id: str, payload: DatasetUpdate, session: Session = D
             changes["sql"] = validate_readonly_sql(changes["sql"])
         except SqlValidationError as exc:
             raise HTTPException(422, str(exc)) from exc
+    if "datasource_id" in changes and not session.get(Datasource, changes["datasource_id"]):
+        raise HTTPException(404, "数据源不存在")
     for key, value in changes.items():
         setattr(item, key, value)
-    session.commit()
+    try:
+        session.commit()
+    except IntegrityError as exc:
+        session.rollback()
+        raise HTTPException(409, "数据集名称已存在") from exc
     return dataset_dict(item)
 
 
@@ -843,14 +894,17 @@ def execute_saved_dataset(dataset_id: str, session: Session = Depends(get_sessio
     item = session.get(Dataset, dataset_id)
     if not item:
         raise HTTPException(404, "数据集不存在")
+    connection = None
     try:
         connection = connect_to_datasource(item.datasource, _datasource_password(item.datasource, settings))
         result = execute_readonly_query(connection, item.sql)
-        connection.close()
     except SqlValidationError as exc:
         raise HTTPException(422, str(exc)) from exc
     except Exception as exc:
         raise HTTPException(502, f"查询执行失败: {exc}") from exc
+    finally:
+        if connection is not None:
+            connection.close()
     item.fields = result["fields"]
     item.row_count = result["row_count"]
     session.commit()
@@ -858,25 +912,28 @@ def execute_saved_dataset(dataset_id: str, session: Session = Depends(get_sessio
 
 
 @router.post("/datasets/execute")
-def execute_ad_hoc_dataset(payload: dict, session: Session = Depends(get_session), settings: Settings = Depends(get_app_settings), _admin_username: str = Depends(get_current_admin)):
-    datasource = session.get(Datasource, payload.get("datasource_id"))
+def execute_ad_hoc_dataset(payload: DatasetExecuteRequest, session: Session = Depends(get_session), settings: Settings = Depends(get_app_settings), _admin_username: str = Depends(get_current_admin)):
+    datasource = session.get(Datasource, payload.datasource_id)
     if not datasource:
         raise HTTPException(404, "数据源不存在")
+    connection = None
     try:
         connection = connect_to_datasource(datasource, _datasource_password(datasource, settings))
-        result = execute_readonly_query(connection, payload.get("sql", ""))
-        connection.close()
+        result = execute_readonly_query(connection, payload.sql)
         return result
     except SqlValidationError as exc:
         raise HTTPException(422, str(exc)) from exc
     except Exception as exc:
         raise HTTPException(502, f"查询执行失败: {exc}") from exc
+    finally:
+        if connection is not None:
+            connection.close()
 
 
 @router.post("/datasets/validate")
-def validate_dataset_sql(payload: dict):
+def validate_dataset_sql(payload: DatasetValidateRequest):
     try:
-        normalized = validate_readonly_sql(payload.get("sql", ""))
+        normalized = validate_readonly_sql(payload.sql)
     except SqlValidationError as exc:
         raise HTTPException(422, str(exc)) from exc
     return {"valid": True, "normalized_sql": normalized}
@@ -943,7 +1000,11 @@ def update_rule(rule_id: str, payload: RuleCreate, session: Session = Depends(ge
     _apply_group_broadcast_configuration(item, payload, settings)
     item.sync_status = "pending"
     item.sync_error = None
-    session.commit()
+    try:
+        session.commit()
+    except IntegrityError as exc:
+        session.rollback()
+        raise HTTPException(409, "规则名称已存在") from exc
     return rule_dict(item)
 
 
@@ -1248,6 +1309,7 @@ def export_anomalies(
     severity: str | None = None,
     rule_id: str | None = None,
     search: str | None = None,
+    ids: list[str] | None = Query(default=None),
     sort_key: Literal["occurredAt", "severity"] = "occurredAt",
     sort_order: Literal["asc", "desc"] = "desc",
     session: Session = Depends(get_session),
@@ -1266,11 +1328,27 @@ def export_anomalies(
     )
     if push_status == "in_transit":
         query = query.where(AnomalyRecord.id.in_(_in_transit_anomaly_ids(session)))
+    if ids is not None:
+        query = query.where(AnomalyRecord.id.in_(ids))
     for item in session.scalars(query.order_by(
         _anomaly_ordering(sort_key, sort_order), AnomalyRecord.id.asc()
     )):
-        writer.writerow([item.id, item.rule_name, item.dataset_name, item.severity, item.status, item.business_key, item.first_seen_at, item.last_seen_at, item.hit_count])
-    return Response(output.getvalue(), media_type="text/csv; charset=utf-8", headers={"Content-Disposition": "attachment; filename=anomalies.csv"})
+        writer.writerow([_csv_safe_cell(value) for value in (
+            item.id, item.rule_name, item.dataset_name, item.severity, item.status,
+            item.business_key, item.first_seen_at, item.last_seen_at, item.hit_count,
+        )])
+    return Response("\ufeff" + output.getvalue(), media_type="text/csv; charset=utf-8", headers={"Content-Disposition": "attachment; filename=anomalies.csv"})
+
+
+def _csv_safe_cell(value):
+    if not isinstance(value, str):
+        return value
+    candidate = value
+    while candidate and (candidate[0].isspace() or ord(candidate[0]) < 32):
+        candidate = candidate[1:]
+    if candidate and candidate[0] in ("=", "+", "-", "@"):
+        return "'" + value
+    return value
 
 
 @router.get("/anomalies/{anomaly_id}")
@@ -1415,32 +1493,83 @@ def bulk_anomaly_status(
 
 @router.get("/overview")
 def overview(
+    days: Literal["14", "30", "90"] = "14",
     session: Session = Depends(get_session),
     _reader: User = Depends(get_current_reader),
 ):
-    anomalies = list(session.scalars(select(AnomalyRecord)))
-    rules = list(session.scalars(select(Rule).where(Rule.deleted_at.is_(None))))
-    datasources = list(session.scalars(select(Datasource)))
-    datasets = list(session.scalars(select(Dataset)))
+    day_count = int(days)
+    anomaly_stats = session.execute(select(
+        func.sum(case((AnomalyRecord.status == "pending", 1), else_=0)),
+        func.sum(case((AnomalyRecord.status == "processing", 1), else_=0)),
+        func.sum(case((AnomalyRecord.status == "timed_out", 1), else_=0)),
+        func.sum(case((AnomalyRecord.status == "resolved", 1), else_=0)),
+        func.sum(case((and_(AnomalyRecord.severity == "high", AnomalyRecord.status != "resolved"), 1), else_=0)),
+    )).one()
+    active_rules, total_rules = session.execute(select(
+        func.sum(case((Rule.enabled.is_(True), 1), else_=0)), func.count(Rule.id),
+    ).where(Rule.deleted_at.is_(None))).one()
+    online_datasources, total_datasources = session.execute(select(
+        func.sum(case((Datasource.status == "online", 1), else_=0)), func.count(Datasource.id),
+    )).one()
+    total_datasets = session.scalar(select(func.count(Dataset.id))) or 0
     push_in_transit_anomalies = session.scalar(
         select(func.count()).select_from(_in_transit_anomaly_ids(session).subquery())
     ) or 0
+    recent_anomalies = list(session.scalars(
+        select(AnomalyRecord).order_by(AnomalyRecord.last_seen_at.desc(), AnomalyRecord.id.asc()).limit(5)
+    ))
+    anomaly_counts = select(
+        AnomalyRecord.rule_id.label("rule_id"), func.count(AnomalyRecord.id).label("anomaly_count"),
+    ).group_by(AnomalyRecord.rule_id).subquery()
+    top_rules = [
+        {"id": rule_id, "name": name, "dataset_name": dataset_name, "anomaly_count": anomaly_count}
+        for rule_id, name, dataset_name, anomaly_count in session.execute(
+            select(
+                Rule.id, Rule.name, Dataset.name, func.coalesce(anomaly_counts.c.anomaly_count, 0),
+            ).join(Dataset, Rule.dataset_id == Dataset.id).outerjoin(
+                anomaly_counts, anomaly_counts.c.rule_id == Rule.id,
+            ).where(Rule.deleted_at.is_(None)).order_by(
+                func.coalesce(anomaly_counts.c.anomaly_count, 0).desc(), Rule.id.asc(),
+            ).limit(4)
+        )
+    ]
+    shanghai = ZoneInfo("Asia/Shanghai")
+    today = datetime.now(shanghai).date()
+    start_day = today - timedelta(days=day_count - 1)
+    dialect_name = session.get_bind().dialect.name
+    beijing_day = (
+        func.date(func.datetime(AnomalyRecord.first_seen_at, "+8 hours"))
+        if dialect_name == "sqlite"
+        else func.date(func.convert_tz(AnomalyRecord.first_seen_at, "+00:00", "+08:00"))
+    )
+    counts_by_day = {
+        str(day_value): count
+        for day_value, count in session.execute(
+            select(beijing_day, func.count(AnomalyRecord.id)).where(
+                beijing_day >= start_day.isoformat(), beijing_day <= today.isoformat(),
+            ).group_by(beijing_day)
+        )
+    }
+    trend = [
+        {"date": (start_day + timedelta(days=index)).isoformat(), "count": counts_by_day.get((start_day + timedelta(days=index)).isoformat(), 0)}
+        for index in range(day_count)
+    ]
     return {
         "stats": {
-            "pending_records": sum(a.status == "pending" for a in anomalies),
-            "processing_records": sum(a.status == "processing" for a in anomalies),
-            "timed_out_records": sum(a.status == "timed_out" for a in anomalies),
-            "resolved_records": sum(a.status == "resolved" for a in anomalies),
-            "high_anomalies": sum(a.severity == "high" and a.status != "resolved" for a in anomalies),
-            "critical_anomalies": sum(a.severity == "high" and a.status != "resolved" for a in anomalies),
+            "pending_records": anomaly_stats[0] or 0,
+            "processing_records": anomaly_stats[1] or 0,
+            "timed_out_records": anomaly_stats[2] or 0,
+            "resolved_records": anomaly_stats[3] or 0,
+            "high_anomalies": anomaly_stats[4] or 0,
+            "critical_anomalies": anomaly_stats[4] or 0,
             "push_in_transit_anomalies": push_in_transit_anomalies,
-            "active_rules": sum(r.enabled for r in rules), "total_rules": len(rules),
-            "online_datasources": sum(d.status == "online" for d in datasources), "total_datasources": len(datasources),
-            "total_datasets": len(datasets),
+            "active_rules": active_rules or 0, "total_rules": total_rules or 0,
+            "online_datasources": online_datasources or 0, "total_datasources": total_datasources or 0,
+            "total_datasets": total_datasets,
         },
-        "recent_anomalies": [anomaly_dict(item) for item in sorted(anomalies, key=lambda a: a.last_seen_at, reverse=True)[:5]],
-        "top_rules": [
-            {"id": rule.id, "name": rule.name, "dataset_name": rule.dataset.name, "anomaly_count": sum(a.rule_id == rule.id for a in anomalies)}
-            for rule in rules
-        ],
+        "recent_anomalies": [anomaly_dict(item) for item in recent_anomalies],
+        "top_rules": top_rules,
+        "timezone": "Asia/Shanghai",
+        "days": day_count,
+        "trend": trend,
     }
