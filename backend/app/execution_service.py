@@ -173,6 +173,7 @@ def execute_rule(session: Session, settings: Settings, rule_id: str, trigger_sou
             run.new_anomalies = persisted.new_count
             create_anomaly_group(
                 session, settings, rule, run, persisted.records, matches,
+                new_record_ids=persisted.new_record_ids,
             )
         except Exception as exc:
             session.rollback()

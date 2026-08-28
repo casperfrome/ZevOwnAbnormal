@@ -110,6 +110,7 @@ test('rule form saves real-time validation targets and reports an inline error w
   await page.locator('#f-key-fields-listbox [data-key-field="order_id"]').click();
   await page.getByRole('tab', { name: '异常条件', exact: true }).click();
   await page.selectOption('.condition-row [data-c="field"]', 'amount');
+  await page.fill('.condition-row [data-c="value"]', '100');
   await page.getByRole('tab', { name: '私聊通知', exact: true }).click();
   await page.fill('#f-openids-input', 'ou_notify');
   await page.getByRole('tab', { name: '实时校验', exact: true }).click();
@@ -1187,6 +1188,7 @@ test('rule form configures one SQL validation method with mapped anomaly fields'
   await page.locator('#f-key-fields-listbox [data-key-field="order_id"]').click();
   await page.getByRole('tab', { name: '异常条件', exact: true }).click();
   await page.selectOption('.condition-row [data-c="field"]', 'amount');
+  await page.fill('.condition-row [data-c="value"]', '100');
   await page.getByRole('tab', { name: '私聊通知', exact: true }).click();
   await page.fill('#f-openids-input', 'ou_notify');
   await page.getByRole('tab', { name: '实时校验', exact: true }).click();
@@ -1212,7 +1214,7 @@ test('rule form configures one SQL validation method with mapped anomaly fields'
   assert.deepEqual(created.sqlValidationConfig, {
     queryTemplate: "SELECT current_amount FROM repair_state WHERE order_id='{订单ID}'",
     parameters: [{ name: '订单ID', field: 'order_id' }],
-    trueCondition: { field: 'current_amount', operator: 'lt', value: 100, upperValue: null },
+    trueCondition: { field: 'current_amount', operator: 'lt', value: 100, upperValue: null, valueSource: 'literal', valueField: null, upperValueSource: 'literal', upperValueField: null },
   });
   assert.deepEqual(created.validationTargets, [{ source: 'literal', value: 'validator-1' }]);
   assert.deepEqual(pageErrors, []);
@@ -1240,5 +1242,29 @@ test('abort push action is hidden from non-superadmin readers', async t => {
   assert.deepEqual(await page.locator('#actions button').evaluateAll(items => items.map(item => item.id)), [
     'rec-export', 'rec-refresh',
   ]);
+  assert.deepEqual(pageErrors, []);
+});
+
+test('record detail shows resolved field comparisons and last failed SQL audit without rendering unrelated SQL data', async t => {
+  const { page, pageErrors } = await withPage(t, async page => {
+    await page.evaluate(() => {
+      const record = {
+        id: 'audit-fields', ruleName: 'Compare', status: 'pending', severity: 'high', details: {}, businessKey: {},
+        field: 'actual', value: 15, deliveries: [], timeline: [],
+        matchedConditions: [{ field: 'actual', operator: 'between', actual: 15, value_source: 'field', value_field: '<low>', resolved_value: 10, upper_value_source: 'field', upper_value_field: 'high', resolved_upper_value: 20 }],
+        lastSqlValidationResult: { outcome: 'failed', reason: '比较未通过', operatorUserId: 'validator', checkedAt: '2026-08-28T01:00:00Z', resultDetail: { field: 'actual', operator: 'gt', actual: 15, valueSource: 'field', valueField: 'limit', resolvedValue: 20 } },
+      };
+      window.Store = { loadRecord: async () => record, getRule: () => null };
+    });
+    await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'records.js') });
+  });
+  await page.evaluate(() => RecordsModule.openDetail('audit-fields'));
+  const text = await page.locator('.drawer').textContent();
+  assert.match(text, /<low>.*10/);
+  assert.match(text, /high.*20/);
+  assert.match(text, /最近 SQL 校验/);
+  assert.match(text, /比较未通过/);
+  assert.match(text, /limit.*20/);
+  assert.equal(await page.locator('.drawer low').count(), 0);
   assert.deepEqual(pageErrors, []);
 });

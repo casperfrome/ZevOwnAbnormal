@@ -8,6 +8,32 @@ from app.models import AnomalyRecord, Dataset, Datasource, NotificationDelivery,
 from app.rule_engine import EvaluationMatch
 
 
+def test_repeat_push_creates_unique_occurrences_even_with_frozen_time(monkeypatch):
+    from datetime import datetime
+    from app.models import AnomalyPushJob, AnomalyValidationRequest
+    session, rule = build_session()
+    rule.repeat_push_enabled = True
+    rule.validation_enabled = True
+    rule.validation_targets = [{"source": "literal", "value": "handler"}]
+    session.commit()
+    monkeypatch.setattr("app.anomaly_service.utcnow", lambda: datetime(2026, 8, 28, 10))
+    match = EvaluationMatch(row={"store_id": "S1"}, business_key={"store_id": "S1"}, matched_conditions=[])
+    first = persist_matches(session, rule, [match, match])
+    second = persist_matches(session, rule, [match])
+    assert (first.new_count, second.new_count) == (2, 1)
+    records = list(session.scalars(select(AnomalyRecord)))
+    assert len({record.fingerprint for record in records}) == 3
+    assert all(record.business_key["store_id"] == "S1" for record in records)
+    assert all(record.business_key["__detected_at"] == "2026-08-28T10:00:00.000000Z" for record in records)
+    assert len(list(session.scalars(select(AnomalyValidationRequest)))) == 3
+    assert len(list(session.scalars(select(AnomalyPushJob)))) == 6
+    assert len(first.new_record_ids) == 2
+    rule.repeat_push_enabled = False
+    session.commit()
+    assert persist_matches(session, rule, [match]).new_count == 1
+    assert persist_matches(session, rule, [match]).new_count == 0
+
+
 def build_session():
     engine, factory = make_session_factory("sqlite+pysqlite:///:memory:", testing=True)
     Base.metadata.create_all(engine)

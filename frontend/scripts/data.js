@@ -73,12 +73,22 @@ window.Store = (function () {
       operator: config.true_condition?.operator || 'eq',
       value: config.true_condition?.value ?? null,
       upperValue: config.true_condition?.upper_value ?? null,
+      valueSource: config.true_condition?.value_source || 'literal',
+      valueField: config.true_condition?.value_field || null,
+      upperValueSource: config.true_condition?.upper_value_source || 'literal',
+      upperValueField: config.true_condition?.upper_value_field || null,
     },
   }) : null;
+  const mapBroadcastSection = section => ({
+    enabled: !!section?.enabled,
+    mentionTargets: section?.mention_targets || [],
+    messageTemplate: section?.message_template || '',
+  });
   const mapRule = r => ({
     id: r.id, name: r.name, description: r.description || '', datasetId: r.dataset_id,
     datasetName: r.dataset_name, severity: r.severity, logic: r.logic,
     conditions: (r.conditions || []).map(({ operator, ...condition }) => ({ ...condition, op: operator })),
+    repeatPushEnabled: !!r.repeat_push_enabled,
     anomalyKeyFields: r.anomaly_key_fields || [], schedule: {
       frequency: r.schedule.frequency, interval: r.schedule.interval, time: r.schedule.time,
       start: r.schedule.start_date, end: r.schedule.end_date,
@@ -91,10 +101,9 @@ window.Store = (function () {
     validationMethod: r.validation_method || 'pseudo',
     sqlValidationConfig: mapSqlValidationConfig(r.sql_validation_config),
     groupBroadcast: {
-      enabled: !!r.group_broadcast?.enabled,
       webhookUrl: r.group_broadcast?.webhook_url || '',
-      mentionTargets: r.group_broadcast?.mention_targets || [],
-      messageTemplate: r.group_broadcast?.message_template || '',
+      situation: mapBroadcastSection(r.group_broadcast?.situation || r.group_broadcast),
+      timeout: mapBroadcastSection(r.group_broadcast?.timeout),
     },
     enabled: r.enabled, syncStatus: r.sync_status, syncError: r.sync_error,
     lastRun: r.last_run || null, nextRun: r.next_run || null, anomalyCount: r.anomaly_count || 0,
@@ -108,18 +117,19 @@ window.Store = (function () {
     lastError: item.last_error,
     deliveredAt: item.delivered_at,
   });
+  const mapResultDetail = detail => detail ? ({
+    field: detail.field, operator: detail.operator,
+    value: detail.value ?? null, upperValue: detail.upper_value ?? null, actual: detail.actual ?? null,
+    valueSource: detail.value_source || 'literal', valueField: detail.value_field || null,
+    upperValueSource: detail.upper_value_source || 'literal', upperValueField: detail.upper_value_field || null,
+    resolvedValue: detail.resolved_value ?? null, resolvedUpperValue: detail.resolved_upper_value ?? null,
+  }) : null;
   const mapValidationSubmission = item => item ? ({
     submittedByUserId: item.submitted_by_user_id,
     submittedText: item.submitted_text,
     validatorType: item.validator_type,
     result: item.result,
-    resultDetail: item.result_detail ? {
-      field: item.result_detail.field,
-      operator: item.result_detail.operator,
-      value: item.result_detail.value ?? null,
-      upperValue: item.result_detail.upper_value ?? null,
-      actual: item.result_detail.actual ?? null,
-    } : null,
+    resultDetail: mapResultDetail(item.result_detail),
     submittedAt: item.submitted_at,
   }) : null;
   const mapPushJob = item => ({
@@ -149,6 +159,14 @@ window.Store = (function () {
       deliveries: r.deliveries || [],
       validationRequests: (r.validation_requests || []).map(mapValidationRequest),
       validationSubmission: mapValidationSubmission(r.validation_submission),
+      lastSqlValidationResult: r.last_sql_validation_result ? {
+        outcome: r.last_sql_validation_result.outcome,
+        reason: r.last_sql_validation_result.reason,
+        condition: r.last_sql_validation_result.condition,
+        resultDetail: mapResultDetail(r.last_sql_validation_result.result_detail),
+        operatorUserId: r.last_sql_validation_result.operator_user_id,
+        checkedAt: r.last_sql_validation_result.checked_at,
+      } : null,
       pushJobs: (r.push_jobs || []).map(mapPushJob),
     };
   };
@@ -163,6 +181,8 @@ window.Store = (function () {
     newAnomalies: item.new_anomalies || 0,
     statusCounts: item.status_counts || { pending: 0, processing: 0, timed_out: 0, resolved: 0 },
     broadcastStatus: item.broadcast_status || 'disabled',
+    situationBroadcastStatus: item.situation_broadcast_status || item.broadcast_status || 'disabled',
+    timeoutBroadcastStatus: item.timeout_broadcast_status || 'disabled',
   });
 
   function anomalyQuery(filters = {}, includePagination = false) {
@@ -208,6 +228,7 @@ window.Store = (function () {
     return {
       group: mapAnomalyGroup(result.group),
       items: (result.items || []).map(mapRecord),
+      deliveries: result.deliveries || [],
       total: result.total || 0,
       page: result.page || filters.page || 1,
       pageSize: result.page_size || filters.pageSize || 20,
@@ -302,19 +323,26 @@ window.Store = (function () {
       ];
       if (data.notify.fieldSource) targets.push({ receive_id_type: data.notify.fieldIdType || 'open_id', source: 'field', field: data.notify.fieldSource });
     }
-    const groupBroadcast = data.groupBroadcast || { enabled: false, mentionTargets: [] };
+    const groupBroadcast = data.groupBroadcast || {};
+    const broadcastSectionPayload = section => ({
+      enabled: !!section?.enabled,
+      mention_targets: section?.mentionTargets || [],
+      message_template: section?.messageTemplate?.trim() || null,
+    });
     const groupBroadcastPayload = {
-      enabled: !!groupBroadcast.enabled,
-      mention_targets: groupBroadcast.mentionTargets || [],
-      message_template: groupBroadcast.messageTemplate?.trim() || null,
+      situation: broadcastSectionPayload(groupBroadcast.situation || groupBroadcast),
+      timeout: broadcastSectionPayload(groupBroadcast.timeout),
     };
     groupBroadcastPayload.webhook_url = groupBroadcast.webhookUrl || null;
     return {
       name: data.name, description: data.description || '', dataset_id: data.datasetId,
       severity: data.severity || 'medium', logic: data.logic || 'AND',
       conditions: (data.conditions || []).map(c => ({ field: c.field, operator: c.op || c.operator, value: c.value === '' ? null : c.value,
-        upper_value: c.upper_value ?? c.upperValue ?? null, baseline: c.baseline || null })),
+        upper_value: c.upper_value ?? c.upperValue ?? null, baseline: c.baseline || null,
+        value_source: c.value_source || 'literal', value_field: c.value_field || null,
+        upper_value_source: c.upper_value_source || 'literal', upper_value_field: c.upper_value_field || null })),
       anomaly_key_fields: data.anomalyKeyFields || [],
+      repeat_push_enabled: !!data.repeatPushEnabled,
       schedule: { frequency: data.schedule.frequency, interval: Number(data.schedule.interval || 1), time: data.schedule.time || null,
         start_date: data.schedule.start || new Date().toISOString().slice(0, 10), end_date: data.schedule.end || null },
       notification_targets: targets, enabled: !!data.enabled,
@@ -331,6 +359,10 @@ window.Store = (function () {
           operator: data.sqlValidationConfig.trueCondition.operator,
           value: data.sqlValidationConfig.trueCondition.value ?? null,
           upper_value: data.sqlValidationConfig.trueCondition.upperValue ?? null,
+          value_source: data.sqlValidationConfig.trueCondition.valueSource || 'literal',
+          value_field: data.sqlValidationConfig.trueCondition.valueField || null,
+          upper_value_source: data.sqlValidationConfig.trueCondition.upperValueSource || 'literal',
+          upper_value_field: data.sqlValidationConfig.trueCondition.upperValueField || null,
         },
       } : null,
       group_broadcast: groupBroadcastPayload,

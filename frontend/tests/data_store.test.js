@@ -219,12 +219,7 @@ test('validation rule fields and anomaly audit details map between API and UI co
             validation_method: body.validation_method,
             sql_validation_config: body.sql_validation_config,
             private_message_template: body.private_message_template,
-            group_broadcast: {
-              enabled: body.group_broadcast.enabled,
-              webhook_url: body.group_broadcast.webhook_url,
-              mention_targets: body.group_broadcast.mention_targets,
-              message_template: body.group_broadcast.message_template,
-            },
+            group_broadcast: body.group_broadcast,
           }),
         };
       }
@@ -247,10 +242,12 @@ test('validation rule fields and anomaly audit details map between API and UI co
   ]);
   assert.equal(rule.privateMessageTemplate, '异常记录：{owner_id}');
   assert.deepEqual(JSON.parse(JSON.stringify(rule.groupBroadcast)), {
-    enabled: true,
     webhookUrl: 'https://open.feishu.cn/open-apis/bot/v2/hook/saved-webhook',
+    situation: { enabled: true,
     mentionTargets: [{ source: 'literal', value: 'group-owner' }, { source: 'field', field: 'owner_id' }],
     messageTemplate: '异常记录组：{owner_id列表}',
+    },
+    timeout: { enabled: false, mentionTargets: [], messageTemplate: '' },
   });
   const listed = store.getRecord('record-1');
   assert.equal(listed.description, 'GMV anomaly');
@@ -271,7 +268,7 @@ test('validation rule fields and anomaly audit details map between API and UI co
   assert.deepEqual(JSON.parse(JSON.stringify(detail.validationSubmission)), {
     submittedByUserId: 'u_1', submittedText: 'confirmed', validatorType: 'pseudo',
     result: 'passed', submittedAt: '2026-08-22T09:20:00',
-    resultDetail: { field: 'status', operator: 'eq', value: 'normal', upperValue: null, actual: 'normal' },
+    resultDetail: { field: 'status', operator: 'eq', value: 'normal', upperValue: null, actual: 'normal', valueSource: 'literal', valueField: null, upperValueSource: 'literal', upperValueField: null, resolvedValue: null, resolvedUpperValue: null },
   });
 
   await store.addRule({
@@ -305,17 +302,19 @@ test('validation rule fields and anomaly audit details map between API and UI co
   assert.deepEqual(body.sql_validation_config, {
     query_template: "SELECT status FROM repair_state WHERE owner_id='{目标ID}'",
     parameters: [{ name: '目标ID', field: 'owner_id' }],
-    true_condition: { field: 'status', operator: 'eq', value: 'normal', upper_value: null },
+    true_condition: { field: 'status', operator: 'eq', value: 'normal', upper_value: null, value_source: 'literal', value_field: null, upper_value_source: 'literal', upper_value_field: null },
   });
   assert.deepEqual(body.validation_targets, [
     { source: 'literal', value: 'u_2' }, { source: 'field', field: 'owner_id' },
   ]);
   assert.equal(body.private_message_template, '异常记录：{owner_id}\n[查看]({异常记录链接})');
   assert.deepEqual(body.group_broadcast, {
-    enabled: true,
     webhook_url: 'https://open.feishu.cn/open-apis/bot/v2/hook/test-webhook',
+    situation: { enabled: true,
     mention_targets: [{ source: 'literal', value: 'group-user' }, { source: 'field', field: 'owner_id' }],
     message_template: '异常记录组：{owner_id列表}\n[查看]({异常记录组链接})',
+    },
+    timeout: { enabled: false, mention_targets: [], message_template: null },
   });
 });
 
@@ -360,6 +359,7 @@ test('updating an existing condition sends the edited operator instead of the st
   const request = requests.find(item => item.url === '/api/v1/rules/rule-1' && item.options.method === 'PUT');
   assert.deepEqual(JSON.parse(request.options.body).conditions, [{
     field: 'license_plate', operator: 'eq', value: 'q皖H0BCB7', upper_value: null, baseline: null,
+    value_source: 'literal', value_field: null, upper_value_source: 'literal', upper_value_field: null,
   }]);
 });
 
@@ -662,4 +662,57 @@ test('anomaly group pages and details map live status summaries and member recor
   assert.equal(page.items[0].statusCounts.pending, 1);
   assert.equal(detail.items[0].id, 'record-1');
   assert.equal(detail.items[0].status, 'pending');
+});
+
+test('rule operands, repeat push and split group broadcasts round-trip through the API', async () => {
+  const requests = [];
+  const apiRule = {
+    id: 'r', name: 'test', dataset_id: 'ds', schedule: {}, conditions: [],
+    group_broadcast: { enabled: true, webhook_url: 'https://example.com/hook', mention_targets: [] },
+  };
+  const context = { window: {}, fetch: async (url, options = {}) => {
+    requests.push({ url, options });
+    return { ok: true, status: 200, json: async () => ({ ...apiRule, ...JSON.parse(options.body || '{}') }) };
+  } };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'scripts', 'data.js'), 'utf8'), context);
+  const store = context.window.Store;
+  const first = await store.addRule({ name: 'legacy', schedule: {}, conditions: [] });
+  assert.equal(first.repeatPushEnabled, false);
+  assert.equal(first.groupBroadcast.timeout.enabled, false);
+  const result = await store.addRule({
+    name: 'fields', schedule: {}, repeatPushEnabled: true,
+    conditions: [{ field: 'actual', op: 'between', value_source: 'field', value_field: 'low', value: null, upper_value_source: 'field', upper_value_field: 'high' }],
+    validationMethod: 'sql', sqlValidationConfig: { queryTemplate: 'select actual, low', parameters: [], trueCondition: { field: 'actual', operator: 'gt', valueSource: 'field', valueField: 'low' } },
+    groupBroadcast: { webhookUrl: 'https://example.com/hook', situation: { enabled: true, mentionTargets: [] }, timeout: { enabled: true, mentionTargets: [{ source: 'literal', value: 'handler' }], messageTemplate: '{actual列表}' } },
+  });
+  const payload = JSON.parse(requests.at(-1).options.body);
+  assert.equal(payload.repeat_push_enabled, true);
+  assert.equal(payload.conditions[0].value_field, 'low');
+  assert.equal(payload.conditions[0].upper_value_field, 'high');
+  assert.equal(payload.sql_validation_config.true_condition.value_field, 'low');
+  assert.equal(payload.group_broadcast.timeout.enabled, true);
+  assert.equal(payload.group_broadcast.situation.enabled, true);
+  assert.equal(result.sqlValidationConfig.trueCondition.valueSource, 'field');
+  assert.equal(result.sqlValidationConfig.trueCondition.valueField, 'low');
+  assert.equal(result.groupBroadcast.timeout.messageTemplate, '{actual列表}');
+});
+
+test('group statuses and SQL field audit details retain resolved values when mapped', async () => {
+  const context = { window: {}, fetch: async url => ({ ok: true, status: 200, json: async () => url.includes('anomaly-groups') ? {
+    group: { group_id: 'g', situation_broadcast_status: 'sent', timeout_broadcast_status: 'waiting' },
+    items: [], deliveries: [{ broadcast_kind: 'timeout', status: 'failed' }],
+  } : {
+    id: 'a', validation_submission: { result_detail: { field: 'actual', value_source: 'field', value_field: 'limit', resolved_value: 20 } },
+    last_sql_validation_result: { outcome: 'failed', reason: 'not yet', operator_user_id: 'handler', checked_at: '2026-08-28T00:00:00Z', result_detail: { field: 'actual', value_source: 'field', value_field: 'limit', resolved_value: 20 } },
+  } }) };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'scripts', 'data.js'), 'utf8'), context);
+  const group = await context.window.Store.loadAnomalyGroup('g');
+  assert.equal(group.group.situationBroadcastStatus, 'sent');
+  assert.equal(group.group.timeoutBroadcastStatus, 'waiting');
+  assert.equal(group.deliveries[0].broadcast_kind, 'timeout');
+  const record = await context.window.Store.loadRecord('a');
+  assert.equal(record.lastSqlValidationResult.outcome, 'failed');
+  assert.equal(record.lastSqlValidationResult.operatorUserId, 'handler');
+  assert.equal(record.lastSqlValidationResult.resultDetail.resolvedValue, 20);
+  assert.equal(record.validationSubmission.resultDetail.valueField, 'limit');
 });

@@ -5,7 +5,7 @@ const { chromium } = require('playwright');
 
 const frontendRoot = path.join(__dirname, '..');
 
-async function openTabbedRule(t, { editing = true, viewport = { width: 1280, height: 900 } } = {}) {
+async function openTabbedRule(t, { editing = true, viewport = { width: 1280, height: 900 }, rulePatch = {} } = {}) {
   const browser = await chromium.launch({ headless: true, executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' });
   t.after(() => browser.close());
   const page = await browser.newPage({ viewport });
@@ -20,10 +20,10 @@ async function openTabbedRule(t, { editing = true, viewport = { width: 1280, hei
   for (const file of ['icons', 'components']) {
     await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', `${file}.js`) });
   }
-  await page.evaluate(() => {
+  await page.evaluate(rulePatch => {
     const dataset = { id: 'dataset-1', name: '订单数据', rowCount: 2, fields: [
       { name: 'order_id', type: 'VARCHAR' }, { name: 'amount', type: 'DECIMAL' },
-      { name: 'owner_id', type: 'VARCHAR' },
+      { name: 'owner_id', type: 'VARCHAR' }, { name: 'limit', type: 'DECIMAL' },
     ] };
     const rule = {
       id: 'rule-1', name: '订单异常', description: '', datasetId: dataset.id, datasetName: dataset.name,
@@ -35,13 +35,14 @@ async function openTabbedRule(t, { editing = true, viewport = { width: 1280, hei
       validationEnabled: false, validationTargets: [], validationTimeoutMinutes: 1440,
       groupBroadcast: { enabled: false, webhookUrl: '', mentionTargets: [], messageTemplate: '' },
     };
+    Object.assign(rule, rulePatch);
     window.savedRule = null;
     window.Store = {
       getRules: () => [rule], getRule: () => rule, getDatasets: () => [dataset], getDataset: () => dataset,
       addRule: async payload => { window.savedRule = payload; },
       updateRule: async (_id, payload) => { window.savedRule = payload; },
     };
-  });
+  }, rulePatch);
   await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'rules.js') });
   await page.evaluate(() => RulesModule.render(document.getElementById('content'), {
     actionsEl: document.getElementById('actions'), navigate: () => {},
@@ -100,8 +101,8 @@ test('rule tabs isolate sections and preserve drafts for both create and edit', 
     assert.deepEqual(saved.validationTargets, [{ source: 'literal', value: 'validator_draft' }]);
     assert.ok(saved.notificationTargets.some(target => target.value === 'recipient_draft'));
     assert.equal(saved.privateMessageTemplate, '订单 {order_id}');
-    assert.deepEqual(saved.groupBroadcast.mentionTargets, [{ source: 'literal', value: 'group_draft' }]);
-    assert.equal(saved.groupBroadcast.messageTemplate, '订单 {order_id列表}');
+    assert.deepEqual(saved.groupBroadcast.situation.mentionTargets, [{ source: 'literal', value: 'group_draft' }]);
+    assert.equal(saved.groupBroadcast.situation.messageTemplate, '订单 {order_id列表}');
     await page.evaluate(() => RulesModule.openItem('rule-1'));
     assert.equal(await page.getByRole('tab', { selected: true }).textContent(), '基本信息');
   }
@@ -185,7 +186,7 @@ test('saving opens the hidden tab containing an error and focuses its input', as
   await page.fill('#f-group-webhook', 'https://open.feishu.cn/open-apis/bot/v2/hook/example');
   await page.getByRole('tab', { name: '基本信息' }).click();
   await page.click('#f-save');
-  assert.equal(await page.locator('#f-group-userids-input').evaluate(node => node === document.activeElement), true);
+  assert.deepEqual(await page.evaluate(() => window.savedRule.groupBroadcast.situation.mentionTargets), [], 'situation mentions are optional');
 });
 
 test('SQL validation keeps its draft across tabs and focuses missing parameter mappings', async t => {
@@ -216,7 +217,7 @@ test('SQL validation keeps its draft across tabs and focuses missing parameter m
   assert.deepEqual(await page.evaluate(() => window.savedRule.sqlValidationConfig), {
     queryTemplate: 'SELECT amount FROM orders WHERE id={订单ID}',
     parameters: [{ name: '订单ID', field: 'order_id' }],
-    trueCondition: { field: 'amount', operator: 'between', value: 10, upperValue: 20 },
+    trueCondition: { field: 'amount', operator: 'between', value: 10, upperValue: 20, valueSource: 'literal', valueField: null, upperValueSource: 'literal', upperValueField: null },
   });
 });
 
@@ -433,7 +434,7 @@ test('editing an API-shaped condition removes the stale operator before saving',
   await page.waitForTimeout(25);
 
   assert.deepEqual(await page.evaluate(() => window.updatedRule.conditions), [{
-    field: 'license_plate', op: 'eq', value: 'q皖H0BCB7', baseline: null,
+    field: 'license_plate', op: 'eq', value: 'q皖H0BCB7', baseline: null, value_source: 'literal', upper_value_source: 'literal',
   }]);
   assert.deepEqual(pageErrors, []);
 });
@@ -495,6 +496,7 @@ test('creating a rule uses condition fields and commits a typed user_id without 
   await page.selectOption('#f-dataset', 'dataset-1');
   await page.getByRole('tab', { name: '异常条件', exact: true }).click();
   await page.selectOption('.condition-row [data-c="field"]', 'amount');
+  await page.fill('.condition-row [data-c="value"]', '100');
   await page.getByRole('tab', { name: '私聊通知', exact: true }).click();
   await page.fill('#f-userids-input', 'u_123456');
   await page.click('#f-save');
@@ -681,8 +683,8 @@ test('rule form preserves configured webhook and saves fixed plus field group me
   await page.waitForTimeout(25);
 
   assert.deepEqual(await page.evaluate(() => window.updatedRule.groupBroadcast), {
-    enabled: true,
     webhookUrl: 'https://open.feishu.cn/open-apis/bot/v2/hook/saved-webhook',
+    situation: { enabled: true,
     mentionTargets: [
       { source: 'literal', value: 'fixed-user' },
       { source: 'literal', value: 'extra-user' },
@@ -690,6 +692,8 @@ test('rule form preserves configured webhook and saves fixed plus field group me
       { source: 'field', field: 'backup_user_id' },
     ],
     messageTemplate: null,
+    },
+    timeout: { enabled: false, mentionTargets: [], messageTemplate: null },
   });
 
   await page.evaluate(() => RulesModule.openItem('rule-1'));
@@ -793,7 +797,159 @@ test('rule form inserts template parameters and links from nested drawers and va
     '异常记录：{车牌号}\n[查看]({异常记录链接})',
   );
   assert.equal(
-    await page.evaluate(() => window.updatedRule.groupBroadcast.messageTemplate),
+    await page.evaluate(() => window.updatedRule.groupBroadcast.situation.messageTemplate),
     '异常记录组：{车牌号列表}',
   );
+});
+
+test('repeat push defaults off and survives tabs when enabled', async t => {
+  const page = await openTabbedRule(t);
+  await page.getByRole('tab', { name: '关联数据集' }).click();
+  assert.equal(await page.getByRole('checkbox', { name: '允许重复推送' }).count(), 1);
+  assert.equal(await page.locator('#f-repeat-push-enabled').isChecked(), false);
+  await page.locator('label').filter({ has: page.locator('#f-repeat-push-enabled') }).click();
+  await page.getByRole('tab', { name: '基本信息' }).click();
+  await page.click('#f-save');
+  assert.equal(await page.evaluate(() => window.savedRule.repeatPushEnabled), true);
+});
+
+test('field operands preserve independent bounds and literal drafts through operators and tabs', async t => {
+  const page = await openTabbedRule(t);
+  await page.getByRole('tab', { name: '异常条件' }).click();
+  await page.selectOption('[data-c="op"]', 'between');
+  assert.equal(await page.locator('.condition-row [data-operand="value"] [data-source="field"]').count(), 1);
+  await page.click('.condition-row [data-operand="value"] [data-source="field"]');
+  await page.selectOption('[data-c="value_field"]', 'limit');
+  await page.fill('[data-c="upper_value"]', '300');
+  await page.selectOption('[data-c="op"]', 'is_null');
+  assert.equal(await page.locator('.condition-operand:visible').count(), 0);
+  await page.selectOption('[data-c="op"]', 'between');
+  assert.equal(await page.locator('[data-c="value_field"]').inputValue(), 'limit');
+  assert.equal(await page.locator('[data-c="upper_value"]').inputValue(), '300');
+  await page.click('.condition-row [data-operand="value"] [data-source="literal"]');
+  assert.equal(await page.locator('[data-c="value"]').inputValue(), '100');
+  await page.click('.condition-row [data-operand="value"] [data-source="field"]');
+  await page.getByRole('tab', { name: '基本信息' }).click();
+  await page.click('#f-save');
+  const condition = await page.evaluate(() => window.savedRule.conditions[0]);
+  assert.equal(condition.value_source, 'field');
+  assert.equal(condition.value_field, 'limit');
+  assert.equal(condition.upper_value_source, 'literal');
+  assert.equal(condition.upper_value, '300');
+});
+
+test('field operand validation focuses missing or incompatible dataset references and clears stale fields', async t => {
+  const page = await openTabbedRule(t, { rulePatch: { conditions: [{ field: 'amount', op: 'gt', value_source: 'field', value_field: 'missing' }] } });
+  await page.click('#f-save');
+  assert.equal(await page.evaluate(() => window.savedRule), null);
+  assert.equal(await page.getByRole('tab', { selected: true }).textContent(), '异常条件');
+  assert.equal(await page.locator('[data-c="value_field"]').inputValue(), '');
+  await page.selectOption('[data-c="value_field"]', 'owner_id');
+  await page.click('#f-save');
+  assert.equal(await page.evaluate(() => window.savedRule), null);
+  assert.match(await page.locator('#toast-container').textContent(), /类型|数值/);
+  await page.selectOption('[data-c="value_field"]', 'limit');
+  await page.click('#f-save');
+  assert.equal(await page.evaluate(() => window.savedRule.conditions[0].value_field), 'limit');
+});
+
+test('SQL result field operands persist and hide for null operators without losing drafts', async t => {
+  const page = await openTabbedRule(t);
+  await page.getByRole('tab', { name: '实时校验' }).click();
+  await page.click('[data-validation-method="sql"]');
+  await page.fill('#f-validation-sql', 'SELECT amount, low, high FROM orders');
+  await page.fill('#f-sql-result-field', 'amount');
+  await page.selectOption('#f-sql-operator', 'between');
+  assert.equal(await page.locator('#f-sql-value-operand [data-source="field"]').count(), 1);
+  await page.click('#f-sql-value-operand [data-source="field"]');
+  await page.fill('#f-sql-value-field', 'low');
+  await page.click('#f-sql-upper-value-operand [data-source="field"]');
+  await page.fill('#f-sql-upper-value-field', 'high');
+  await page.selectOption('#f-sql-operator', 'is_null');
+  assert.equal(await page.locator('#f-sql-value-operand').isVisible(), false);
+  await page.selectOption('#f-sql-operator', 'between');
+  await page.getByRole('tab', { name: '基本信息' }).click();
+  await page.click('#f-save');
+  const condition = await page.evaluate(() => window.savedRule.sqlValidationConfig.trueCondition);
+  assert.equal(condition.valueSource, 'field');
+  assert.equal(condition.valueField, 'low');
+  assert.equal(condition.upperValueSource, 'field');
+  assert.equal(condition.upperValueField, 'high');
+});
+
+test('group broadcasts save independently with optional situation mentions and mandatory timeout validators', async t => {
+  const page = await openTabbedRule(t);
+  await page.getByRole('tab', { name: '群聊播报' }).click();
+  assert.equal(await page.getByText('异常情况播报', { exact: true }).count(), 1);
+  await page.locator('label').filter({ has: page.locator('#f-group-broadcast-enabled') }).click();
+  await page.fill('#f-group-webhook', 'https://open.feishu.cn/open-apis/bot/v2/hook/example');
+  await page.locator('label').filter({ has: page.locator('#f-timeout-broadcast-enabled') }).click();
+  await page.fill('#f-timeout-userids-input', 'extra_handler');
+  await page.fill('#f-timeout-message-template', '超时 {order_id列表}');
+  assert.equal(await page.locator('#f-timeout-all-validators').isChecked(), true);
+  assert.equal(await page.locator('#f-timeout-all-validators').isDisabled(), true);
+  await page.click('#f-save');
+  assert.equal(await page.evaluate(() => window.savedRule), null);
+  assert.match(await page.locator('#f-group-broadcast-error').textContent(), /实时校验/);
+  await page.getByRole('tab', { name: '实时校验' }).click();
+  await page.locator('label').filter({ has: page.locator('#f-validation-enabled') }).click();
+  await page.fill('#f-validation-userids-input', 'validator');
+  await page.click('#f-save');
+  assert.deepEqual(await page.evaluate(() => window.savedRule.groupBroadcast), {
+    webhookUrl: 'https://open.feishu.cn/open-apis/bot/v2/hook/example',
+    situation: { enabled: true, mentionTargets: [], messageTemplate: null },
+    timeout: { enabled: true, mentionTargets: [{ source: 'literal', value: 'extra_handler' }], messageTemplate: '超时 {order_id列表}' },
+  });
+});
+
+test('ratio conditions accept a numeric field multiplier and retain baseline across operator changes', async t => {
+  const page = await openTabbedRule(t);
+  await page.getByRole('tab', { name: '异常条件' }).click();
+  await page.selectOption('[data-c="op"]', 'gt_threshold_ratio');
+  await page.selectOption('[data-c="baseline"]', '7d_avg');
+  await page.click('.condition-row [data-operand="value"] [data-source="field"]');
+  await page.selectOption('[data-c="value_field"]', 'limit');
+  await page.selectOption('[data-c="op"]', 'is_not_null');
+  await page.selectOption('[data-c="op"]', 'gt_threshold_ratio');
+  assert.equal(await page.locator('[data-c="baseline"]').inputValue(), '7d_avg');
+  await page.click('#f-save');
+  const saved = await page.evaluate(() => window.savedRule.conditions[0]);
+  assert.equal(saved.value_source, 'field');
+  assert.equal(saved.value_field, 'limit');
+  assert.equal(saved.baseline, '7d_avg');
+});
+
+test('switching datasets clears both field operand references without discarding literal drafts', async t => {
+  const page = await openTabbedRule(t, { rulePatch: {
+    conditions: [{ field: 'amount', op: 'between', value: '10', upper_value: '30', value_source: 'field', value_field: 'limit', upper_value_source: 'field', upper_value_field: 'amount' }],
+  } });
+  await page.getByRole('tab', { name: '关联数据集' }).click();
+  await page.selectOption('#f-dataset', '');
+  await page.selectOption('#f-dataset', 'dataset-1');
+  await page.getByRole('tab', { name: '异常条件' }).click();
+  assert.equal(await page.locator('[data-c="field"]').inputValue(), '');
+  assert.equal(await page.locator('[data-c="value_field"]').inputValue(), '');
+  assert.equal(await page.locator('[data-c="upper_value_field"]').inputValue(), '');
+  await page.click('.condition-row [data-operand="value"] [data-source="literal"]');
+  await page.click('.condition-row [data-operand="upper_value"] [data-source="literal"]');
+  assert.equal(await page.locator('[data-c="value"]').inputValue(), '10');
+  assert.equal(await page.locator('[data-c="upper_value"]').inputValue(), '30');
+});
+
+test('timeout template uses group list parameters and links and focuses invalid template on save', async t => {
+  const page = await openTabbedRule(t);
+  await page.getByRole('tab', { name: '群聊播报' }).click();
+  await page.fill('#f-timeout-message-template', '{order_id}');
+  await page.getByRole('tab', { name: '基本信息' }).click();
+  await page.click('#f-save');
+  assert.equal(await page.getByRole('tab', { selected: true }).textContent(), '群聊播报');
+  assert.equal(await page.locator('#f-timeout-message-template').evaluate(node => node === document.activeElement), true);
+  await page.fill('#f-timeout-message-template', '');
+  await page.click('[data-template-picker="parameter"][data-template-context="timeout"]');
+  await page.click('.template-picker-option[data-template-value="{order_id列表}"]');
+  await page.click('[data-template-picker="link"][data-template-context="timeout"]');
+  await page.click('.template-picker-option[data-template-value="[查看异常记录组明细]({异常记录组链接})"]');
+  await page.click('#f-save');
+  assert.equal(await page.evaluate(() => window.savedRule.groupBroadcast.timeout.messageTemplate), '{order_id列表}[查看异常记录组明细]({异常记录组链接})');
+  assert.equal(await page.evaluate(() => window.savedRule.groupBroadcast.situation.messageTemplate), null);
 });

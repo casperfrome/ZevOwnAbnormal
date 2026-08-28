@@ -161,6 +161,12 @@ def _map_api_response(payload: object) -> P2CardActionTriggerResponse:
     if toast_type not in SUPPORTED_TOAST_TYPES:
         raise CallbackPayloadError("unsupported_toast_type")
     _validate_raw_card(card)
+    if response.get("card_update_mode") == "versioned":
+        # SQL result cards are PATCHed by Sentinel's version coordinator. A
+        # raw callback response could arrive late and undo a newer result.
+        return P2CardActionTriggerResponse({
+            "toast": {"type": toast_type, "content": toast_content},
+        })
     return P2CardActionTriggerResponse({
         "toast": {"type": toast_type, "content": toast_content},
         "card": {"type": "raw", "data": card},

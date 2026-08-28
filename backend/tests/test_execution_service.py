@@ -45,18 +45,17 @@ def test_rule_execution_stops_after_persisting_push_jobs_without_direct_delivery
     db_session.commit()
     connection = SimpleNamespace(close=lambda: None)
     monkeypatch.setattr("app.execution_service.connect_to_datasource", lambda *_args: connection)
-    monkeypatch.setattr("app.execution_service.fetch_rule_rows", lambda *_args: ([{"name": "gmv", "type": "int"}], [{"gmv": 2}]))
-    monkeypatch.setattr("app.execution_service.evaluate_rows", lambda *_args: [object()])
-    monkeypatch.setattr(
-        "app.execution_service.persist_matches",
-        lambda *_args, **_kwargs: SimpleNamespace(new_count=1, records=[]),
-    )
+    monkeypatch.setattr("app.execution_service.fetch_rule_rows", lambda *_args: (
+        [{"name": "gmv", "type": "int"}, {"name": "store_id", "type": "int"}], [{"store_id": 1, "gmv": 2}]))
     monkeypatch.setattr("app.execution_service.deliver_notifications", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("direct send")))
 
     run = execute_rule(db_session, Settings(), rule.id, "manual")
 
     assert run.status == "success"
     assert run.new_anomalies == 1
+    from app.models import AnomalyPushJob
+    assert len(list(db_session.scalars(select(AnomalyRecord)))) == 1
+    assert len(list(db_session.scalars(select(AnomalyPushJob)))) == 1
 
 
 @pytest.mark.parametrize("trigger_source", ["manual", "dolphinscheduler"])
@@ -122,7 +121,7 @@ def test_group_persistence_failure_rolls_back_anomalies_and_marks_run_failed(db_
     )
     monkeypatch.setattr(
         "app.execution_service.create_anomaly_group",
-        lambda *_args: (_ for _ in ()).throw(RuntimeError("group insert failed")),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("group insert failed")),
     )
 
     run = execute_rule(db_session, Settings(_env_file=None), rule.id, "manual")

@@ -44,6 +44,42 @@ MESSAGE_TEMPLATE_MIGRATION_PATH = MIGRATION_PATH.with_name(
 )
 
 
+def test_rule_enhancement_migration_preserves_legacy_data_and_separates_broadcast_kinds():
+    path = MIGRATION_PATH.with_name("20260828_0012_rule_enhancements.py")
+    spec = importlib.util.spec_from_file_location("rule_enhancements_0012", path)
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+    engine = sa.create_engine("sqlite+pysqlite:///:memory:")
+    metadata = sa.MetaData()
+    for name in ("rules", "anomaly_records", "anomaly_validation_requests"):
+        sa.Table(name, metadata, sa.Column("id", sa.String(36), primary_key=True))
+    for name in ("anomaly_record_groups", "anomaly_record_group_members"):
+        sa.Table(name, metadata, sa.Column("rule_id", sa.String(36), primary_key=True),
+                 sa.Column("detected_at", sa.DateTime, primary_key=True))
+    sa.Table("anomaly_group_broadcast_deliveries", metadata,
+        sa.Column("id", sa.String(36), primary_key=True), sa.Column("rule_id", sa.String(36)),
+        sa.Column("detected_at", sa.DateTime), sa.Column("part_index", sa.Integer),
+        sa.UniqueConstraint("rule_id", "detected_at", "part_index", name="uq_anomaly_group_delivery_part"))
+    metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.execute(sa.text("INSERT INTO rules (id) VALUES ('old-rule')"))
+        connection.execute(sa.text("INSERT INTO anomaly_group_broadcast_deliveries VALUES ('old-delivery','old-rule','2026-08-28',1)"))
+        migration.op = Operations(MigrationContext.configure(connection))
+        migration.upgrade()
+        migration.upgrade()
+        row = connection.execute(sa.text("SELECT repeat_push_enabled, timeout_broadcast_enabled, timeout_mention_targets FROM rules")).one()
+        assert tuple(row) == (0, 0, '[]')
+        assert connection.execute(sa.text("SELECT broadcast_kind FROM anomaly_group_broadcast_deliveries")).scalar_one() == "situation"
+        connection.execute(sa.text("INSERT INTO anomaly_group_broadcast_deliveries (id,rule_id,detected_at,part_index,broadcast_kind) VALUES ('timeout','old-rule','2026-08-28',1,'timeout')"))
+        with pytest.raises(RuntimeError, match="超时播报"):
+            migration.downgrade()
+        connection.execute(sa.text("DELETE FROM anomaly_group_broadcast_deliveries WHERE id='timeout'"))
+        migration.downgrade()
+        assert connection.execute(sa.text("SELECT id FROM anomaly_group_broadcast_deliveries")).scalar_one() == "old-delivery"
+        assert "repeat_push_enabled" not in {column["name"] for column in sa.inspect(connection).get_columns("rules")}
+    engine.dispose()
+
+
 def load_migration():
     spec = importlib.util.spec_from_file_location("anomaly_validation_0002", MIGRATION_PATH)
     module = importlib.util.module_from_spec(spec)

@@ -34,6 +34,38 @@ def create_dependencies(client):
     ).json()
 
 
+def test_rule_modes_field_comparisons_and_legacy_updates_preserve_timeout():
+    with TestClient(create_app(testing=True)) as client:
+        dataset = create_dependencies(client)
+        with client.app.state.session_factory() as session:
+            saved = session.get(Dataset, dataset["id"])
+            saved.fields = [{"name": name, "type": "INTEGER"} for name in ("actual", "expected", "id")]
+            session.commit()
+        payload = {"name": "split modes", "dataset_id": dataset["id"],
+            "conditions": [{"field": "actual", "operator": "gt", "value_source": "field", "value_field": "expected"}],
+            "anomaly_key_fields": ["id"], "repeat_push_enabled": True,
+            "schedule": {"frequency": "day", "time": "09:00", "start_date": "2026-08-28"},
+            "notification_targets": [{"receive_id_type": "user_id", "source": "literal", "value": "owner"}],
+            "validation_enabled": True, "validation_targets": [{"source": "literal", "value": "owner"}],
+            "group_broadcast": {"webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/test",
+                "situation": {"enabled": True}, "timeout": {"enabled": True, "message_template": "超时 {id列表}"}}}
+        response = client.post("/api/v1/rules", json=payload)
+        assert response.status_code == 201, response.text
+        created = response.json()
+        assert created["repeat_push_enabled"] is True
+        assert created["group_broadcast"]["situation"]["enabled"] is True
+        assert created["group_broadcast"]["timeout"]["message_template"] == "超时 {id列表}"
+        legacy = {**payload, "group_broadcast": {"enabled": False}}
+        updated = client.put(f"/api/v1/rules/{created['id']}", json=legacy)
+        assert updated.status_code == 200, updated.text
+        assert updated.json()["group_broadcast"]["timeout"]["enabled"] is True
+        invalid = client.put(f"/api/v1/rules/{created['id']}", json={**legacy, "validation_enabled": False})
+        assert invalid.status_code == 422
+        bad_field = client.post("/api/v1/rules", json={**payload, "name": "bad field",
+            "conditions": [{"field": "actual", "operator": "eq", "value_source": "field", "value_field": "missing"}]})
+        assert bad_field.status_code == 422
+
+
 def test_rule_crud_exposes_key_fields_and_targets():
     with TestClient(create_app(testing=True)) as client:
         dataset = create_dependencies(client)
@@ -98,6 +130,8 @@ def test_rule_group_broadcast_config_is_validated_stored_and_returned_as_plainte
             "webhook_url": webhook,
             "mention_targets": payload["group_broadcast"]["mention_targets"],
             "message_template": None,
+            "situation": {"enabled": True, "mention_targets": payload["group_broadcast"]["mention_targets"], "message_template": None},
+            "timeout": {"enabled": False, "mention_targets": [], "message_template": None},
         }
         with client.app.state.session_factory() as session:
             stored = session.get(Rule, created.json()["id"])
@@ -284,6 +318,8 @@ def test_sql_validation_rule_crud_validates_template_mappings_and_serializes_con
         assert created.json()["sql_validation_config"]["true_condition"] == {
             **payload["sql_validation_config"]["true_condition"],
             "upper_value": None,
+            "value_source": "literal", "value_field": None,
+            "upper_value_source": "literal", "upper_value_field": None,
         }
 
         mutating = client.post(

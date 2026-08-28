@@ -3,13 +3,14 @@ from __future__ import annotations
 import threading
 import time
 import logging
+import html
 from copy import deepcopy
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Callable, Iterator
 
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -141,6 +142,56 @@ def _format_time(value: datetime | None) -> str:
     return value.strftime("%Y-%m-%d %H:%M:%S") if value else "-"
 
 
+_SQL_RESULT_REASONS = {
+    "no_rows": "查询未返回数据", "multiple_rows": "查询返回多行",
+    "missing_field": "结果缺少配置字段", "invalid_comparison": "比较值类型不兼容",
+    "configuration_error": "SQL 校验配置无效", "execution_error": "SQL 校验执行失败，可稍后重试",
+}
+
+
+def _card_value(value: Any) -> str:
+    value = str(value) if value is not None else "NULL"
+    # SQL values are untrusted. Prevent rich tags, links and mentions; bound
+    # individual values so a long database value cannot invalidate the card.
+    for char in ("\\", "*", "_", "`", "[", "]", "(", ")"):
+        value = value.replace(char, "\\" + char)
+    return html.escape(value[:1000]).replace("\n", " ").replace("\r", " ")
+
+
+def _sql_result_markdown(anomaly: AnomalyRecord) -> str:
+    result = anomaly.last_sql_validation_result or {}
+    condition = result.get("condition") or (anomaly.validation_config_snapshot or {}).get("true_condition", {})
+    detail = result.get("result_detail") or {}
+    operators = {"eq": "=", "neq": "≠", "gt": ">", "gte": "≥", "lt": "<", "lte": "≤",
+                 "between": "介于", "is_null": "为空", "is_not_null": "不为空"}
+    operator = condition.get("operator", "eq")
+    def operand(name):
+        if condition.get(f"{name}_source") == "field":
+            return f"字段 {_card_value(condition.get(f'{name}_field'))}"
+        return _card_value(condition.get(name))
+    expression = f"{_card_value(condition.get('field', '-'))} {operators.get(operator, operator)}"
+    if operator not in {"is_null", "is_not_null"}:
+        expression += f" {operand('value')}"
+        if operator == "between":
+            expression += f" ～ {operand('upper_value')}"
+    lines = [f"**True 条件：** {expression}"]
+    if not result:
+        return "\n".join(lines + ["**校验结果：** 尚未校验"])
+    label = {"passed": "True（通过）", "failed": "False（未通过）", "error": "执行错误"}.get(result.get("outcome"), "未通过")
+    lines.append(f"**校验结果：** {label}")
+    if "actual" in detail:
+        lines.append(f"**左侧实际值：** {_card_value(detail['actual'])}")
+    if operator not in {"is_null", "is_not_null"} and detail:
+        lines.append(f"**右侧实际值：** {_card_value(detail.get('resolved_value', detail.get('value')))}")
+        if operator == "between":
+            lines.append(f"**上界实际值：** {_card_value(detail.get('resolved_upper_value', detail.get('upper_value')))}")
+    if result.get("reason") in _SQL_RESULT_REASONS:
+        lines.append(f"**原因：** {_SQL_RESULT_REASONS[result['reason']]}")
+    lines.extend([f"**校验人：** {_card_value(result.get('operator_user_id', '-'))}",
+                  f"**校验时间：** {_card_value(result.get('checked_at', '-'))}"])
+    return "\n".join(lines)
+
+
 def build_validation_card(anomaly: AnomalyRecord, public_base_url: str) -> dict:
     link = f"{public_base_url.rstrip('/')}/#records/{anomaly.id}"
     state_names = {
@@ -167,6 +218,8 @@ def build_validation_card(anomaly: AnomalyRecord, public_base_url: str) -> dict:
         )
     )
     elements: list[dict] = [{"tag": "markdown", "content": facts}]
+    if anomaly.validation_method_snapshot == "sql":
+        elements.append({"tag": "markdown", "content": _sql_result_markdown(anomaly)})
     if anomaly.status == "resolved":
         elements.append({
             "tag": "markdown",
@@ -875,6 +928,10 @@ def submit_validation(
 
 
 def _json_safe_validation_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _json_safe_validation_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_validation_value(item) for item in value]
     if hasattr(value, "isoformat"):
         return value.isoformat()
     if hasattr(value, "as_tuple"):
@@ -895,12 +952,25 @@ def _sql_failure_description(result: SqlValidationResult) -> str:
         return "SQL 校验未通过：查询返回多行"
     if result.reason == "missing_field":
         return f"SQL 校验未通过：结果缺少字段 {result.result_detail.get('field', '-')}"
+    if result.reason in _SQL_RESULT_REASONS:
+        return _SQL_RESULT_REASONS[result.reason]
     detail = result.result_detail
     return (
         f"SQL 校验未通过：{detail.get('field', '-')} 实际值 "
         f"{_json_safe_validation_value(detail.get('actual'))}，期望 "
-        f"{detail.get('operator', '-')} {detail.get('value')}"
+        f"{detail.get('operator', '-')} {detail.get('resolved_value', detail.get('value'))}"
     )
+
+
+def _store_sql_result(anomaly: AnomalyRecord, config: dict, execution: SqlValidationResult,
+                      operator: str, checked_at: datetime, *, error: bool = False) -> None:
+    anomaly.last_sql_validation_result = _json_safe_validation_value({
+        "outcome": "error" if error else "passed" if execution.passed else "failed",
+        "reason": execution.reason, "condition": deepcopy(config.get("true_condition", {})),
+        "result_detail": execution.result_detail, "operator_user_id": operator,
+        "checked_at": checked_at.isoformat(timespec="seconds") + "Z",
+    })
+    anomaly.validation_result_version = (anomaly.validation_result_version or 0) + 1
 
 
 def submit_sql_validation(
@@ -936,21 +1006,19 @@ def submit_sql_validation(
     row_details = deepcopy(anomaly.row_details or {})
     request_id = request.id
     rule = session.get(Rule, anomaly.rule_id)
-    if rule is None or rule.deleted_at:
-        raise SqlValidationExecutionError("SQL 校验关联规则不存在")
     datasource = session.get(Datasource, config.get("datasource_id"))
-    if datasource is None:
-        raise SqlValidationExecutionError("SQL 校验关联数据源不存在")
     dataset_fields = set(config.get("dataset_fields") or [])
-    encrypted_password = datasource.password_encrypted
-    password = (
-        CredentialCipher(settings.datasource_encryption_key).decrypt(encrypted_password)
-        if encrypted_password else ""
-    )
+    encrypted_password = datasource.password_encrypted if datasource is not None else ""
+    valid_source = rule is not None and not rule.deleted_at and datasource is not None
     session.commit()
 
     connection = None
+    execution_error: Exception | None = None
     try:
+        if not valid_source:
+            raise SqlValidationConfigurationError("SQL 校验关联规则或数据源不存在")
+        password = (CredentialCipher(settings.datasource_encryption_key).decrypt(encrypted_password)
+                    if encrypted_password else "")
         connection = connection_factory(datasource, password)
         execution = execute_sql_validation(
             connection,
@@ -959,38 +1027,19 @@ def submit_sql_validation(
             dataset_fields=dataset_fields,
         )
     except SqlValidationConfigurationError as exc:
-        session.add(AnomalyEvent(
-            anomaly_id=anomaly_id,
-            event_type="sql_validation_failed",
-            description="SQL 校验配置无效",
-            created_at=submitted_at,
-        ))
-        session.commit()
-        raise SqlValidationExecutionError("SQL 校验配置无效") from exc
+        execution_error = exc
+        execution = SqlValidationResult(False, "configuration_error", {})
     except Exception as exc:
-        session.add(AnomalyEvent(
-            anomaly_id=anomaly_id,
-            event_type="sql_validation_failed",
-            description="SQL 校验执行失败，可稍后重试",
-            created_at=submitted_at,
-        ))
-        session.commit()
-        raise SqlValidationExecutionError("SQL 校验执行失败，请稍后重试") from exc
+        execution_error = exc
+        execution = SqlValidationResult(False, "execution_error", {})
     finally:
         if connection is not None:
-            connection.close()
+            try:
+                connection.close()
+            except Exception:
+                logger.warning("SQL 校验连接关闭失败")
 
     safe_detail = _safe_sql_result_detail(execution.result_detail)
-    if not execution.passed:
-        session.add(AnomalyEvent(
-            anomaly_id=anomaly_id,
-            event_type="sql_validation_failed",
-            description=_sql_failure_description(execution),
-            created_at=submitted_at,
-        ))
-        session.commit()
-        return SubmissionResult("failed", None, execution.reason, safe_detail)
-
     with _serialize_sqlite(session, f"submission:{anomaly_id}"):
         locked_anomaly = session.scalar(
             select(AnomalyRecord).where(
@@ -1008,6 +1057,16 @@ def submit_sql_validation(
             return SubmissionResult("already_resolved", None)
         if locked_anomaly.status not in {"pending", "processing", "timed_out"}:
             raise InvalidValidationTransition("当前异常状态不允许实时验证")
+
+        _store_sql_result(locked_anomaly, config, execution, operator_user_id, submitted_at,
+                          error=execution_error is not None)
+        if not execution.passed:
+            session.add(AnomalyEvent(anomaly_id=anomaly_id, event_type="sql_validation_failed",
+                description=_sql_failure_description(execution), created_at=submitted_at))
+            session.commit()
+            if execution_error is not None:
+                raise SqlValidationExecutionError(_SQL_RESULT_REASONS[execution.reason]) from execution_error
+            return SubmissionResult("failed", None, execution.reason, safe_detail)
 
         submission = AnomalyValidationSubmission(
             anomaly_id=anomaly_id,
@@ -1040,6 +1099,95 @@ def submit_sql_validation(
         return SubmissionResult("accepted", submission, execution.reason, safe_detail)
 
 
+def _card_needs_update():
+    return or_(
+        and_(AnomalyRecord.status == "timed_out", AnomalyValidationRequest.delivery_status.in_(["sent", "update_failed"])),
+        and_(AnomalyRecord.status == "resolved", AnomalyValidationRequest.delivery_status.in_(["sent", "timed_out", "update_failed"])),
+        and_(AnomalyValidationRequest.synced_result_version < AnomalyRecord.validation_result_version,
+             AnomalyValidationRequest.delivery_status.in_(["sent", "timed_out", "resolved", "update_failed"])),
+    )
+
+
+_CARD_LOCKS = tuple(threading.Lock() for _ in range(64))
+
+
+@contextmanager
+def _card_update_lock(session: Session, request_id: str):
+    """Serialize card PATCH calls without holding a transaction during HTTP."""
+    bind = session.get_bind()
+    if bind.dialect.name != "mysql":
+        with _CARD_LOCKS[hash(request_id) % len(_CARD_LOCKS)]:
+            yield True
+        return
+    with bind.connect() as connection:
+        name = f"sentinel:card:{request_id}"
+        acquired = connection.scalar(text("SELECT GET_LOCK(:name, 0)"), {"name": name}) == 1
+        connection.commit()
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                connection.execute(text("SELECT RELEASE_LOCK(:name)"), {"name": name})
+                connection.commit()
+
+
+def _reconcile_one_card(session, settings, client, request_id):
+    with _card_update_lock(session, request_id) as acquired:
+        if not acquired:
+            return 0
+        pair = session.execute(select(AnomalyValidationRequest, AnomalyRecord).join(
+            AnomalyRecord, AnomalyValidationRequest.anomaly_id == AnomalyRecord.id,
+        ).where(AnomalyValidationRequest.id == request_id,
+                AnomalyValidationRequest.message_id.is_not(None), _card_needs_update())
+            .execution_options(populate_existing=True)).one_or_none()
+        if pair is None:
+            session.commit()
+            return 0
+        request, anomaly = pair
+        message_id = request.message_id
+        target_status = anomaly.status if anomaly.status in {"resolved", "timed_out"} else "sent"
+        target_version = anomaly.validation_result_version
+        card = build_validation_card(anomaly, settings.sentinel_public_base_url)
+        session.commit()
+        try:
+            client.patch_interactive(message_id, card)
+        except Exception as exc:
+            _record_card_reconciliation_failure(session, request_id, exc)
+            return 1
+        with _serialize_sqlite(session, f"reconcile:{request_id}"):
+            request = session.scalar(select(AnomalyValidationRequest).where(
+                AnomalyValidationRequest.id == request_id).execution_options(populate_existing=True).with_for_update())
+            if request is not None and request.message_id == message_id:
+                request.delivery_status = target_status
+                request.synced_result_version = target_version
+                request.last_error = None
+            session.commit()
+        return 0
+
+
+def refresh_validation_card(session_factory, settings: Settings, request_id: str) -> None:
+    """Prompt callback refresh; persisted versions let periodic maintenance retry."""
+    with session_factory() as session:
+        candidate = session.scalar(select(AnomalyValidationRequest.id).join(
+            AnomalyRecord, AnomalyValidationRequest.anomaly_id == AnomalyRecord.id,
+        ).where(AnomalyValidationRequest.id == request_id,
+                AnomalyValidationRequest.message_id.is_not(None), _card_needs_update()))
+        session.commit()
+        if candidate is None:
+            return
+        client = None
+        owns_client = False
+        try:
+            client, owns_client = _active_client(settings, None, None)
+            _reconcile_one_card(session, settings, client, request_id)
+        except Exception as exc:
+            session.rollback()
+            _record_card_reconciliation_failure(session, request_id, exc)
+        finally:
+            if owns_client and client is not None:
+                client.close()
+
+
 def reconcile_validation_cards(
     session: Session,
     settings: Settings,
@@ -1052,16 +1200,7 @@ def reconcile_validation_cards(
         AnomalyRecord, AnomalyValidationRequest.anomaly_id == AnomalyRecord.id
     ).where(
         AnomalyValidationRequest.message_id.is_not(None),
-        or_(
-            and_(
-                AnomalyRecord.status == "timed_out",
-                AnomalyValidationRequest.delivery_status.in_(["sent", "update_failed"]),
-            ),
-            and_(
-                AnomalyRecord.status == "resolved",
-                AnomalyValidationRequest.delivery_status.in_(["sent", "timed_out", "update_failed"]),
-            ),
-        ),
+        _card_needs_update(),
     ).order_by(AnomalyValidationRequest.updated_at, AnomalyValidationRequest.id)
     if limit is not None:
         candidate_query = candidate_query.limit(limit + 1)
@@ -1093,44 +1232,7 @@ def reconcile_validation_cards(
             if should_stop is not None and should_stop():
                 interrupted = True
                 break
-            pair = session.execute(
-                select(AnomalyValidationRequest, AnomalyRecord).join(
-                    AnomalyRecord, AnomalyValidationRequest.anomaly_id == AnomalyRecord.id
-                ).where(
-                    AnomalyValidationRequest.id == request_id,
-                    AnomalyValidationRequest.message_id.is_not(None),
-                    or_(
-                        and_(
-                            AnomalyRecord.status == "timed_out",
-                            AnomalyValidationRequest.delivery_status.in_(["sent", "update_failed"]),
-                        ),
-                        and_(
-                            AnomalyRecord.status == "resolved",
-                            AnomalyValidationRequest.delivery_status.in_(["sent", "timed_out", "update_failed"]),
-                        ),
-                    ),
-                ).with_for_update()
-            ).one_or_none()
-            if pair is None:
-                session.commit()
-                continue
-            request, anomaly = pair
-            message_id = request.message_id
-            target_status = anomaly.status
-            card = build_validation_card(anomaly, settings.sentinel_public_base_url)
-            session.commit()
-            try:
-                active_client.patch_interactive(message_id, card)
-            except Exception as exc:
-                _record_card_reconciliation_failure(session, request_id, exc)
-                failures += 1
-                continue
-            with _serialize_sqlite(session, f"reconcile:{request_id}"):
-                request = session.get(AnomalyValidationRequest, request_id, with_for_update=True)
-                if request is not None and request.message_id == message_id:
-                    request.delivery_status = target_status
-                    request.last_error = None
-                session.commit()
+            failures += _reconcile_one_card(session, settings, active_client, request_id)
         if has_more or interrupted:
             logger.warning("终态卡片收敛仍有未完成卡片，将在下一轮维护继续处理")
         return failures

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .rule_engine import evaluate_static_condition
+from .rule_engine import MissingComparisonField, evaluate_static_condition, resolve_condition_operands
 from .sql_guard import SqlValidationError, validate_readonly_sql
 
 
@@ -178,5 +178,16 @@ def execute_sql_validation(
         "upper_value": condition.get("upper_value"),
         "actual": actual,
     }
-    passed = evaluate_static_condition(actual, condition)
+    try:
+        resolved = resolve_condition_operands(condition, rows[0])
+    except MissingComparisonField:
+        return SqlValidationResult(False, "missing_field", {**condition, "actual": actual})
+    # Keep legacy literal result details stable; field comparisons retain both
+    # their source expression and the evaluated operands.
+    if any(condition.get(f"{name}_source") == "field" for name in ("value", "upper_value")):
+        detail.update(resolved)
+    try:
+        passed = evaluate_static_condition(actual, resolved)
+    except ValueError:
+        return SqlValidationResult(False, "invalid_comparison", detail)
     return SqlValidationResult(passed, "condition_passed" if passed else "condition_failed", detail)

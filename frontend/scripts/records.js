@@ -644,6 +644,19 @@ window.RecordsModule = (function () {
   }
 
   // ---------- Detail drawer ----------
+  function comparisonText(condition) {
+    const valueText = value => value === null || value === undefined ? 'NULL' : formatValue(value);
+    const operand = upper => {
+      const source = upper ? condition.upperValueSource || condition.upper_value_source : condition.valueSource || condition.value_source;
+      const field = upper ? condition.upperValueField || condition.upper_value_field : condition.valueField || condition.value_field;
+      const resolved = upper ? condition.resolvedUpperValue ?? condition.resolved_upper_value : condition.resolvedValue ?? condition.resolved_value;
+      const literal = upper ? condition.upperValue ?? condition.upper_value : condition.value;
+      return source === 'field' ? `字段 ${field || '—'}（${valueText(resolved)}）` : valueText(literal);
+    };
+    const operator = condition.operator || condition.op;
+    return `${operatorLabel(operator)}${['is_null', 'is_not_null'].includes(operator) ? '' : ` ${operand(false)}${operator === 'between' ? ` ～ ${operand(true)}` : ''}`}`;
+  }
+
   async function openDetail(id) {
     let r;
     try { r = await Store.loadRecord(id); }
@@ -727,12 +740,25 @@ window.RecordsModule = (function () {
                   <div class="detail-grid sql-validation-result">
                     <div class="detail-label">结果字段</div><div class="detail-value text-mono">${escapeHtml(r.validationSubmission.resultDetail.field || '—')}</div>
                     <div class="detail-label">实际值</div><div class="detail-value text-mono">${escapeHtml(r.validationSubmission.resultDetail.actual ?? 'NULL')}</div>
-                    <div class="detail-label">True 条件</div><div class="detail-value text-mono">${escapeHtml(`${operatorLabel(r.validationSubmission.resultDetail.operator)} ${r.validationSubmission.resultDetail.value ?? ''}${r.validationSubmission.resultDetail.upperValue !== null && r.validationSubmission.resultDetail.upperValue !== undefined ? `, ${r.validationSubmission.resultDetail.upperValue}` : ''}`.trim())}</div>
+                    <div class="detail-label">True 条件</div><div class="detail-value text-mono">${escapeHtml(comparisonText(r.validationSubmission.resultDetail))}</div>
                   </div>
                 ` : `
                   <div class="detail-label" style="margin-top:var(--space-3);">提交内容</div>
                   <pre class="validation-submission-text">${escapeHtml(r.validationSubmission.submittedText)}</pre>
                 `}
+              </div>` : ''}
+            ${r.lastSqlValidationResult ? `
+              <div class="validation-winner last-sql-validation-result">
+                <div class="eyebrow">最近 SQL 校验</div>
+                <div class="detail-grid">
+                  <div class="detail-label">结果</div><div class="detail-value">${escapeHtml(({ passed: '通过', failed: '未通过', error: '执行错误' })[r.lastSqlValidationResult.outcome] || r.lastSqlValidationResult.outcome)}</div>
+                  <div class="detail-label">原因</div><div class="detail-value">${escapeHtml(r.lastSqlValidationResult.reason || '—')}</div>
+                  <div class="detail-label">操作人 / 时间</div><div class="detail-value">${escapeHtml(r.lastSqlValidationResult.operatorUserId || '—')} · ${escapeHtml(formatTime(r.lastSqlValidationResult.checkedAt))}</div>
+                  ${r.lastSqlValidationResult.resultDetail ? `
+                    <div class="detail-label">结果字段 / 实际值</div><div class="detail-value text-mono">${escapeHtml(r.lastSqlValidationResult.resultDetail.field || '—')} / ${escapeHtml(formatValue(r.lastSqlValidationResult.resultDetail.actual ?? 'NULL'))}</div>
+                    <div class="detail-label">True 条件</div><div class="detail-value text-mono">${escapeHtml(comparisonText(r.lastSqlValidationResult.resultDetail))}</div>
+                  ` : ''}
+                </div>
               </div>` : ''}
           </div>
         </div>
@@ -776,6 +802,10 @@ window.RecordsModule = (function () {
               </div>
             </div>
             <div style="margin-top: var(--space-4);">
+              ${(r.matchedConditions || []).length ? `<div class="matched-condition-details">
+                <div class="eyebrow mb-2">命中条件</div>
+                ${r.matchedConditions.map(condition => `<div class="text-mono">${escapeHtml(condition.field)}（${escapeHtml(formatValue(condition.actual ?? 'NULL'))}） ${escapeHtml(comparisonText(condition))}</div>`).join('')}
+              </div>` : ''}
               <div class="eyebrow mb-2">完整数据明细</div>
               <div class="results-wrap">
                 <table class="results-table" data-table-id="record-row-details">

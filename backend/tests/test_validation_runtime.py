@@ -32,6 +32,10 @@ def test_maintenance_cycle_uses_a_fresh_closed_session_and_runs_domain_operation
             events.append(("close", session))
 
     monkeypatch.setattr(
+        "app.main.queue_due_timeout_broadcasts",
+        lambda session, settings, **kwargs: events.append(("timeout_broadcast", session, kwargs)),
+    )
+    monkeypatch.setattr(
         "app.main.expire_due_anomalies",
         lambda session, **kwargs: events.append(("expire", session, kwargs)),
     )
@@ -51,10 +55,12 @@ def test_maintenance_cycle_uses_a_fresh_closed_session_and_runs_domain_operation
     assert sessions[0] is not sessions[1]
     assert events == [
         ("open", sessions[0]),
+        ("timeout_broadcast", sessions[0], {"limit": 50, "should_stop": None}),
         ("expire", sessions[0], {"limit": 50, "should_stop": None}),
         ("queue", sessions[0], {"limit": 50}),
         ("reconcile", sessions[0], {"limit": 50, "should_stop": None}), ("close", sessions[0]),
         ("open", sessions[1]),
+        ("timeout_broadcast", sessions[1], {"limit": 50, "should_stop": None}),
         ("expire", sessions[1], {"limit": 50, "should_stop": None}),
         ("queue", sessions[1], {"limit": 50}),
         ("reconcile", sessions[1], {"limit": 50, "should_stop": None}), ("close", sessions[1]),

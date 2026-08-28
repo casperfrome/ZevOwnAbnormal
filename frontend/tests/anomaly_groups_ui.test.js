@@ -77,3 +77,30 @@ test('monitor navigation places anomaly groups immediately after anomaly records
   assert.equal(monitorItems[1], '异常记录组');
   assert.equal(monitorItems[2], '异常规则');
 });
+
+test('group list and detail distinguish situation and timeout status including waiting and skipped', async t => {
+  const page = await browserPage(t);
+  await page.setContent('<div id="content"></div>');
+  for (const file of ['icons', 'components']) await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', `${file}.js`) });
+  await page.evaluate(() => {
+    const groups = [
+      { groupId: 'waiting', ruleName: 'Waiting', situationBroadcastStatus: 'sent', timeoutBroadcastStatus: 'waiting' },
+      { groupId: 'skipped', ruleName: 'Skipped', situationBroadcastStatus: 'skipped', timeoutBroadcastStatus: 'skipped' },
+    ];
+    window.Store = {
+      loadAnomalyGroupsPage: async () => ({ items: groups, total: 2, page: 1, pageSize: 10 }),
+      loadAnomalyGroup: async () => ({ group: groups[0], items: [], total: 0, page: 1, pageSize: 20, deliveries: [{ broadcast_kind: 'timeout', status: 'failed', last_error: 'retry later', attempts: 1 }] }),
+    };
+  });
+  await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'anomaly_groups.js') });
+  await page.evaluate(() => AnomalyGroupsModule.render(document.getElementById('content'), {}));
+  await page.locator('[data-group-id="waiting"]').waitFor();
+  const text = await page.locator('#content').textContent();
+  assert.match(text, /异常情况/);
+  assert.match(text, /异常超时/);
+  assert.match(text, /等待超时/);
+  assert.match(text, /已跳过/);
+  await page.evaluate(() => AnomalyGroupsModule.openDetail('waiting'));
+  assert.match(await page.locator('.drawer').textContent(), /等待超时/);
+  assert.match(await page.locator('.drawer').textContent(), /retry later/);
+});

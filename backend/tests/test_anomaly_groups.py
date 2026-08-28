@@ -172,7 +172,7 @@ def test_custom_group_template_renders_each_chunk_list_and_keeps_first_part_ment
     assert not [node for line in second for node in line if node.get("tag") == "at"]
 
 
-def test_zero_match_group_still_queues_one_message_without_field_mentions(db_session):
+def test_zero_match_group_is_retained_without_broadcast(db_session):
     settings = Settings(_env_file=None, sentinel_public_base_url="https://sentinel.example")
     rule = _group_rule(
         db_session, settings,
@@ -191,10 +191,7 @@ def test_zero_match_group_still_queues_one_message_without_field_mentions(db_ses
     delivery = db_session.scalar(select(AnomalyGroupBroadcastDelivery))
 
     assert isinstance(group, AnomalyRecordGroup)
-    assert delivery.total_parts == 1
-    lines = delivery.payload["content"]["post"]["zh-CN"]["content"]
-    assert any(node.get("text") == "本次未检测到异常" for line in lines for node in line)
-    assert not any(node.get("tag") == "at" for line in lines for node in line)
+    assert delivery is None
 
 
 def _empty_group_delivery(session, settings):
@@ -204,14 +201,150 @@ def _empty_group_delivery(session, settings):
     )
     run = RuleRun(
         id="run-delivery", rule_id=rule.id, trigger_source="manual", status="success",
-        scanned_rows=0, matched_rows=0, new_anomalies=0,
+        scanned_rows=1, matched_rows=1, new_anomalies=1,
         started_at=DETECTED_AT, finished_at=DETECTED_AT,
     )
     session.add(run)
     session.commit()
-    create_anomaly_group(session, settings, rule, run, [], [])
+    matches = _matches(1)
+    from app.models import AnomalyRecord
+    record = AnomalyRecord(rule_id=rule.id, rule_name=rule.name, dataset_name=rule.dataset.name,
+        severity="high", fingerprint="f" * 64, active_fingerprint="f" * 64,
+        business_key={"store_id": 0}, row_details=matches[0].row, matched_conditions=[])
+    session.add(record)
+    session.flush()
+    create_anomaly_group(session, settings, rule, run, [record], matches)
     session.commit()
     return session.scalar(select(AnomalyGroupBroadcastDelivery))
+
+
+def test_only_new_members_get_situation_and_timeout_broadcasts(db_session):
+    from datetime import timedelta
+    from app.anomaly_group_service import queue_due_timeout_broadcasts
+    from app.api import _group_summaries
+    from app.models import AnomalyRecord
+    settings = Settings(_env_file=None, sentinel_public_base_url="https://sentinel.example")
+    rule = _group_rule(db_session, settings, mention_targets=[])
+    rule.validation_enabled = True
+    rule.validation_targets = [{"source": "field", "field": "owner_user_id"}]
+    rule.timeout_broadcast_enabled = True
+    rule.timeout_mention_targets = [{"source": "literal", "value": "supervisor"}]
+    rule.timeout_message_template = "超时记录：{store_id列表}"
+    db_session.commit()
+    matches = _matches(22)
+    persisted = persist_matches(db_session, rule, matches)
+    first_run = RuleRun(rule_id=rule.id, trigger_source="manual", status="success", started_at=DETECTED_AT,
+                        scanned_rows=22, matched_rows=22, new_anomalies=22)
+    db_session.add(first_run)
+    db_session.flush()
+    group = create_anomaly_group(db_session, settings, rule, first_run, persisted.records, matches,
+                                 new_record_ids=persisted.new_record_ids)
+    second = persist_matches(db_session, rule, matches)
+    second_run = RuleRun(rule_id=rule.id, trigger_source="manual", status="success",
+                         started_at=DETECTED_AT + timedelta(minutes=1), scanned_rows=22, matched_rows=22, new_anomalies=0)
+    db_session.add(second_run)
+    db_session.flush()
+    second_group = create_anomaly_group(db_session, settings, rule, second_run, second.records, matches,
+                                        new_record_ids=second.new_record_ids)
+    # Changing a rule must not retarget already-created timeout obligations.
+    rule.timeout_mention_targets = [{"source": "literal", "value": "new-supervisor"}]
+    rule.timeout_message_template = "CHANGED"
+    records = list(db_session.scalars(select(AnomalyRecord).order_by(AnomalyRecord.id)))
+    records[0].status = "resolved"
+    deadline = records[1].validation_deadline
+    db_session.commit()
+    assert _group_summaries(db_session, [group])[0]["timeout_broadcast_status"] == "waiting"
+    assert queue_due_timeout_broadcasts(db_session, settings, now=deadline - timedelta(seconds=1), limit=1) == 0
+    assert queue_due_timeout_broadcasts(db_session, settings, now=deadline, limit=1) == 1
+    assert queue_due_timeout_broadcasts(db_session, settings, now=deadline, limit=1) == 0
+    timeouts = list(db_session.scalars(select(AnomalyGroupBroadcastDelivery).where(
+        AnomalyGroupBroadcastDelivery.broadcast_kind == "timeout").order_by(AnomalyGroupBroadcastDelivery.part_index)))
+    assert len(timeouts) == 2
+    assert all(item.detected_at == DETECTED_AT for item in timeouts)
+    nodes = [node for line in timeouts[0].payload["content"]["post"]["zh-CN"]["content"] for node in line]
+    assert {node["user_id"] for node in nodes if node.get("tag") == "at"} == {"owner-0", "owner-1", "supervisor"}
+    assert "超时记录" in str(timeouts[0].payload)
+    assert sum(record.status == "timed_out" for record in records) == 21
+    assert len(list(db_session.scalars(select(AnomalyGroupBroadcastDelivery)))) == 4
+    assert _group_summaries(db_session, [second_group])[0]["situation_broadcast_status"] == "skipped"
+
+
+def test_repeated_detections_at_identical_time_keep_independent_batches(db_session, monkeypatch):
+    from datetime import timedelta
+    from app.anomaly_group_service import queue_due_timeout_broadcasts
+    from app.models import AnomalyValidationRequest
+
+    settings = Settings(_env_file=None)
+    rule = _group_rule(db_session, settings, mention_targets=[])
+    rule.repeat_push_enabled = True
+    rule.validation_enabled = True
+    rule.validation_targets = [{"source": "literal", "value": "handler"}]
+    rule.timeout_broadcast_enabled = True
+    db_session.commit()
+    monkeypatch.setattr("app.anomaly_service.utcnow", lambda: DETECTED_AT)
+    groups = []
+    for index in range(3):
+        matches = _matches(1)
+        persisted = persist_matches(db_session, rule, matches, commit=False)
+        run = RuleRun(id=f"same-time-{index}", rule_id=rule.id, trigger_source="manual", status="success",
+                      scanned_rows=1, matched_rows=1, new_anomalies=1, started_at=DETECTED_AT)
+        db_session.add(run)
+        groups.append(create_anomaly_group(db_session, settings, rule, run, persisted.records, matches,
+                                          new_record_ids=persisted.new_record_ids))
+        db_session.commit()
+        assert run.started_at == DETECTED_AT
+        assert persisted.records[0].first_seen_at == DETECTED_AT
+    assert len({group.detected_at for group in groups}) == 3
+    assert len(list(db_session.scalars(select(AnomalyValidationRequest)))) == 3
+    assert queue_due_timeout_broadcasts(db_session, settings, now=DETECTED_AT + timedelta(days=2)) == 3
+    deliveries = list(db_session.scalars(select(AnomalyGroupBroadcastDelivery)))
+    assert len(deliveries) == 6
+    assert {(delivery.detected_at, delivery.broadcast_kind) for delivery in deliveries} == {
+        (group.detected_at, kind) for group in groups for kind in ("situation", "timeout")
+    }
+
+
+def test_timeout_scan_observes_abort_between_groups_without_consuming_second_group(db_session):
+    from datetime import timedelta
+    from sqlalchemy import update
+    from sqlalchemy.orm import Session
+    from app.anomaly_group_service import queue_due_timeout_broadcasts
+    from app.models import AnomalyPushPipelineState, utcnow
+    settings = Settings(_env_file=None)
+    rule = _group_rule(db_session, settings, mention_targets=[])
+    rule.group_broadcast_enabled = False
+    rule.repeat_push_enabled = True
+    rule.validation_enabled = True
+    rule.validation_targets = [{"source": "literal", "value": "handler"}]
+    rule.timeout_broadcast_enabled = True
+    db_session.commit()
+    groups = []
+    for index in range(2):
+        matches = _matches(1)
+        persisted = persist_matches(db_session, rule, matches)
+        run = RuleRun(rule_id=rule.id, trigger_source="manual", started_at=DETECTED_AT + timedelta(minutes=index),
+                      status="success", scanned_rows=1, matched_rows=1, new_anomalies=1)
+        db_session.add(run)
+        db_session.flush()
+        groups.append(create_anomaly_group(db_session, settings, rule, run, persisted.records, matches,
+                                           new_record_ids=persisted.new_record_ids))
+        db_session.commit()
+    pipeline = db_session.get(AnomalyPushPipelineState, 1)
+    assert pipeline.generation == 1
+    calls = 0
+    def should_stop():
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            with Session(db_session.get_bind()) as another:
+                another.execute(update(AnomalyPushPipelineState).values(generation=2, abort_in_progress=True))
+                another.commit()
+        return False
+    assert queue_due_timeout_broadcasts(db_session, settings, now=utcnow() + timedelta(days=2),
+                                        should_stop=should_stop) == 1
+    db_session.refresh(groups[1])
+    assert groups[1].timeout_processed_at is None
+    assert len(list(db_session.scalars(select(AnomalyGroupBroadcastDelivery)))) == 1
 
 
 def test_group_webhook_delivery_validates_feishu_response_and_marks_success(db_session):

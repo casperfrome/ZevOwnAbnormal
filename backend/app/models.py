@@ -76,6 +76,7 @@ class Rule(Base, TimestampMixin):
     logic: Mapped[str] = mapped_column(String(3), default="AND", nullable=False)
     conditions: Mapped[list[dict]] = mapped_column(JSON, nullable=False)
     anomaly_key_fields: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    repeat_push_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("0"), nullable=False)
     schedule: Mapped[dict] = mapped_column(JSON, nullable=False)
     notification_targets: Mapped[list[dict]] = mapped_column(JSON, nullable=False)
     private_message_template: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -102,6 +103,9 @@ class Rule(Base, TimestampMixin):
         nullable=False,
         server_default=text("('[]')"),
     )
+    timeout_broadcast_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("0"), nullable=False)
+    timeout_message_template: Mapped[str | None] = mapped_column(Text, nullable=True)
+    timeout_mention_targets: Mapped[list[dict]] = mapped_column(JSON, default=list, server_default=text("('[]')"), nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     sync_status: Mapped[str] = mapped_column(String(30), default="pending", nullable=False)
     sync_error: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -153,6 +157,8 @@ class AnomalyRecord(Base):
     resolution_source: Mapped[str | None] = mapped_column(String(30), nullable=True)
     resolved_by_user_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     validation_method_snapshot: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    last_sql_validation_result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    validation_result_version: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"), nullable=False)
     validation_config_snapshot: Mapped[dict] = mapped_column(
         JSON,
         default=dict,
@@ -177,6 +183,9 @@ class AnomalyRecordGroup(Base):
     matched_rows: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     new_anomalies: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     broadcast_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    timeout_broadcast_snapshot: Mapped[dict] = mapped_column(JSON, default=dict, server_default=text("('{}')"), nullable=False)
+    timeout_deadline: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    timeout_processed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
 
@@ -196,6 +205,7 @@ class AnomalyRecordGroupMember(Base):
     detected_at: Mapped[datetime] = mapped_column(PRECISE_DATETIME, primary_key=True)
     anomaly_id: Mapped[str] = mapped_column(ForeignKey("anomaly_records.id"), primary_key=True)
     position: Mapped[int] = mapped_column(Integer, nullable=False)
+    is_new: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("0"), nullable=False)
 
 
 class AnomalyGroupBroadcastDelivery(Base, TimestampMixin):
@@ -206,7 +216,7 @@ class AnomalyGroupBroadcastDelivery(Base, TimestampMixin):
             ["anomaly_record_groups.rule_id", "anomaly_record_groups.detected_at"],
             name="fk_anomaly_group_delivery_group",
         ),
-        UniqueConstraint("rule_id", "detected_at", "part_index", name="uq_anomaly_group_delivery_part"),
+        UniqueConstraint("rule_id", "detected_at", "broadcast_kind", "part_index", name="uq_anomaly_group_delivery_kind_part"),
         Index("ix_anomaly_group_deliveries_retry", "status", "next_attempt_at", "updated_at"),
     )
 
@@ -214,6 +224,7 @@ class AnomalyGroupBroadcastDelivery(Base, TimestampMixin):
     rule_id: Mapped[str] = mapped_column(String(36), nullable=False)
     detected_at: Mapped[datetime] = mapped_column(PRECISE_DATETIME, nullable=False)
     part_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    broadcast_kind: Mapped[str] = mapped_column(String(20), default="situation", server_default=text("'situation'"), nullable=False)
     total_parts: Mapped[int] = mapped_column(Integer, nullable=False)
     webhook_url: Mapped[str] = mapped_column(Text, nullable=False)
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)
@@ -265,6 +276,7 @@ class AnomalyValidationRequest(Base, TimestampMixin):
     anomaly_id: Mapped[str] = mapped_column(ForeignKey("anomaly_records.id"), nullable=False)
     recipient_user_id: Mapped[str] = mapped_column(String(255), nullable=False)
     delivery_status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)
+    synced_result_version: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"), nullable=False)
     delivery_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     message_id: Mapped[str | None] = mapped_column(String(150), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)

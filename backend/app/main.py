@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
 
 from .api import get_current_user, internal_router, router
+from .anomaly_group_service import queue_due_timeout_broadcasts
 from .config import SESSION_COOKIE, Settings, get_settings
 from .database import Base, make_session_factory
 from .models import AnomalyPushPipelineState, User
@@ -42,6 +43,8 @@ def run_validation_maintenance_cycle(
 ) -> None:
     should_stop = stop_event.is_set if stop_event is not None else None
     with session_factory() as session:
+        queue_due_timeout_broadcasts(session, settings, limit=settings.validation_maintenance_batch_size,
+                                     should_stop=should_stop)
         expire_due_anomalies(
             session,
             limit=settings.validation_maintenance_batch_size,

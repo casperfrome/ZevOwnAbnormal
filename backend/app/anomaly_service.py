@@ -18,6 +18,7 @@ from .models import (
     AnomalyValidationRequest,
     NotificationDelivery,
     Rule,
+    new_id,
     utcnow,
 )
 from .rule_engine import EvaluationMatch
@@ -29,6 +30,7 @@ class PersistResult:
     new_count: int
     delivery_ids: list[str]
     records: list[AnomalyRecord]
+    new_record_ids: list[str]
 
 
 def _json_value(value: Any) -> Any:
@@ -87,8 +89,16 @@ def persist_matches(
     new_count = 0
     delivery_ids: list[str] = []
     affected: list[AnomalyRecord] = []
+    new_record_ids: list[str] = []
     for match in matches:
-        fingerprint = fingerprint_business_key(match.business_key)
+        business_key = _json_value(match.business_key)
+        record_id = new_id()
+        if rule.repeat_push_enabled:
+            if {"__detected_at", "__occurrence_id"} & business_key.keys():
+                raise ValueError("异常主键不能使用系统保留字段 __detected_at、__occurrence_id")
+            business_key = {**business_key, "__detected_at": now.isoformat(timespec="microseconds") + "Z",
+                            "__occurrence_id": record_id}
+        fingerprint = fingerprint_business_key(business_key)
         existing = session.scalar(
             select(AnomalyRecord).where(
                 AnomalyRecord.rule_id == rule.id,
@@ -103,13 +113,14 @@ def persist_matches(
             affected.append(existing)
             continue
         record = AnomalyRecord(
+            id=record_id,
             rule_id=rule.id,
             rule_name=rule.name,
             dataset_name=rule.dataset.name,
             severity=rule.severity,
             fingerprint=fingerprint,
             active_fingerprint=fingerprint,
-            business_key=_json_value(match.business_key),
+            business_key=business_key,
             row_details=_json_value(match.row),
             matched_conditions=_json_value(match.matched_conditions),
             first_seen_at=now,
@@ -147,9 +158,10 @@ def persist_matches(
             ))
             delivery_ids.append(delivery.id)
         new_count += 1
+        new_record_ids.append(record.id)
         affected.append(record)
     if commit:
         session.commit()
     else:
         session.flush()
-    return PersistResult(new_count=new_count, delivery_ids=delivery_ids, records=affected)
+    return PersistResult(new_count=new_count, delivery_ids=delivery_ids, records=affected, new_record_ids=new_record_ids)

@@ -44,7 +44,37 @@ class DatasetUpdate(BaseModel):
     description: str | None = None
 
 
-class Condition(BaseModel):
+class ComparisonOperands(BaseModel):
+    value: float | int | str | None = None
+    upper_value: float | int | str | None = None
+    value_source: Literal["literal", "field"] = "literal"
+    value_field: str | None = None
+    upper_value_source: Literal["literal", "field"] = "literal"
+    upper_value_field: str | None = None
+
+    @field_validator("value_field", "upper_value_field", mode="before")
+    @classmethod
+    def normalize_operand_field(cls, value):
+        return value.strip() or None if isinstance(value, str) else value
+
+    def require_operand(self, name: str) -> None:
+        if getattr(self, f"{name}_source") == "field":
+            if not getattr(self, f"{name}_field"):
+                raise ValueError("字段值比较需要选择目标字段")
+        elif getattr(self, name) is None:
+            raise ValueError("比较条件需要目标值，between 需要上下界")
+
+    @model_validator(mode="after")
+    def validate_operand_sources(self):
+        operator = getattr(self, "operator", "")
+        if operator not in {"is_null", "is_not_null"}:
+            self.require_operand("value")
+            if operator == "between":
+                self.require_operand("upper_value")
+        return self
+
+
+class Condition(ComparisonOperands):
     field: str
     operator: Literal[
         "gt", "gte", "lt", "lte", "eq", "neq", "between", "is_null", "is_not_null",
@@ -66,7 +96,11 @@ class Condition(BaseModel):
         if data.get("operator") not in numeric_operators:
             return data
         normalized = dict(data)
-        for name in ("value", "upper_value"):
+        names = ("value", "upper_value") if data.get("operator") == "between" else ("value",)
+        for name in names:
+            if normalized.get(f"{name}_source", "literal") == "field":
+                normalized[name] = None
+                continue
             value = normalized.get(name)
             if isinstance(value, str) and value.strip():
                 normalized[name] = float(value)
@@ -74,9 +108,7 @@ class Condition(BaseModel):
 
     @model_validator(mode="after")
     def validate_operands(self):
-        if self.operator == "between" and (self.value is None or self.upper_value is None):
-            raise ValueError("between 需要上下界")
-        if self.operator.endswith("threshold_ratio") and (self.value is None or self.baseline is None):
+        if self.operator.endswith("threshold_ratio") and self.baseline is None:
             raise ValueError("基线操作符需要倍数和基线类型")
         return self
 
@@ -115,11 +147,21 @@ class ValidationTarget(BaseModel):
         return self
 
 
-class GroupBroadcastConfig(BaseModel):
+class BroadcastModeConfig(BaseModel):
     enabled: bool = False
-    webhook_url: str | None = None
     mention_targets: list[ValidationTarget] = Field(default_factory=list)
     message_template: str | None = Field(default=None, max_length=10000)
+
+    @field_validator("message_template", mode="before")
+    @classmethod
+    def normalize_message_template(cls, value):
+        return value.strip() or None if isinstance(value, str) else value
+
+
+class GroupBroadcastConfig(BroadcastModeConfig):
+    webhook_url: str | None = None
+    situation: BroadcastModeConfig | None = None
+    timeout: BroadcastModeConfig | None = None
 
     @field_validator("webhook_url", mode="before")
     @classmethod
@@ -148,18 +190,14 @@ class GroupBroadcastConfig(BaseModel):
             raise ValueError("群机器人 webhook 必须是飞书官方 HTTPS 地址")
         return normalized
 
-    @field_validator("message_template", mode="before")
-    @classmethod
-    def normalize_message_template(cls, value):
-        if not isinstance(value, str):
-            return value
-        normalized = value.strip()
-        return normalized or None
-
     @model_validator(mode="after")
-    def validate_enabled_targets(self):
-        if self.enabled and not self.mention_targets:
-            raise ValueError("启用群聊播报时至少需要一个艾特来源")
+    def normalize_legacy_situation(self):
+        if self.situation is None:
+            self.situation = BroadcastModeConfig(**{
+                name: getattr(self, name) for name in ("enabled", "mention_targets", "message_template")
+                if name in self.model_fields_set
+            })
+            self.model_fields_set.discard("situation")
         return self
 
 
@@ -173,7 +211,7 @@ class SqlValidationParameter(BaseModel):
         return value.strip() if isinstance(value, str) else value
 
 
-class SqlTrueCondition(BaseModel):
+class SqlTrueCondition(ComparisonOperands):
     field: str = Field(min_length=1, max_length=255)
     operator: Literal["gt", "gte", "lt", "lte", "eq", "neq", "between", "is_null", "is_not_null"]
     value: float | int | str | None = None
@@ -183,15 +221,6 @@ class SqlTrueCondition(BaseModel):
     @classmethod
     def normalize_result_field(cls, value):
         return value.strip() if isinstance(value, str) else value
-
-    @model_validator(mode="after")
-    def validate_operands(self):
-        if self.operator == "between" and (self.value is None or self.upper_value is None):
-            raise ValueError("between 需要上下界")
-        if self.operator not in {"is_null", "is_not_null"} and self.value is None:
-            raise ValueError("该 True 条件需要期望值")
-        return self
-
 
 class SqlValidationConfig(BaseModel):
     query_template: str = Field(min_length=1, max_length=20000)
@@ -280,6 +309,7 @@ class RuleCreate(RuleValidationConfig):
     logic: Literal["AND", "OR"] = "AND"
     conditions: list[Condition] = Field(min_length=1)
     anomaly_key_fields: list[str] = Field(min_length=1)
+    repeat_push_enabled: bool = False
     schedule: RuleSchedule
     notification_targets: list[NotificationTarget] = Field(min_length=1)
     private_message_template: str | None = Field(default=None, max_length=10000)

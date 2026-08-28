@@ -5,7 +5,7 @@ from typing import Literal
 
 import httpx
 import jwt
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 from sqlalchemy import and_, case, exists, func, or_, select, tuple_
 from sqlalchemy.exc import IntegrityError
@@ -56,6 +56,7 @@ from .validation_service import (
     ValidationRecipientError,
     ValidationTextError,
     build_validation_card,
+    refresh_validation_card,
     submit_sql_validation,
     submit_validation,
     transition_anomaly,
@@ -230,15 +231,22 @@ def _card_action_result(
     )
     if anomaly is None:
         raise HTTPException(404, "异常记录不存在")
-    return {
+    result = {
         "toast": {"type": toast_type, "content": content},
         "card": build_validation_card(anomaly, settings.sentinel_public_base_url),
     }
+    if anomaly.validation_method_snapshot == "sql":
+        # The snapshot remains available to internal callers, but the gateway
+        # must not apply it: a delayed callback can overwrite a newer PATCH.
+        result["card_update_mode"] = "versioned"
+    return result
 
 
 @internal_router.post("/feishu/card-actions")
 def feishu_card_action(
     payload: FeishuCardActionCallback,
+    background_tasks: BackgroundTasks,
+    http_request: Request,
     x_internal_token: str = Header(default=""),
     session: Session = Depends(get_session),
     settings: Settings = Depends(get_app_settings),
@@ -267,6 +275,10 @@ def feishu_card_action(
     expected_action = "run_sql_validation" if validation_method == "sql" else "submit_validation"
     if payload.action != expected_action:
         raise HTTPException(400, "卡片操作与异常校验方式不匹配")
+
+    if validation_method == "sql":
+        background_tasks.add_task(refresh_validation_card, http_request.app.state.session_factory,
+                                   settings, request.id)
 
     try:
         if validation_method == "sql":
@@ -308,6 +320,7 @@ def feishu_card_action(
             "no_rows": "SQL 校验未通过：查询未返回数据",
             "multiple_rows": "SQL 校验未通过：查询返回多行",
             "missing_field": "SQL 校验未通过：结果缺少配置字段",
+            "invalid_comparison": "SQL 校验未通过：比较值类型不兼容",
         }
         if result.reason in reason_messages:
             content = reason_messages[result.reason]
@@ -315,7 +328,7 @@ def feishu_card_action(
             detail = result.result_detail or {}
             content = (
                 f"SQL 校验未通过：{detail.get('field', '-')} 实际值 "
-                f"{detail.get('actual')}，期望 {detail.get('operator', '-')} {detail.get('value')}"
+                f"{detail.get('actual')}，期望 {detail.get('operator', '-')} {detail.get('resolved_value', detail.get('value'))}"
             )
         return _card_action_result("warning", content, anomaly_id, session, settings)
     if result.outcome == "duplicate":
@@ -375,6 +388,7 @@ def rule_dict(item: Rule) -> dict:
         "logic": item.logic,
         "conditions": item.conditions,
         "anomaly_key_fields": item.anomaly_key_fields,
+        "repeat_push_enabled": item.repeat_push_enabled,
         "schedule": item.schedule,
         "notification_targets": item.notification_targets,
         "private_message_template": item.private_message_template,
@@ -388,6 +402,16 @@ def rule_dict(item: Rule) -> dict:
             "webhook_url": item.group_webhook_url,
             "mention_targets": item.group_mention_targets,
             "message_template": item.group_message_template,
+            "situation": {
+                "enabled": item.group_broadcast_enabled,
+                "mention_targets": item.group_mention_targets,
+                "message_template": item.group_message_template,
+            },
+            "timeout": {
+                "enabled": item.timeout_broadcast_enabled,
+                "mention_targets": item.timeout_mention_targets,
+                "message_template": item.timeout_message_template,
+            },
         },
         "enabled": item.enabled,
         "sync_status": item.sync_status,
@@ -404,6 +428,16 @@ def _sync_rule(item: Rule, settings: Settings, session: Session) -> None:
 
 
 def _validate_rule_sql_configuration(payload: RuleCreate, dataset: Dataset) -> None:
+    fields = {str(field["name"]) for field in (dataset.fields or []) if field.get("name") is not None}
+    if payload.repeat_push_enabled and {"__detected_at", "__occurrence_id"} & set(payload.anomaly_key_fields):
+        raise HTTPException(422, "异常主键不能使用系统保留字段 __detected_at、__occurrence_id")
+    for condition in payload.conditions:
+        if condition.operator in {"is_null", "is_not_null"}:
+            continue
+        operands = ["value", "upper_value"] if condition.operator == "between" else ["value"]
+        for name in operands:
+            if getattr(condition, f"{name}_source") == "field" and getattr(condition, f"{name}_field") not in fields:
+                raise HTTPException(422, f"比较目标字段不存在：{getattr(condition, f'{name}_field')}")
     if payload.validation_method != "sql" or payload.sql_validation_config is None:
         return
     fields = {
@@ -425,13 +459,19 @@ def _validate_group_broadcast_configuration(
     dataset: Dataset,
     *,
     existing_webhook: str | None = None,
+    existing: Rule | None = None,
 ) -> None:
+    config = payload.group_broadcast
+    timeout_enabled = config.timeout.enabled if config.timeout is not None else bool(existing and existing.timeout_broadcast_enabled)
+    if timeout_enabled and not payload.validation_enabled:
+        raise HTTPException(422, "启用超时播报必须开启实时验证")
     if "group_broadcast" not in payload.model_fields_set:
         return
-    config = payload.group_broadcast
     webhook_was_supplied = "webhook_url" in config.model_fields_set
     effective_webhook = config.webhook_url if webhook_was_supplied else existing_webhook
-    if config.enabled and not effective_webhook:
+    situation_supplied = "situation" in config.model_fields_set or bool({"enabled", "mention_targets", "message_template"} & config.model_fields_set)
+    situation_enabled = config.situation.enabled if situation_supplied else bool(existing and existing.group_broadcast_enabled)
+    if (situation_enabled or timeout_enabled) and not effective_webhook:
         raise HTTPException(422, "启用群聊播报时必须配置 webhook")
     fields = {
         str(field.get("name"))
@@ -440,7 +480,8 @@ def _validate_group_broadcast_configuration(
     }
     missing = sorted({
         target.field
-        for target in config.mention_targets
+        for mode in [config.situation, config.timeout] if mode is not None
+        for target in mode.mention_targets
         if target.source == "field" and target.field not in fields
     })
     if missing:
@@ -455,7 +496,8 @@ def _validate_message_templates(payload: RuleCreate, dataset: Dataset) -> None:
     }
     templates = [(payload.private_message_template, "private")]
     if "group_broadcast" in payload.model_fields_set:
-        templates.append((payload.group_broadcast.message_template, "group"))
+        templates.extend((mode.message_template, "group") for mode in
+                         [payload.group_broadcast.situation, payload.group_broadcast.timeout] if mode is not None)
     for template, context in templates:
         if template is None:
             continue
@@ -473,15 +515,20 @@ def _apply_group_broadcast_configuration(
     if "group_broadcast" not in payload.model_fields_set:
         return
     config = payload.group_broadcast
-    item.group_broadcast_enabled = config.enabled
-    item.group_mention_targets = [
-        target.model_dump(mode="json", exclude_none=True)
-        for target in config.mention_targets
-    ]
+    if "situation" in config.model_fields_set or {"enabled", "mention_targets", "message_template"} & config.model_fields_set:
+        mode = config.situation
+        item.group_broadcast_enabled = mode.enabled
+        item.group_mention_targets = [target.model_dump(mode="json", exclude_none=True) for target in mode.mention_targets]
+        if "message_template" in mode.model_fields_set:
+            item.group_message_template = mode.message_template
+    if config.timeout is not None:
+        mode = config.timeout
+        item.timeout_broadcast_enabled = mode.enabled
+        item.timeout_mention_targets = [target.model_dump(mode="json", exclude_none=True) for target in mode.mention_targets]
+        if "message_template" in mode.model_fields_set:
+            item.timeout_message_template = mode.message_template
     if "webhook_url" in config.model_fields_set:
         item.group_webhook_url = config.webhook_url
-    if "message_template" in config.model_fields_set:
-        item.group_message_template = config.message_template
 
 
 def run_dict(item: RuleRun) -> dict:
@@ -541,22 +588,35 @@ def _group_summaries(session: Session, groups: list[AnomalyRecordGroup]) -> list
         )
     ):
         status_counts.setdefault((rule_id, detected_at), {})[record_status] = count
-    delivery_statuses: dict[tuple[str, object], list[str]] = {}
-    for rule_id, detected_at, delivery_status in session.execute(
+    delivery_statuses: dict[tuple[str, object, str], list[str]] = {}
+    for rule_id, detected_at, kind, delivery_status in session.execute(
         select(
             AnomalyGroupBroadcastDelivery.rule_id,
             AnomalyGroupBroadcastDelivery.detected_at,
+            AnomalyGroupBroadcastDelivery.broadcast_kind,
             AnomalyGroupBroadcastDelivery.status,
         ).where(tuple_(
             AnomalyGroupBroadcastDelivery.rule_id,
             AnomalyGroupBroadcastDelivery.detected_at,
         ).in_(keys))
     ):
-        delivery_statuses.setdefault((rule_id, detected_at), []).append(delivery_status)
+        delivery_statuses.setdefault((rule_id, detected_at, kind), []).append(delivery_status)
     result = []
     for group in groups:
         key = (group.rule_id, group.detected_at)
         counts = status_counts.get(key, {})
+        situation_statuses = delivery_statuses.get((*key, "situation"), [])
+        situation_status = ("skipped" if group.broadcast_enabled and group.new_anomalies == 0 and not situation_statuses
+                            else _group_broadcast_status(group.broadcast_enabled, situation_statuses))
+        timeout_statuses = delivery_statuses.get((*key, "timeout"), [])
+        if not (group.timeout_broadcast_snapshot or {}).get("enabled"):
+            timeout_status = "disabled"
+        elif timeout_statuses:
+            timeout_status = _group_broadcast_status(True, timeout_statuses)
+        elif group.timeout_processed_at is not None or group.timeout_deadline is None:
+            timeout_status = "skipped"
+        else:
+            timeout_status = "waiting"
         result.append({
             "group_id": group.run_id,
             "rule_id": group.rule_id,
@@ -569,9 +629,9 @@ def _group_summaries(session: Session, groups: list[AnomalyRecordGroup]) -> list
                 status: counts.get(status, 0)
                 for status in ("pending", "processing", "timed_out", "resolved")
             },
-            "broadcast_status": _group_broadcast_status(
-                group.broadcast_enabled, delivery_statuses.get(key, []),
-            ),
+            "broadcast_status": situation_status,
+            "situation_broadcast_status": situation_status,
+            "timeout_broadcast_status": timeout_status,
         })
     return result
 
@@ -853,7 +913,7 @@ def update_rule(rule_id: str, payload: RuleCreate, session: Session = Depends(ge
         raise HTTPException(404, "数据集不存在")
     _validate_rule_sql_configuration(payload, dataset)
     _validate_group_broadcast_configuration(
-        payload, dataset, existing_webhook=item.group_webhook_url,
+        payload, dataset, existing_webhook=item.group_webhook_url, existing=item,
     )
     _validate_message_templates(payload, dataset)
     for key, value in payload.model_dump(mode="json", exclude={"enabled", "group_broadcast"}).items():
@@ -999,6 +1059,14 @@ def get_anomaly_group(
     ))
     return {
         "group": _group_summaries(session, [group])[0],
+        "deliveries": [{"id": delivery.id, "broadcast_kind": delivery.broadcast_kind,
+            "part_index": delivery.part_index, "total_parts": delivery.total_parts,
+            "status": delivery.status, "attempts": delivery.attempts, "last_error": delivery.last_error,
+            "delivered_at": delivery.delivered_at}
+            for delivery in session.scalars(select(AnomalyGroupBroadcastDelivery).where(
+                AnomalyGroupBroadcastDelivery.rule_id == group.rule_id,
+                AnomalyGroupBroadcastDelivery.detected_at == group.detected_at,
+            ).order_by(AnomalyGroupBroadcastDelivery.broadcast_kind, AnomalyGroupBroadcastDelivery.part_index))],
         "items": [anomaly_dict(item) for item in items],
         "total": total,
         "page": page,
@@ -1204,6 +1272,7 @@ def get_anomaly(
     if not item:
         raise HTTPException(404, "异常记录不存在")
     body = anomaly_dict(item)
+    body["last_sql_validation_result"] = item.last_sql_validation_result
     body["timeline"] = [
         {"type": event.event_type, "description": event.description, "created_at": event.created_at}
         for event in session.scalars(select(AnomalyEvent).where(AnomalyEvent.anomaly_id == item.id).order_by(AnomalyEvent.created_at))

@@ -66,6 +66,44 @@ def callback_payload(anomaly_id: str, **changes) -> dict:
     return payload
 
 
+def test_sql_callbacks_use_versioned_refresh_including_unauthorized_responses(monkeypatch):
+    from app.validation_service import submit_sql_validation
+    from test_validation_service import FakeConnection
+    from sqlalchemy import select
+    patches = []
+    class Client:
+        def patch_interactive(self, message_id, card):
+            patches.append((message_id, card))
+    monkeypatch.setattr("app.validation_service._active_client", lambda *_: (Client(), False))
+    monkeypatch.setattr("app.api.submit_sql_validation", lambda session, settings, anomaly_id, operator:
+        submit_sql_validation(session, settings, anomaly_id, operator,
+            connection_factory=lambda *_: FakeConnection([{"actual": "bad"}])))
+    with TestClient(create_app(testing=True)) as client:
+        anomaly_id = seed_validation_anomaly(client)
+        with client.app.state.session_factory() as session:
+            anomaly = session.get(AnomalyRecord, anomaly_id)
+            rule = session.get(Rule, anomaly.rule_id)
+            anomaly.validation_method_snapshot = "sql"
+            anomaly.validation_config_snapshot = {"datasource_id": rule.dataset.datasource_id,
+                "query_template": "SELECT actual FROM t", "parameters": [], "dataset_fields": [],
+                "true_condition": {"field": "actual", "operator": "eq", "value": "ok"}}
+            session.commit()
+        headers = {"X-Internal-Token": "change-this-internal-token"}
+        denied = client.post("/api/internal/feishu/card-actions", headers=headers,
+            json=callback_payload(anomaly_id, action="run_sql_validation", operator_user_id="intruder"))
+        assert denied.json()["card_update_mode"] == "versioned"
+        response = client.post("/api/internal/feishu/card-actions", headers=headers,
+            json=callback_payload(anomaly_id, action="run_sql_validation"))
+        assert response.json()["card_update_mode"] == "versioned"
+        assert response.json()["toast"]["type"] == "warning"
+        assert len(patches) == 1
+        assert patches[0][0] == "om_expected"
+        assert "False" in str(patches[0][1])
+        with client.app.state.session_factory() as session:
+            request = session.scalar(select(AnomalyValidationRequest))
+            assert request.synced_result_version == 1
+
+
 def test_feishu_callback_authenticates_and_resolves_with_updated_card():
     with TestClient(create_app(testing=True)) as client:
         anomaly_id = seed_validation_anomaly(client)

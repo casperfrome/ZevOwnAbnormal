@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
+from datetime import datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -10,11 +13,13 @@ from sqlalchemy.orm import Session
 from .config import Settings
 from .models import (
     AnomalyGroupBroadcastDelivery,
+    AnomalyEvent,
     AnomalyPushJob,
     AnomalyPushPipelineState,
     AnomalyRecord,
     AnomalyRecordGroup,
     AnomalyRecordGroupMember,
+    AnomalyValidationRequest,
     Rule,
     RuleRun,
     utcnow,
@@ -81,6 +86,7 @@ def build_group_messages(
     public_base_url: str,
     message_template: str | None = None,
     field_names: set[str] | None = None,
+    broadcast_kind: str = "situation",
 ) -> list[dict[str, Any]]:
     base_url = public_base_url.rstrip("/")
     chunks = [
@@ -108,6 +114,8 @@ def build_group_messages(
                 )],
                 [_link("查看异常记录组", group_url)],
             ]
+            if broadcast_kind == "timeout":
+                lines.insert(0, [_text(f"已超时未解决：{len(records)} 条，请相关处理人尽快处理。")])
         if chunk and not message_template:
             for record in chunk:
                 status = STATUS_LABELS.get(record.status, record.status or "未知")
@@ -130,13 +138,24 @@ def build_group_messages(
             "content": {
                 "post": {
                     "zh-CN": {
-                        "title": f"【异常检测完成】{group.rule_name}{suffix}",
+                        "title": f"【{'超时播报' if broadcast_kind == 'timeout' else '情况播报'}】{group.rule_name}{suffix}",
                         "content": lines,
                     }
                 }
             },
         })
     return messages
+
+
+def _available_group_time(session: Session, rule_id: str, detected_at: datetime) -> datetime:
+    # The caller holds the rule execution lock and the persistence transaction's
+    # pipeline lock. Preserve the existing composite FK without dropping a new
+    # detection when clocks repeat the exact same microsecond.
+    while session.scalar(select(AnomalyRecordGroup.run_id).where(
+        AnomalyRecordGroup.rule_id == rule_id, AnomalyRecordGroup.detected_at == detected_at,
+    )) is not None:
+        detected_at += timedelta(microseconds=1)
+    return detected_at
 
 
 def create_anomaly_group(
@@ -146,17 +165,39 @@ def create_anomaly_group(
     run: RuleRun,
     records: list[AnomalyRecord],
     matches: list[Any],
+    *,
+    new_record_ids: list[str] | None = None,
 ) -> AnomalyRecordGroup:
     unique_records = _unique_records(records)
+    if new_record_ids is None:
+        # Compatibility for direct callers: an anomaly can originate in only
+        # one group. Execution passes the exact IDs from its persistence step.
+        prior_ids = set(session.scalars(select(AnomalyRecordGroupMember.anomaly_id).where(
+            AnomalyRecordGroupMember.anomaly_id.in_([record.id for record in unique_records]),
+        )))
+        new_record_ids = [record.id for record in unique_records if record.id not in prior_ids]
+    new_ids = set(new_record_ids)
+    new_records = [record for record in unique_records if record.id in new_ids]
+    fields = {str(field["name"]) for field in (rule.dataset.fields or []) if field.get("name") is not None}
+    timeout_enabled = bool(rule.validation_enabled and rule.timeout_broadcast_enabled)
+    deadlines = [record.validation_deadline for record in new_records if record.validation_deadline is not None]
     group = AnomalyRecordGroup(
         rule_id=rule.id,
-        detected_at=run.started_at,
+        detected_at=_available_group_time(session, rule.id, run.started_at),
         run_id=run.id,
         rule_name=rule.name,
         scanned_rows=run.scanned_rows,
         matched_rows=run.matched_rows,
         new_anomalies=run.new_anomalies,
         broadcast_enabled=bool(rule.group_broadcast_enabled),
+        timeout_broadcast_snapshot={
+            "enabled": timeout_enabled,
+            "webhook_url": rule.group_webhook_url if timeout_enabled else None,
+            "message_template": rule.timeout_message_template,
+            "mention_targets": deepcopy(rule.timeout_mention_targets or []),
+            "field_names": sorted(fields),
+        },
+        timeout_deadline=max(deadlines) if timeout_enabled and deadlines else None,
     )
     session.add(group)
     session.flush()
@@ -166,40 +207,46 @@ def create_anomaly_group(
             detected_at=group.detected_at,
             anomaly_id=record.id,
             position=position,
+            is_new=record.id in new_ids,
         ))
 
-    if not rule.group_broadcast_enabled or not rule.group_webhook_url:
+    if not rule.group_broadcast_enabled or not rule.group_webhook_url or not new_records:
         return group
 
+    mentions = resolve_group_mentions(rule.group_mention_targets or [], [
+        SimpleNamespace(row=record.row_details) for record in new_records
+    ])
+    _queue_group_messages(session, settings, group, new_records, mentions, rule.group_webhook_url,
+                          rule.group_message_template, fields, "situation")
+    return group
+
+
+def _queue_group_messages(session, settings, group, records, mentions, webhook, template, fields, kind):
     pipeline = session.scalar(
         select(AnomalyPushPipelineState)
         .where(AnomalyPushPipelineState.id == 1)
+        .execution_options(populate_existing=True)
         .with_for_update()
     )
     if pipeline is None:
         pipeline = AnomalyPushPipelineState(id=1, generation=1)
         session.add(pipeline)
         session.flush()
-    mentions = resolve_group_mentions(rule.group_mention_targets or [], matches)
     messages = build_group_messages(
         group,
-        unique_records,
+        records,
         mentions,
         settings.sentinel_public_base_url,
-        rule.group_message_template,
-        {
-            str(field.get("name"))
-            for field in (rule.dataset.fields or [])
-            if field.get("name") is not None
-        },
+        template, fields, kind,
     )
     for part_index, payload in enumerate(messages, start=1):
         delivery = AnomalyGroupBroadcastDelivery(
             rule_id=group.rule_id,
             detected_at=group.detected_at,
             part_index=part_index,
+            broadcast_kind=kind,
             total_parts=len(messages),
-            webhook_url=rule.group_webhook_url,
+            webhook_url=webhook,
             payload=payload,
         )
         session.add(delivery)
@@ -210,7 +257,66 @@ def create_anomaly_group(
             delivery_id=delivery.id,
             generation=pipeline.generation,
         ))
-    return group
+
+
+def queue_due_timeout_broadcasts(session: Session, settings: Settings, *, now: datetime | None = None,
+                               limit: int = 50, should_stop=None) -> int:
+    """Materialize each original cohort once, including all members atomically.
+
+    The limit bounds groups, never members. The pipeline singleton is locked
+    before groups/records, matching detection and administrative cancellation.
+    """
+    scan_time = now or utcnow()
+    keys = list(session.execute(select(AnomalyRecordGroup.rule_id, AnomalyRecordGroup.detected_at).where(
+        AnomalyRecordGroup.timeout_deadline <= scan_time,
+        AnomalyRecordGroup.timeout_processed_at.is_(None),
+    ).order_by(AnomalyRecordGroup.timeout_deadline, AnomalyRecordGroup.run_id).limit(limit)))
+    session.commit()
+    queued = 0
+    for rule_id, detected_at in keys:
+        if should_stop is not None and should_stop():
+            break
+        pipeline = session.scalar(select(AnomalyPushPipelineState).where(
+            AnomalyPushPipelineState.id == 1).execution_options(populate_existing=True).with_for_update())
+        if pipeline is not None and pipeline.abort_in_progress:
+            session.commit()
+            break
+        group = session.scalar(select(AnomalyRecordGroup).where(
+            AnomalyRecordGroup.rule_id == rule_id, AnomalyRecordGroup.detected_at == detected_at,
+        ).execution_options(populate_existing=True).with_for_update())
+        if group is None or group.timeout_processed_at is not None:
+            session.commit()
+            continue
+        snapshot = group.timeout_broadcast_snapshot or {}
+        records = list(session.scalars(select(AnomalyRecord).join(
+            AnomalyRecordGroupMember, AnomalyRecordGroupMember.anomaly_id == AnomalyRecord.id,
+        ).where(
+            AnomalyRecordGroupMember.rule_id == rule_id,
+            AnomalyRecordGroupMember.detected_at == detected_at,
+            AnomalyRecordGroupMember.is_new.is_(True),
+            AnomalyRecord.validation_deadline <= scan_time,
+            AnomalyRecord.status.in_(["pending", "processing", "timed_out"]),
+        ).order_by(AnomalyRecordGroupMember.position).execution_options(populate_existing=True).with_for_update()))
+        for record in records:
+            if record.status != "timed_out":
+                record.status = "timed_out"
+                record.timed_out_at = scan_time
+                session.add(AnomalyEvent(anomaly_id=record.id, event_type="validation_timed_out",
+                    description="实时验证已超过截止时间，仍可补充提交", created_at=scan_time))
+        if records and snapshot.get("enabled") and snapshot.get("webhook_url"):
+            handlers = list(session.scalars(select(AnomalyValidationRequest.recipient_user_id).where(
+                AnomalyValidationRequest.anomaly_id.in_([record.id for record in records]),
+            ).order_by(AnomalyValidationRequest.recipient_user_id)))
+            extras = resolve_group_mentions(snapshot.get("mention_targets", []), [
+                SimpleNamespace(row=record.row_details) for record in records
+            ])
+            mentions = list(dict.fromkeys([*handlers, *extras]))
+            _queue_group_messages(session, settings, group, records, mentions, snapshot["webhook_url"],
+                                  snapshot.get("message_template"), set(snapshot.get("field_names", [])), "timeout")
+            queued += 1
+        group.timeout_processed_at = scan_time
+        session.commit()
+    return queued
 
 
 def deliver_group_broadcasts(

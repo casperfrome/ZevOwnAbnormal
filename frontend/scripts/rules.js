@@ -270,6 +270,25 @@ window.RulesModule = (function () {
       groupBroadcast: { enabled: false, webhookUrl: '', mentionTargets: [], messageTemplate: '' },
     };
     const groupBroadcast = data.groupBroadcast || { enabled: false, webhookUrl: '', mentionTargets: [], messageTemplate: '' };
+    const situationBroadcast = groupBroadcast.situation || groupBroadcast;
+    const timeoutBroadcast = groupBroadcast.timeout || {};
+    const sqlCondition = data.sqlValidationConfig?.trueCondition || {};
+
+    function operandSwitch(source) {
+      return `<div class="segmented operand-source" role="group" aria-label="比较值来源">
+        ${[['literal', '具体值'], ['field', '字段值']].map(([value, label]) => `<button type="button" data-source="${value}" class="${source === value ? 'active' : ''}" aria-pressed="${source === value}">${label}</button>`).join('')}
+      </div>`;
+    }
+
+    function sqlOperand(upper = false) {
+      const prefix = upper ? 'upper-value' : 'value';
+      const source = sqlCondition[upper ? 'upperValueSource' : 'valueSource'] || 'literal';
+      return `<div class="condition-operand" id="f-sql-${prefix}-operand" data-operand="${prefix}">
+        <input class="input mono" id="f-sql-${prefix}" placeholder="${upper ? '范围上界' : '期望值'}" value="${escapeHtml(sqlCondition[upper ? 'upperValue' : 'value'] ?? '')}" aria-label="SQL True 条件${upper ? '范围上界' : '期望值'}" ${source === 'field' ? 'hidden' : ''} />
+        <input class="input mono" id="f-sql-${prefix}-field" placeholder="结果字段名" value="${escapeHtml(sqlCondition[upper ? 'upperValueField' : 'valueField'] || '')}" aria-label="SQL True 条件${upper ? '上界' : '比较'}字段" ${source === 'field' ? '' : 'hidden'} />
+        ${operandSwitch(source)}
+      </div>`;
+    }
 
     const datasets = Store.getDatasets();
 
@@ -318,6 +337,10 @@ window.RulesModule = (function () {
             `, { required: true, help: '可选择多个字段；建议包含门店 ID 与日期字段' })}
           </div>
           <div id="dataset-fields-preview"></div>
+          <div class="validation-toggle-row">
+            <div><div class="cell-strong">允许重复推送</div><div class="cell-muted">默认关闭；开启后，同一异常主键再次命中也会推送通知</div></div>
+            <label class="switch"><input type="checkbox" id="f-repeat-push-enabled" ${data.repeatPushEnabled ? 'checked' : ''} aria-label="允许重复推送" /><span class="switch-slider"></span></label>
+          </div>
         </div>
 
         <div class="form-section rule-form-panel" id="rule-panel-conditions" data-rule-panel="conditions" role="tabpanel" aria-labelledby="rule-tab-conditions" hidden>
@@ -399,8 +422,8 @@ window.RulesModule = (function () {
                   ['is_null', '为空'], ['is_not_null', '不为空'],
                 ].map(([value, label]) => `<option value="${value}" ${data.sqlValidationConfig?.trueCondition?.operator === value ? 'selected' : ''}>${label}</option>`).join('')}
               </select>
-              <input class="input mono" id="f-sql-value" placeholder="期望值" value="${escapeHtml(data.sqlValidationConfig?.trueCondition?.value ?? '')}" aria-label="SQL True 条件期望值" />
-              <input class="input mono" id="f-sql-upper-value" placeholder="范围上界（between）" value="${escapeHtml(data.sqlValidationConfig?.trueCondition?.upperValue ?? '')}" aria-label="SQL True 条件范围上界" />
+              ${sqlOperand()}
+              ${sqlOperand(true)}
             </div>
           </div>
           <div class="field-error" id="f-validation-target-error" style="display:none;">${Icon.alert({ size: 12 })}<span></span></div>
@@ -452,50 +475,41 @@ window.RulesModule = (function () {
         </div>
 
         <div class="form-section rule-form-panel group-broadcast-config" id="rule-panel-group" data-rule-panel="group" role="tabpanel" aria-labelledby="rule-tab-group" hidden>
-          <div class="form-section-desc">每次规则成功执行后，将本批异常记录组汇总发送到飞书话题群</div>
-          <div class="validation-toggle-row">
-            <div>
-              <div class="cell-strong">启用群聊播报</div>
-              <div class="cell-muted">关闭时保留 webhook 与艾特目标配置</div>
-            </div>
-            <label class="switch">
-              <input type="checkbox" id="f-group-broadcast-enabled" ${groupBroadcast.enabled ? 'checked' : ''} aria-label="启用群聊播报" />
-              <span class="switch-slider"></span>
-            </label>
-          </div>
-          <div class="form-grid">
-            ${UI.field('话题群机器人 webhook', `
-              <input class="input mono" id="f-group-webhook" type="text" value="${escapeHtml(groupBroadcast.webhookUrl || '')}" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..." />
-            `, { optional: true, span2: true, help: '仅支持飞书机器人 HTTPS webhook；保存后将在编辑界面完整显示' })}
-            ${UI.field('固定艾特用户 user_id', `<div class="tag-input" id="f-group-userids"><input type="text" placeholder="输入 user_id 后回车" id="f-group-userids-input" /></div>`, { optional: true, help: '可配置多个；保存时会自动收录尚未回车的内容' })}
-            ${UI.field('数据集字段 user_id', `
-              <div class="key-field-picker">
-                <button type="button" class="key-field-picker-trigger" id="f-group-fields" role="combobox"
-                  aria-label="数据集字段 user_id" aria-haspopup="listbox" aria-expanded="false"
-                  aria-controls="f-group-fields-listbox" disabled>
-                  <span class="key-field-picker-summary"><span class="key-field-picker-placeholder">请先选择数据集…</span></span>
-                  <span class="key-field-picker-chevron" aria-hidden="true">${Icon.chevronDown({ size: 14 })}</span>
-                </button>
-                <div class="key-field-picker-listbox" id="f-group-fields-listbox" role="listbox"
-                  aria-label="数据集字段 user_id" aria-multiselectable="true" hidden></div>
+          <div class="form-section-desc">异常情况与异常超时分别配置，共用同一个飞书群机器人</div>
+          ${UI.field('话题群机器人 webhook', `<input class="input mono" id="f-group-webhook" type="text" value="${escapeHtml(groupBroadcast.webhookUrl || '')}" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..." />`, { optional: true, help: '两种播报共用；仅支持飞书机器人 HTTPS webhook' })}
+          ${[['group', situationBroadcast, '异常情况播报'], ['timeout', timeoutBroadcast, '异常超时播报']].map(([context, config, title]) => `
+            <section class="broadcast-kind-section" aria-label="${title}">
+              <div class="validation-toggle-row">
+                <div><div class="cell-strong">${title}</div><div class="cell-muted">${context === 'group' ? '规则检测完成后播报异常情况；艾特目标可留空' : '实时校验超时后播报，自动艾特全部相关验证处理人'}</div></div>
+                <label class="switch"><input type="checkbox" id="f-${context}-broadcast-enabled" ${config.enabled ? 'checked' : ''} aria-label="启用${title}" /><span class="switch-slider"></span></label>
               </div>
-            `, { optional: true, help: '可多选；每条异常从所选字段读取 user_id' })}
-          </div>
-          <div class="message-template-editor" data-template-context="group">
-            <div class="message-template-heading">
-              <div>
-                <div class="cell-strong">群聊播报内容</div>
-                <div class="cell-muted">字段按当前消息分段聚合、去重，并以“、”连接</div>
+              ${context === 'timeout' ? '<label class="timeout-validator-note"><input id="f-timeout-all-validators" type="checkbox" checked disabled />自动艾特全部验证处理人（不可关闭）</label>' : ''}
+              <div class="form-grid">
+                ${UI.field('额外固定艾特 user_id', `<div class="tag-input" id="f-${context}-userids"><input type="text" placeholder="输入 user_id 后回车" id="f-${context}-userids-input" /></div>`, { optional: true, help: '保存时会自动收录尚未回车的内容' })}
+                ${UI.field('额外数据集字段 user_id', `
+                  <div class="key-field-picker">
+                    <button type="button" class="key-field-picker-trigger" id="f-${context}-fields" role="combobox" aria-label="${title}数据集字段 user_id" aria-haspopup="listbox" aria-expanded="false" aria-controls="f-${context}-fields-listbox" disabled>
+                      <span class="key-field-picker-summary"><span class="key-field-picker-placeholder">请先选择数据集…</span></span>
+                      <span class="key-field-picker-chevron" aria-hidden="true">${Icon.chevronDown({ size: 14 })}</span>
+                    </button>
+                    <div class="key-field-picker-listbox" id="f-${context}-fields-listbox" role="listbox" aria-label="${title}数据集字段 user_id" aria-multiselectable="true" hidden></div>
+                  </div>
+                `, { optional: true, help: '可多选；从对应异常记录读取 user_id' })}
               </div>
-              <div class="message-template-actions">
-                <button type="button" class="btn btn-secondary btn-sm" data-template-picker="parameter" data-template-context="group">插入参数</button>
-                <button type="button" class="btn btn-secondary btn-sm" data-template-picker="link" data-template-context="group">插入超链接</button>
+              <div class="message-template-editor" data-template-context="${context}">
+                <div class="message-template-heading">
+                  <div><div class="cell-strong">${title}内容</div><div class="cell-muted">字段按当前消息分段聚合、去重，并以“、”连接</div></div>
+                  <div class="message-template-actions">
+                    <button type="button" class="btn btn-secondary btn-sm" data-template-picker="parameter" data-template-context="${context}">插入参数</button>
+                    <button type="button" class="btn btn-secondary btn-sm" data-template-picker="link" data-template-context="${context}">插入超链接</button>
+                  </div>
+                </div>
+                <textarea class="textarea mono message-template-input" id="f-${context}-message-template" rows="5" placeholder="例如：异常记录组：{车牌号列表}">${escapeHtml(config.messageTemplate || '')}</textarea>
+                <div class="message-template-hint">仅支持“字段列表”参数和异常记录组链接；留空使用系统默认播报。</div>
+                <div class="field-error" id="f-${context}-template-error" style="display:none;">${Icon.alert({ size: 12 })}<span></span></div>
               </div>
-            </div>
-            <textarea class="textarea mono message-template-input" id="f-group-message-template" rows="5" placeholder="例如：异常记录组：{车牌号列表}">${escapeHtml(groupBroadcast.messageTemplate || '')}</textarea>
-            <div class="message-template-hint">群聊仅支持“字段列表”参数；留空时使用系统默认播报。</div>
-            <div class="field-error" id="f-group-template-error" style="display:none;">${Icon.alert({ size: 12 })}<span></span></div>
-          </div>
+            </section>
+          `).join('')}
           <div class="field-error" id="f-group-broadcast-error" style="display:none;">${Icon.alert({ size: 12 })}<span></span></div>
         </div>
       `,
@@ -566,6 +580,8 @@ window.RulesModule = (function () {
     let conditions = data.conditions.map(({ operator, op, ...condition }) => ({
       ...condition,
       op: op || operator,
+      value_source: condition.value_source || 'literal',
+      upper_value_source: condition.upper_value_source || 'literal',
     }));
     let logic = data.logic;
     let notifyMode = data.notify.mode || 'manual';
@@ -576,13 +592,15 @@ window.RulesModule = (function () {
     let chatIds = (data.notificationTargets || []).filter(t => t.source === 'literal' && t.receive_id_type === 'chat_id').map(t => t.value);
     let validationUserIds = (data.validationTargets || []).filter(t => t.source === 'literal').map(t => t.value);
     let validationFields = (data.validationTargets || []).filter(t => t.source === 'field').map(t => t.field);
-    let groupUserIds = (groupBroadcast.mentionTargets || []).filter(t => t.source === 'literal').map(t => t.value);
-    let groupFields = (groupBroadcast.mentionTargets || []).filter(t => t.source === 'field').map(t => t.field);
+    let groupUserIds = (situationBroadcast.mentionTargets || []).filter(t => t.source === 'literal').map(t => t.value);
+    let groupFields = (situationBroadcast.mentionTargets || []).filter(t => t.source === 'field').map(t => t.field);
+    let timeoutUserIds = (timeoutBroadcast.mentionTargets || []).filter(t => t.source === 'literal').map(t => t.value);
+    let timeoutFields = (timeoutBroadcast.mentionTargets || []).filter(t => t.source === 'field').map(t => t.field);
     let validationMethod = data.validationMethod || 'pseudo';
     let sqlParameters = (data.sqlValidationConfig?.parameters || []).map(item => ({ ...item }));
 
     const templateEditor = context => m.dialog.querySelector(
-      context === 'private' ? '#f-private-message-template' : '#f-group-message-template',
+      `#f-${context}-message-template`,
     );
 
     function insertTemplateValue(editor, value, selection) {
@@ -600,20 +618,20 @@ window.RulesModule = (function () {
       const fields = ds?.fields || [];
       const values = kind === 'parameter'
         ? fields.map(field => ({
-            value: `{${field.name}${context === 'group' ? '列表' : ''}}`,
-            title: context === 'group' ? `${field.name}列表` : field.name,
+            value: `{${field.name}${context !== 'private' ? '列表' : ''}}`,
+            title: context !== 'private' ? `${field.name}列表` : field.name,
             meta: field.type || '字段',
           }))
         : [{
-            value: context === 'group'
+            value: context !== 'private'
               ? '[查看异常记录组明细]({异常记录组链接})'
               : '[查看异常记录明细]({异常记录链接})',
-            title: context === 'group' ? '异常记录组链接' : '异常记录链接',
+            title: context !== 'private' ? '异常记录组链接' : '异常记录链接',
             meta: '系统深链',
           }];
       const picker = UI.drawer({
         title: kind === 'parameter' ? '插入数据集参数' : '插入超链接',
-        subtitle: context === 'group' ? '用于群聊播报内容' : '用于私聊推送内容',
+        subtitle: context !== 'private' ? '用于群聊播报内容' : '用于私聊推送内容',
         body: `
           <div class="template-picker-list">
             ${values.length ? values.map(item => `
@@ -673,7 +691,7 @@ window.RulesModule = (function () {
       const placeholders = [...masked.matchAll(/\{([^{}]+)\}/g)].map(match => match[1]);
       for (const name of placeholders) {
         if (name === '异常记录链接') {
-          if (context === 'group') return '群聊模板不支持异常记录链接';
+          if (context !== 'private') return '群聊模板不支持异常记录链接';
           continue;
         }
         if (name === '异常记录组链接') {
@@ -685,7 +703,7 @@ window.RulesModule = (function () {
           if (!fieldNames.has(name.slice(0, -2))) return `模板参数不存在：${name}`;
           continue;
         }
-        if (context === 'group' && fieldNames.has(name)) return '群聊模板仅支持字段列表参数';
+        if (context !== 'private' && fieldNames.has(name)) return '群聊模板仅支持字段列表参数';
         if (!fieldNames.has(name)) return `模板参数不存在：${name}`;
       }
       if (/\[[^\]\r\n]+\]\(http:\/\//i.test(template)) return '自定义链接必须使用 HTTPS';
@@ -755,6 +773,32 @@ window.RulesModule = (function () {
     });
     renderSqlParameters();
     setValidationMethod(validationMethod);
+
+    const sqlSources = {
+      value: sqlCondition.valueSource || 'literal',
+      'upper-value': sqlCondition.upperValueSource || 'literal',
+    };
+    function updateSqlOperands() {
+      const operator = m.dialog.querySelector('#f-sql-operator').value;
+      Object.entries(sqlSources).forEach(([key, source]) => {
+        const operand = m.dialog.querySelector(`#f-sql-${key}-operand`);
+        operand.hidden = ['is_null', 'is_not_null'].includes(operator) || (key === 'upper-value' && operator !== 'between');
+        operand.querySelector(`#f-sql-${key}`).hidden = source === 'field';
+        operand.querySelector(`#f-sql-${key}-field`).hidden = source !== 'field';
+        operand.querySelectorAll('[data-source]').forEach(button => {
+          button.classList.toggle('active', button.dataset.source === source);
+          button.setAttribute('aria-pressed', String(button.dataset.source === source));
+        });
+      });
+    }
+    m.dialog.querySelectorAll('.sql-true-condition [data-source]').forEach(button => {
+      button.addEventListener('click', () => {
+        sqlSources[button.closest('[data-operand]').dataset.operand] = button.dataset.source;
+        updateSqlOperands();
+      });
+    });
+    m.dialog.querySelector('#f-sql-operator').addEventListener('change', updateSqlOperands);
+    updateSqlOperands();
 
     // ---------- Logic segmented ----------
     m.dialog.querySelectorAll('#f-logic button').forEach(b => {
@@ -878,9 +922,13 @@ window.RulesModule = (function () {
     const groupFieldControl = wireFieldPicker(
       'f-group-fields', 'f-group-fields-listbox', groupFields,
     );
+    const timeoutFieldControl = wireFieldPicker(
+      'f-timeout-fields', 'f-timeout-fields-listbox', timeoutFields,
+    );
     cleanupKeyFieldPicker = () => {
       keyFieldControl.close();
       groupFieldControl.close();
+      timeoutFieldControl.close();
     };
     function replaceFieldOptions(select, fields, selectedValues = [], placeholder = null) {
       const selected = new Set(selectedValues.filter(value => value !== null && value !== undefined).map(String));
@@ -903,14 +951,23 @@ window.RulesModule = (function () {
     }
 
     function updateFieldsForDataset(datasetId, initialKeyFields = []) {
+      const dataset = datasetId ? Store.getDataset(datasetId) : null;
+      const fieldNames = new Set((dataset?.fields || []).map(field => field.name));
+      conditions.forEach(condition => {
+        ['field', 'value_field', 'upper_value_field'].forEach(key => {
+          if (condition[key] && !fieldNames.has(condition[key])) condition[key] = '';
+        });
+      });
       if (!datasetId) {
         replaceFieldOptions(fieldSourceSel, [], [], '请选择字段…');
         replaceFieldOptions(validationFieldsSel, [], [], '请先选择数据集…');
         groupFieldControl.setOptions([], []);
+        timeoutFieldControl.setOptions([], []);
         keyFieldControl.setOptions([], []);
         sqlParameters = sqlParameters.map(parameter => ({ ...parameter, field: '' }));
         renderSqlParameters();
         fieldsPreview.innerHTML = '';
+        renderConditions();
         return;
       }
       const ds = Store.getDataset(datasetId);
@@ -924,6 +981,7 @@ window.RulesModule = (function () {
       replaceFieldOptions(fieldSourceSel, ds.fields, [data.notify.fieldSource], '请选择字段…');
       replaceFieldOptions(validationFieldsSel, ds.fields, validationFields);
       groupFieldControl.setOptions(ds.fields, groupFields);
+      timeoutFieldControl.setOptions(ds.fields, timeoutFields);
       keyFieldControl.setOptions(ds.fields, initialKeyFields);
       fieldsPreview.innerHTML = `
         <div class="schedule-preview" style="background:var(--color-info-soft);border-color:var(--color-info-line);color:#0369A1;margin-top:var(--space-3);">
@@ -956,6 +1014,15 @@ window.RulesModule = (function () {
     function renderConditions() {
       const container = m.dialog.querySelector('#conditions-container');
       const ds = Store.getDataset(datasetSel.value);
+      const operand = (condition, key, placeholder) => {
+        const source = condition[`${key}_source`] || 'literal';
+        return `<div class="condition-operand" data-operand="${key}">
+          ${source === 'field'
+            ? `<select class="select" data-c="${key}_field" aria-label="${placeholder}字段"><option value="">选择比较字段…</option></select>`
+            : `<input class="input mono" data-c="${key}" value="${escapeHtml(condition[key] ?? '')}" placeholder="${placeholder}" aria-label="${placeholder}" />`}
+          ${operandSwitch(source)}
+        </div>`;
+      };
       container.innerHTML = conditions.map((c, idx) => {
         const showValue = !['is_null', 'is_not_null'].includes(c.op);
         const showBaseline = c.op === 'gt_threshold_ratio' || c.op === 'lt_threshold_ratio';
@@ -968,9 +1035,9 @@ window.RulesModule = (function () {
             <select class="select" data-c="op">
               ${Object.entries(OP_LABELS).map(([k, v]) => `<option value="${k}" ${c.op === k ? 'selected' : ''}>${v}</option>`).join('')}
             </select>
-            <input class="input mono" data-c="value" value="${escapeHtml(c.value ?? '')}" placeholder="阈值" ${!showValue ? 'disabled style="opacity:0.4;"' : ''} />
+            ${showValue ? operand(c, 'value', showBaseline ? '基线倍数' : c.op === 'between' ? '范围下界' : '比较值') : ''}
             <button type="button" class="row-action danger" data-remove="${idx}" aria-label="删除条件" ${conditions.length === 1 ? 'disabled style="opacity:0.3;"' : ''}>${Icon.trash({ size: 14 })}</button>
-            ${c.op === 'between' ? `<input class="input mono" data-c="upper_value" value="${escapeHtml(c.upper_value ?? '')}" placeholder="上界" />` : ''}
+            ${c.op === 'between' ? operand(c, 'upper_value', '范围上界') : ''}
             ${showBaseline ? `<select class="select" data-c="baseline" style="grid-column:1/-1;">
               <option value="">选择基线…</option>
               <option value="7d_avg" ${c.baseline === '7d_avg' ? 'selected' : ''}>近 7 日均值</option>
@@ -986,6 +1053,16 @@ window.RulesModule = (function () {
         const c = conditions[idx];
         const fieldSel = row.querySelector('[data-c="field"]');
         if (fieldSel) replaceFieldOptions(fieldSel, ds?.fields || [], [c.field], '选择字段…');
+        ['value_field', 'upper_value_field'].forEach(key => {
+          const select = row.querySelector(`[data-c="${key}"]`);
+          if (select) replaceFieldOptions(select, ds?.fields || [], [c[key]], '选择比较字段…');
+        });
+        row.querySelectorAll('[data-source]').forEach(button => {
+          button.addEventListener('click', () => {
+            c[`${button.closest('[data-operand]').dataset.operand}_source`] = button.dataset.source;
+            renderConditions();
+          });
+        });
         row.querySelectorAll('[data-c]').forEach(el => {
           el.addEventListener('change', () => {
             conditions[idx][el.dataset.c] = el.value;
@@ -1100,6 +1177,9 @@ window.RulesModule = (function () {
     const commitPendingGroupTarget = wireTagInput(
       '#f-group-userids', '#f-group-userids-input', groupUserIds,
     );
+    const commitPendingTimeoutTarget = wireTagInput(
+      '#f-timeout-userids', '#f-timeout-userids-input', timeoutUserIds,
+    );
     const groupWebhookInput = m.dialog.querySelector('#f-group-webhook');
 
     // ---------- Cancel / Test / Save ----------
@@ -1130,11 +1210,45 @@ window.RulesModule = (function () {
       const ds = Store.getDataset(datasetId);
       const validConditions = conditions.filter(c => c.field && c.op);
       if (validConditions.length === 0) { revealField('.condition-row [data-c="field"], #add-condition'); UI.toast({ type: 'warning', title: '请至少配置一个有效条件' }); return; }
+      const fieldType = name => {
+        const type = (ds?.fields || []).find(field => field.name === name)?.type?.toLowerCase() || '';
+        if (/int|decimal|numeric|float|double|real|number/.test(type)) return 'number';
+        if (/char|text|string/.test(type)) return 'string';
+        if (/date|time/.test(type)) return 'date';
+        if (/bool/.test(type)) return 'boolean';
+        return '';
+      };
+      for (const [index, condition] of conditions.entries()) {
+        let error = '';
+        let key = 'field';
+        if (!condition.field || !(ds?.fields || []).some(field => field.name === condition.field)) error = '请选择有效的条件字段';
+        else if (!['is_null', 'is_not_null'].includes(condition.op)) {
+          for (const operand of condition.op === 'between' ? ['value', 'upper_value'] : ['value']) {
+            key = condition[`${operand}_source`] === 'field' ? `${operand}_field` : operand;
+            const value = condition[key];
+            if (value === undefined || value === null || String(value).trim() === '') { error = key.endsWith('_field') ? '请选择比较字段' : '请填写比较值'; break; }
+            if (key.endsWith('_field')) {
+              const actualType = fieldType(condition.field);
+              const targetType = fieldType(value);
+              if (!(ds?.fields || []).some(field => field.name === value)) { error = '比较字段不存在'; break; }
+              if (condition.op.endsWith('_threshold_ratio') && targetType && targetType !== 'number') { error = '基线倍数需要数值类型的比较字段'; break; }
+              if (actualType && targetType && actualType !== targetType) { error = '比较字段类型不兼容'; break; }
+            } else if ((condition.op.endsWith('_threshold_ratio') || fieldType(condition.field) === 'number') && !Number.isFinite(Number(value))) {
+              error = '当前运算符需要数值比较值'; break;
+            }
+          }
+        }
+        if (error) {
+          revealField(`.condition-row[data-idx="${index}"] [data-c="${key}"]`);
+          UI.toast({ type: 'warning', title: error }); return;
+        }
+      }
       const anomalyKeyFields = keyFieldControl.values();
       if (!anomalyKeyFields.length) { revealField('#f-key-fields'); UI.toast({ type: 'warning', title: '请至少选择一个异常主键字段' }); return; }
 
       const privateMessageTemplate = m.dialog.querySelector('#f-private-message-template').value.trim();
       const groupMessageTemplate = m.dialog.querySelector('#f-group-message-template').value.trim();
+      const timeoutMessageTemplate = m.dialog.querySelector('#f-timeout-message-template').value.trim();
       const templateFields = ds?.fields || [];
       const templateChecks = [
         {
@@ -1146,6 +1260,11 @@ window.RulesModule = (function () {
           message: validateTemplateInput(groupMessageTemplate, templateFields, 'group'),
           error: m.dialog.querySelector('#f-group-template-error'),
           control: '#f-group-message-template',
+        },
+        {
+          message: validateTemplateInput(timeoutMessageTemplate, templateFields, 'group'),
+          error: m.dialog.querySelector('#f-timeout-template-error'),
+          control: '#f-timeout-message-template',
         },
       ];
       templateChecks.forEach(check => {
@@ -1195,6 +1314,10 @@ window.RulesModule = (function () {
           operator: sqlTrueOperator,
           value: ['is_null', 'is_not_null'].includes(sqlTrueOperator) ? null : parseSqlOperand(m.dialog.querySelector('#f-sql-value').value),
           upperValue: sqlTrueOperator === 'between' ? parseSqlOperand(m.dialog.querySelector('#f-sql-upper-value').value) : null,
+          valueSource: sqlSources.value,
+          valueField: m.dialog.querySelector('#f-sql-value-field').value.trim() || null,
+          upperValueSource: sqlSources['upper-value'],
+          upperValueField: m.dialog.querySelector('#f-sql-upper-value-field').value.trim() || null,
         },
       } : null;
       const validationError = m.dialog.querySelector('#f-validation-target-error');
@@ -1226,12 +1349,14 @@ window.RulesModule = (function () {
         else if (!sqlValidationConfig.trueCondition.field) {
           validationMessage = 'True 条件必须填写结果字段';
           validationControl = '#f-sql-result-field';
-        } else if (!['is_null', 'is_not_null'].includes(sqlTrueOperator) && sqlValidationConfig.trueCondition.value === null) {
-          validationMessage = '当前 True 条件必须填写期望值';
-          validationControl = '#f-sql-value';
-        } else if (sqlTrueOperator === 'between' && sqlValidationConfig.trueCondition.upperValue === null) {
-          validationMessage = 'between 条件必须填写范围上界';
-          validationControl = '#f-sql-upper-value';
+        } else if (!['is_null', 'is_not_null'].includes(sqlTrueOperator)) {
+          for (const key of sqlTrueOperator === 'between' ? ['value', 'upper-value'] : ['value']) {
+            const input = m.dialog.querySelector(`#f-sql-${key}${sqlSources[key] === 'field' ? '-field' : ''}`);
+            if (!input.value.trim()) {
+              validationMessage = sqlSources[key] === 'field' ? '请填写 SQL 结果比较字段名' : '请填写 True 条件比较值';
+              validationControl = `#${input.id}`; break;
+            }
+          }
         }
       }
       validationError.querySelector('span').textContent = validationMessage;
@@ -1242,8 +1367,10 @@ window.RulesModule = (function () {
       }
 
       commitPendingGroupTarget();
+      commitPendingTimeoutTarget();
       groupFields = groupFieldControl.values();
       const groupBroadcastEnabled = m.dialog.querySelector('#f-group-broadcast-enabled').checked;
+      const timeoutBroadcastEnabled = m.dialog.querySelector('#f-timeout-broadcast-enabled').checked;
       const groupWebhookUrl = groupWebhookInput.value.trim();
       const groupMentionTargets = [
         ...groupUserIds.map(value => ({ source: 'literal', value })),
@@ -1251,15 +1378,15 @@ window.RulesModule = (function () {
       ];
       const groupBroadcastError = m.dialog.querySelector('#f-group-broadcast-error');
       let groupBroadcastMessage = '';
-      if (groupBroadcastEnabled && !groupWebhookUrl) {
+      if ((groupBroadcastEnabled || timeoutBroadcastEnabled) && !groupWebhookUrl) {
         groupBroadcastMessage = '启用群聊播报时必须配置 webhook';
-      } else if (groupBroadcastEnabled && !groupMentionTargets.length) {
-        groupBroadcastMessage = '启用群聊播报时，请至少配置一个艾特用户来源';
+      } else if (timeoutBroadcastEnabled && !validationEnabled) {
+        groupBroadcastMessage = '异常超时播报需要先启用实时校验';
       }
       groupBroadcastError.querySelector('span').textContent = groupBroadcastMessage;
       groupBroadcastError.style.display = groupBroadcastMessage ? 'flex' : 'none';
       if (groupBroadcastMessage) {
-        revealField(!groupWebhookUrl ? '#f-group-webhook' : '#f-group-userids-input');
+        revealField(!groupWebhookUrl ? '#f-group-webhook' : '#f-timeout-broadcast-enabled');
         return;
       }
 
@@ -1272,6 +1399,7 @@ window.RulesModule = (function () {
         enabled: editing ? editing.enabled : true,
         conditions: validConditions,
         anomalyKeyFields,
+        repeatPushEnabled: m.dialog.querySelector('#f-repeat-push-enabled').checked,
         notificationTargets,
         privateMessageTemplate: privateMessageTemplate || null,
         validationEnabled,
@@ -1280,10 +1408,20 @@ window.RulesModule = (function () {
         validationMethod,
         sqlValidationConfig,
         groupBroadcast: {
-          enabled: groupBroadcastEnabled,
           webhookUrl: groupWebhookUrl || null,
-          mentionTargets: groupMentionTargets,
-          messageTemplate: groupMessageTemplate || null,
+          situation: {
+            enabled: groupBroadcastEnabled,
+            mentionTargets: groupMentionTargets,
+            messageTemplate: groupMessageTemplate || null,
+          },
+          timeout: {
+            enabled: timeoutBroadcastEnabled,
+            mentionTargets: [
+              ...timeoutUserIds.map(value => ({ source: 'literal', value })),
+              ...timeoutFieldControl.values().map(field => ({ source: 'field', field })),
+            ],
+            messageTemplate: timeoutMessageTemplate || null,
+          },
         },
         logic,
         schedule: {

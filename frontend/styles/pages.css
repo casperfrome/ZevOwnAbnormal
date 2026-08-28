@@ -984,3 +984,23 @@
   .login-card,
   .backend-failure-card { padding: var(--space-6); }
 }
+
+/* Comparison operands keep the literal/field switch beside the active value. */
+.condition-operand { display: flex; min-width: 0; gap: var(--space-1); align-items: center; }
+.condition-operand[hidden], .condition-operand > [hidden] { display: none; }
+.condition-operand > .input, .condition-operand > .select { min-width: 0; flex: 1; width: 0; }
+.operand-source { flex: 0 0 auto; padding: 2px; }
+.operand-source button { padding: 5px 6px; font-size: 11px; white-space: nowrap; }
+.rule-form .condition-row { grid-template-columns: minmax(100px, 1fr) minmax(110px, .8fr) minmax(220px, 1.5fr) auto; }
+.rule-form .condition-row [data-operand="upper_value"] { grid-column: 3; }
+.sql-true-condition { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.sql-true-condition .condition-operand { grid-column: 1 / -1; }
+.broadcast-kind-section { margin-top: var(--space-5); padding-top: var(--space-4); border-top: 1px solid var(--color-line); }
+.timeout-validator-note { display: flex; align-items: flex-start; gap: var(--space-2); margin-bottom: var(--space-4); color: var(--color-ink-muted); font-size: var(--text-xs); }
+@media (max-width: 640px) {
+  .rule-form .condition-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .rule-form .condition-row [data-c="field"], .rule-form .condition-row [data-c="op"],
+  .rule-form .condition-row .condition-operand, .rule-form .condition-row [data-operand="upper_value"] { grid-column: 1 / -1; }
+  .rule-form .condition-row [data-remove] { grid-column: 2; }
+  .sql-true-condition { grid-template-columns: minmax(0, 1fr); }
+}

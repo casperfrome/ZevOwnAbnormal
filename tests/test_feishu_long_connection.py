@@ -32,6 +32,14 @@ VALID_CARD = {
 FORM_VALUE_UNSET = object()
 
 
+def test_versioned_callback_never_applies_a_potentially_stale_raw_card():
+    from feishu_callback_gateway import _map_api_response
+    result = _map_api_response({"toast": {"type": "warning", "content": "校验未通过"},
+                               "card": VALID_CARD, "card_update_mode": "versioned"})
+    assert result.toast.content == "校验未通过"
+    assert result.card is None
+
+
 @pytest.fixture(autouse=True)
 def restore_internal_token_environment():
     names = ("SENTINEL_INTERNAL_TOKEN", "INTERNAL_EXECUTION_TOKEN")

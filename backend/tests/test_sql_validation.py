@@ -45,6 +45,21 @@ class FakeConnection:
         return self.cursor_instance
 
 
+def test_sql_field_operand_uses_query_result_not_original_anomaly():
+    from app.sql_validation import execute_sql_validation
+    from app.schemas import SqlTrueCondition
+    condition = SqlTrueCondition(field="actual", operator="eq", value_source="field", value_field="expected")
+    config = {"query_template": "SELECT actual, expected FROM t", "parameters": [],
+              "true_condition": condition.model_dump()}
+    result = execute_sql_validation(FakeConnection([{"actual": 5, "expected": 5}]), config, {"expected": 99})
+    assert result.passed is True
+    assert result.result_detail["resolved_value"] == 5
+    missing = execute_sql_validation(FakeConnection([{"actual": 5}]), config, {"expected": 5})
+    assert missing.passed is False
+    assert missing.reason == "missing_field"
+    assert missing.result_detail["value_field"] == "expected"
+
+
 def test_template_compiles_quoted_and_bare_chinese_placeholders_to_bound_values():
     """String interpolation or losing SQL-order parameter binding must fail this test."""
     from app.sql_validation import compile_sql_validation

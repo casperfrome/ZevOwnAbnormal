@@ -17,6 +17,19 @@ from app.models import (
 from app.schemas import FeishuCardActionCallback, RuleValidationConfig, ValidationTarget
 
 
+def test_broadcast_config_splits_modes_and_keeps_legacy_situation_inputs():
+    from app.schemas import GroupBroadcastConfig
+    nested = GroupBroadcastConfig(situation={"enabled": True}, timeout={"enabled": True,
+        "mention_targets": [{"source": "literal", "value": "extra"}]})
+    assert nested.situation.enabled is True
+    assert nested.situation.mention_targets == []
+    assert nested.timeout.mention_targets[0].value == "extra"
+    legacy = GroupBroadcastConfig(enabled=True, message_template="old")
+    assert legacy.situation.enabled is True
+    assert legacy.situation.message_template == "old"
+    assert legacy.timeout is None
+
+
 def build_session():
     engine, factory = make_session_factory("sqlite+pysqlite:///:memory:", testing=True)
     Base.metadata.create_all(engine)

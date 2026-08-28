@@ -347,7 +347,7 @@ def test_sql_snapshot_is_immutable_and_card_only_exposes_processed_action():
 
 def test_sql_validation_failure_keeps_anomaly_retryable_and_success_records_details():
     """Resolving on a false condition or failing to persist a passing comparison must fail this test."""
-    from app.validation_service import snapshot_validation, submit_sql_validation
+    from app.validation_service import build_validation_card, reconcile_validation_cards, snapshot_validation, submit_sql_validation
 
     engine, _, session, rule = build_session()
     try:
@@ -381,6 +381,27 @@ def test_sql_validation_failure_keeps_anomaly_retryable_and_success_records_deta
         assert failed.reason == "condition_failed"
         assert anomaly.status == "pending"
         assert session.scalar(select(AnomalyValidationSubmission)) is None
+        assert anomaly.last_sql_validation_result["outcome"] == "failed"
+        assert anomaly.last_sql_validation_result["result_detail"]["actual"] == 2.39
+        assert anomaly.validation_result_version == 1
+        card_text = json.dumps(build_validation_card(anomaly, "https://sentinel.example"), ensure_ascii=False)
+        assert "True 条件" in card_text and "False" in card_text and "2.39" in card_text
+        request = session.scalar(select(AnomalyValidationRequest))
+        request.message_id = "om_failed_result"
+        request.delivery_status = "sent"
+        session.commit()
+        patches = []
+        class CardClient:
+            def patch_interactive(self, message_id, card):
+                assert not session.in_transaction()
+                patches.append((message_id, card))
+        assert reconcile_validation_cards(session, Settings(), client=CardClient()) == 0
+        assert len(patches) == 1
+        session.refresh(request)
+        assert request.synced_result_version == 1
+        assert request.delivery_status == "sent"
+        assert reconcile_validation_cards(session, Settings(), client=CardClient()) == 0
+        assert len(patches) == 1
 
         passed_connection = FakeConnection([{"current_temperature": Decimal("-18.5")}])
         passed = submit_sql_validation(
@@ -395,6 +416,10 @@ def test_sql_validation_failure_keeps_anomaly_retryable_and_success_records_deta
         submission = session.scalar(select(AnomalyValidationSubmission))
         assert passed.outcome == "accepted"
         assert anomaly.status == "resolved"
+        assert anomaly.last_sql_validation_result["outcome"] == "passed"
+        assert anomaly.validation_result_version == 2
+        card_text = json.dumps(build_validation_card(anomaly, "https://sentinel.example"), ensure_ascii=False)
+        assert "True" in card_text and "-18.5" in card_text and "run_sql_validation" not in card_text
         assert submission.validator_type == "sql"
         assert submission.submitted_text == ""
         assert submission.result_detail == {
@@ -407,6 +432,112 @@ def test_sql_validation_failure_keeps_anomaly_retryable_and_success_records_deta
         assert [event.event_type for event in session.scalars(
             select(AnomalyEvent).order_by(AnomalyEvent.created_at)
         )][-2:] == ["sql_validation_failed", "validation_resolved"]
+    finally:
+        session.close()
+        engine.dispose()
+
+
+@pytest.mark.parametrize("rows,reason", [
+    ([], "no_rows"), ([{"actual": 1}, {"actual": 2}], "multiple_rows"),
+    ([{"missing": 1}], "missing_field"), ([{"actual": 1, "expected": "bad"}], "invalid_comparison"),
+    (None, "execution_error"),
+])
+def test_sql_failed_attempts_are_persistent_safe_and_do_not_resolve(rows, reason):
+    from app.validation_service import SqlValidationExecutionError, build_validation_card, snapshot_validation, submit_sql_validation
+    engine, _, session, rule = build_session()
+    try:
+        rule.validation_enabled = True
+        rule.validation_targets = [{"source": "literal", "value": "user-1"}]
+        rule.validation_method = "sql"
+        rule.sql_validation_config = {"query_template": "SELECT actual, expected FROM t", "parameters": [],
+            "true_condition": {"field": "actual", "operator": "gt", "value_source": "field", "value_field": "expected"}}
+        anomaly = make_anomaly(rule)
+        session.add(anomaly)
+        session.flush()
+        snapshot_validation(session, rule, anomaly, now=NOW)
+        session.commit()
+        def connection_factory(*_):
+            if rows is None:
+                raise RuntimeError("password=TOP_SECRET; SELECT private FROM secrets")
+            return FakeConnection(rows)
+        if rows is None:
+            with pytest.raises(SqlValidationExecutionError) as error:
+                submit_sql_validation(session, Settings(), anomaly.id, "user-1", connection_factory=connection_factory)
+            assert "TOP_SECRET" not in str(error.value)
+        else:
+            result = submit_sql_validation(session, Settings(), anomaly.id, "user-1", connection_factory=connection_factory)
+            assert result.outcome == "failed"
+        session.refresh(anomaly)
+        assert anomaly.last_sql_validation_result["reason"] == reason
+        assert anomaly.status == "pending"
+        assert session.scalar(select(AnomalyValidationSubmission)) is None
+        card = json.dumps(build_validation_card(anomaly, "https://sentinel.example"), ensure_ascii=False)
+        assert "TOP_SECRET" not in card and "run_sql_validation" in card
+        assert "True 条件" in card and "expected" in card
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_late_sql_failure_cannot_replace_another_handlers_success():
+    from app.validation_service import snapshot_validation, submit_sql_validation
+    engine, _, session, rule = build_session()
+    try:
+        rule.validation_enabled = True
+        rule.validation_targets = [{"source": "literal", "value": value} for value in ("user-1", "user-2")]
+        rule.validation_method = "sql"
+        rule.sql_validation_config = {"query_template": "SELECT actual FROM t", "parameters": [],
+            "true_condition": {"field": "actual", "operator": "eq", "value": "ok"}}
+        anomaly = make_anomaly(rule)
+        session.add(anomaly)
+        session.flush()
+        snapshot_validation(session, rule, anomaly, now=NOW)
+        session.commit()
+        def slow_query(*_):
+            accepted = submit_sql_validation(session, Settings(), anomaly.id, "user-2",
+                connection_factory=lambda *_: FakeConnection([{"actual": "ok"}]))
+            assert accepted.outcome == "accepted"
+            return FakeConnection([{"actual": "bad"}])
+        late = submit_sql_validation(session, Settings(), anomaly.id, "user-1", connection_factory=slow_query)
+        assert late.outcome == "already_resolved"
+        session.refresh(anomaly)
+        assert anomaly.status == "resolved"
+        assert anomaly.last_sql_validation_result["operator_user_id"] == "user-2"
+        assert anomaly.last_sql_validation_result["outcome"] == "passed"
+        assert anomaly.validation_result_version == 1
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_card_patch_racing_new_result_stays_dirty_until_next_reconciliation():
+    from app.validation_service import reconcile_validation_cards
+    engine, _, session, rule = build_session()
+    try:
+        anomaly = make_anomaly(rule)
+        anomaly.validation_method_snapshot = "sql"
+        anomaly.validation_result_version = 1
+        anomaly.last_sql_validation_result = {"outcome": "failed", "condition": {"field": "actual", "operator": "eq", "value": "ok"},
+            "result_detail": {"actual": "bad", "value": "ok"}}
+        session.add(anomaly)
+        session.flush()
+        request = AnomalyValidationRequest(anomaly_id=anomaly.id, recipient_user_id="user-1", message_id="om_race", delivery_status="sent")
+        session.add(request)
+        session.commit()
+        patches = []
+        class Client:
+            def patch_interactive(self, _, card):
+                patches.append(card)
+                if len(patches) == 1:
+                    anomaly.validation_result_version = 2
+                    anomaly.last_sql_validation_result = {**anomaly.last_sql_validation_result, "result_detail": {"actual": "new", "value": "ok"}}
+                    session.commit()
+        client = Client()
+        assert reconcile_validation_cards(session, Settings(), client=client) == 0
+        assert request.synced_result_version == 1
+        assert reconcile_validation_cards(session, Settings(), client=client) == 0
+        assert request.synced_result_version == 2
+        assert "new" in json.dumps(patches[-1])
     finally:
         session.close()
         engine.dispose()
