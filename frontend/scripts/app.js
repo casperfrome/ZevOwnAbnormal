@@ -177,7 +177,6 @@
     const headerHtml = `
       <div class="page-header animate-rise">
         <div class="page-title-block">
-          <div class="page-eyebrow"><span class="dot"></span>SENTINEL / ${config.title.toUpperCase()}</div>
           <h1 class="page-title">${config.title}</h1>
           <p class="page-desc">${config.desc}</p>
         </div>

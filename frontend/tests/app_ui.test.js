@@ -199,6 +199,34 @@ async function mountApp(t, scenario = {}, initialHash = '') {
   return page;
 }
 
+test('page headers omit the eyebrow label', async t => {
+  const page = await mountApp(t);
+  await page.getByRole('heading', { name: '异常记录' }).waitFor();
+
+  assert.equal(await page.locator('.page-eyebrow').count(), 0);
+});
+
+test('page titles use the primary purple theme color', async t => {
+  const page = await mountApp(t);
+  await page.addStyleTag({ path: path.join(frontendRoot, 'styles', 'base.css') });
+  await page.addStyleTag({ path: path.join(frontendRoot, 'styles', 'layout.css') });
+  const title = page.getByRole('heading', { name: '异常记录' });
+  await title.waitFor();
+
+  const colors = await title.evaluate(element => {
+    const probe = document.createElement('span');
+    probe.style.color = 'var(--color-primary)';
+    document.body.appendChild(probe);
+    const result = {
+      title: getComputedStyle(element).color,
+      primary: getComputedStyle(probe).color,
+    };
+    probe.remove();
+    return result;
+  });
+  assert.equal(colors.title, colors.primary);
+});
+
 test('an initial authentication 401 hides the business shell and presents an accessible login form', async t => {
   const page = await mountApp(t, { initStatuses: [401] });
 
