@@ -174,13 +174,19 @@ def create_app(testing: bool = False) -> FastAPI:
     async def lifespan(app_instance: FastAPI):
         Base.metadata.create_all(engine)
         with session_factory() as session:
-            user = session.scalar(select(User).where(User.username == settings.superadmin_username))
+            user = session.scalar(select(User).where(
+                User.is_superuser.is_(True), User.is_active.is_(True),
+            ).order_by(User.created_at, User.id))
             if not user:
                 session.add(
                     User(
-                        username=settings.superadmin_username,
+                        login_name=settings.superadmin_username,
+                        display_name=settings.superadmin_username,
+                        job_title="",
                         password_hash=bcrypt.hashpw(settings.superadmin_password.encode(), bcrypt.gensalt()).decode(),
                         is_superuser=True,
+                        is_active=True,
+                        session_version=0,
                     )
                 )
                 session.commit()
@@ -245,7 +251,7 @@ def create_app(testing: bool = False) -> FastAPI:
     @app.get("/api/v1/auth/me")
     def me(response: Response, user: User = Depends(get_current_user)) -> dict[str, object]:
         if settings.auto_login:
-            token = issue_session_token(user.username, user.is_superuser, settings.session_secret)
+            token = issue_session_token(user.id, user.is_superuser, user.session_version, settings.session_secret)
             response.set_cookie(
                 SESSION_COOKIE,
                 token,
@@ -254,17 +260,36 @@ def create_app(testing: bool = False) -> FastAPI:
                 secure=False,
                 max_age=86400,
             )
-        return {"id": user.id, "username": user.username, "is_superuser": user.is_superuser}
+        return {
+            "id": user.id,
+            "username": user.login_name,
+            "login_name": user.login_name,
+            "display_name": user.display_name or user.login_name,
+            "job_title": user.job_title or "",
+            "is_superuser": user.is_superuser,
+            "is_active": user.is_active,
+            "auto_login": settings.auto_login,
+        }
 
     @app.post("/api/v1/auth/login")
     def login(payload: dict, response: Response):
         with session_factory() as session:
-            user = session.scalar(select(User).where(User.username == payload.get("username", "")))
-            if not user or not bcrypt.checkpw(str(payload.get("password", "")).encode(), user.password_hash.encode()):
+            user = session.scalar(select(User).where(User.login_name == str(payload.get("username", "")).strip()))
+            if not user or not user.is_active or not bcrypt.checkpw(str(payload.get("password", "")).encode(), user.password_hash.encode()):
                 raise HTTPException(401, "用户名或密码错误")
-            token = issue_session_token(user.username, user.is_superuser, settings.session_secret)
+            token = issue_session_token(user.id, user.is_superuser, user.session_version, settings.session_secret)
             response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax", secure=False, max_age=86400)
-            return {"id": user.id, "username": user.username, "is_superuser": user.is_superuser}
+            return {
+                "id": user.id, "username": user.login_name, "login_name": user.login_name,
+                "display_name": user.display_name or user.login_name, "job_title": user.job_title or "",
+                "is_superuser": user.is_superuser, "is_active": user.is_active,
+                "auto_login": settings.auto_login,
+            }
+
+    @app.post("/api/v1/auth/logout", status_code=204)
+    def logout(response: Response):
+        response.status_code = 204
+        response.delete_cookie(SESSION_COOKIE, httponly=True, samesite="lax", secure=False)
 
     @app.post("/api/internal/rules/{rule_id}/execute")
     def internal_execute(rule_id: str, x_internal_token: str = Header(default="")):

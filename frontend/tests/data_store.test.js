@@ -816,6 +816,48 @@ test('SQL datasource identity survives create and update API round trips indepen
   assert.equal(updated.sqlValidationConfig.datasourceId, 'source-3');
 });
 
+test('account store methods map profile state and call every account management endpoint', async () => {
+  const requests = [];
+  const account = { id: 'u1', display_name: '沈一鸣', job_title: '数据工程师', login_name: 'shen', is_superuser: true, is_active: true, auto_login: false };
+  const context = {
+    window: {},
+    fetch: async (url, options = {}) => {
+      requests.push({ url, options });
+      let body = account;
+      if (url === '/api/v1/accounts') body = [account];
+      if (options.method === 'DELETE' || url.endsWith('/password') || url.endsWith('/logout')) {
+        return { ok: true, status: 204, json: async () => { throw new Error('no body'); } };
+      }
+      return { ok: true, status: options.method === 'POST' ? 201 : 200, json: async () => body };
+    },
+  };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'scripts', 'data.js'), 'utf8'), context);
+  const store = context.window.Store;
+
+  await store.login('shen', 'pw');
+  await store.updateOwnProfile({ display_name: '沈一', job_title: '' });
+  await store.updateOwnCredentials({ login_name: 'shen-new', password: 'new' });
+  await store.loadAccounts();
+  await store.createAccount({ display_name: '王明', job_title: '', login_name: 'wang', password: 'pw', is_superuser: false });
+  await store.updateAccount('u1', { is_active: false });
+  await store.resetAccountPassword('u1', 'reset');
+  await store.deleteAccount('u1');
+  await store.logout();
+
+  assert.equal(store.getCurrentUser(), null);
+  assert.deepEqual(requests.map(item => [item.url, item.options.method || 'GET']), [
+    ['/api/v1/auth/login', 'POST'],
+    ['/api/v1/account/profile', 'PATCH'],
+    ['/api/v1/account/credentials', 'PATCH'],
+    ['/api/v1/accounts', 'GET'],
+    ['/api/v1/accounts', 'POST'],
+    ['/api/v1/accounts/u1', 'PATCH'],
+    ['/api/v1/accounts/u1/password', 'POST'],
+    ['/api/v1/accounts/u1', 'DELETE'],
+    ['/api/v1/auth/logout', 'POST'],
+  ]);
+});
+
 test('group statuses and SQL field audit details retain resolved values when mapped', async () => {
   const context = { window: {}, fetch: async url => ({ ok: true, status: 200, json: async () => url.includes('anomaly-groups') ? {
     group: { group_id: 'g', situation_broadcast_status: 'sent', timeout_broadcast_status: 'waiting' },

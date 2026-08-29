@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 import jwt
+import bcrypt
 from pydantic import BeforeValidator
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse
@@ -42,6 +43,11 @@ from .push_pipeline import (
     cancel_record_pushes, in_transit_anomaly_ids as _in_transit_anomaly_ids,
 )
 from .schemas import (
+    AccountAdminUpdate,
+    AccountCreate,
+    AccountCredentialsUpdate,
+    AccountPasswordReset,
+    AccountProfileUpdate,
     AnomalyStatusUpdate,
     BulkAnomalyStatusUpdate,
     DatasourceCreate,
@@ -55,7 +61,7 @@ from .schemas import (
     FeishuMessageTestRequest,
     RuleCreate,
 )
-from .security import CredentialCipher
+from .security import CredentialCipher, issue_session_token
 from .scheduler_service import sync_rule_record
 from .sql_guard import SqlValidationError, validate_readonly_sql
 from .sql_validation import SqlValidationConfigurationError, validate_sql_validation_config
@@ -107,12 +113,19 @@ def get_current_user(
     settings: Settings = Depends(get_app_settings),
 ) -> User:
     if settings.auto_login:
-        return User(
-            id="auto-login-superadmin",
-            username=settings.superadmin_username,
-            password_hash="",
-            is_superuser=True,
+        user = session.scalar(
+            select(User).where(
+                User.login_name == settings.superadmin_username,
+                User.is_superuser.is_(True), User.is_active.is_(True),
+            )
         )
+        if user is None:
+            user = session.scalar(select(User).where(
+                User.is_superuser.is_(True), User.is_active.is_(True),
+            ).order_by(User.created_at, User.id))
+        if user is None:
+            raise HTTPException(401, "未登录")
+        return user
     token = request.cookies.get(SESSION_COOKIE)
     if not token:
         raise HTTPException(401, "未登录")
@@ -121,15 +134,15 @@ def get_current_user(
             token,
             settings.session_secret,
             algorithms=["HS256"],
-            options={"require": ["exp", "iat", "sub", "role"]},
+            options={"require": ["exp", "iat", "sub", "role", "session_version"]},
         )
     except jwt.PyJWTError as exc:
         raise HTTPException(401, "登录状态无效") from exc
-    username = claims.get("sub")
-    if not isinstance(username, str) or not username.strip():
+    user_id = claims.get("sub")
+    if not isinstance(user_id, str) or not user_id.strip():
         raise HTTPException(401, "登录状态无效")
-    user = session.scalar(select(User).where(User.username == username))
-    if user is None:
+    user = session.get(User, user_id)
+    if user is None or not user.is_active or claims.get("session_version") != user.session_version:
         raise HTTPException(401, "登录状态无效")
     return user
 
@@ -142,6 +155,164 @@ def get_current_admin(user: User = Depends(get_current_user)) -> str:
 
 def get_current_reader(user: User = Depends(get_current_user)) -> User:
     return user
+
+
+def account_dict(user: User) -> dict:
+    return {
+        "id": user.id,
+        "display_name": user.display_name or user.login_name,
+        "job_title": user.job_title or "",
+        "login_name": user.login_name,
+        "is_superuser": user.is_superuser,
+        "is_active": user.is_active,
+        "created_at": user.created_at,
+        "updated_at": user.updated_at,
+    }
+
+
+def _require_admin_user(user: User = Depends(get_current_user)) -> User:
+    if not user.is_superuser:
+        raise HTTPException(403, "需要超级管理员权限")
+    return user
+
+
+def _account_or_404(session: Session, account_id: str) -> User:
+    user = session.get(User, account_id)
+    if user is None:
+        raise HTTPException(404, "账号不存在")
+    return user
+
+
+def _commit_unique_account(session: Session, message: str = "登录名已存在") -> None:
+    try:
+        session.commit()
+    except IntegrityError as exc:
+        session.rollback()
+        raise HTTPException(409, message) from exc
+
+
+@router.patch("/account/profile")
+def update_own_profile(
+    payload: AccountProfileUpdate,
+    session: Session = Depends(get_session),
+    user: User = Depends(get_current_user),
+):
+    user.display_name = payload.display_name
+    user.job_title = payload.job_title
+    session.commit()
+    session.refresh(user)
+    return account_dict(user)
+
+
+@router.patch("/account/credentials")
+def update_own_credentials(
+    payload: AccountCredentialsUpdate,
+    response: Response,
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_app_settings),
+    user: User = Depends(get_current_user),
+):
+    if payload.login_name is not None:
+        user.login_name = payload.login_name
+    if payload.password is not None:
+        user.password_hash = bcrypt.hashpw(payload.password.encode(), bcrypt.gensalt()).decode()
+    user.session_version += 1
+    _commit_unique_account(session)
+    session.refresh(user)
+    token = issue_session_token(user.id, user.is_superuser, user.session_version, settings.session_secret)
+    response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax", secure=False, max_age=86400)
+    return account_dict(user)
+
+
+@router.get("/accounts")
+def list_accounts(
+    session: Session = Depends(get_session),
+    _admin: User = Depends(_require_admin_user),
+):
+    return [account_dict(user) for user in session.scalars(
+        select(User).order_by(User.created_at, User.id)
+    )]
+
+
+@router.post("/accounts", status_code=201)
+def create_account(
+    payload: AccountCreate,
+    session: Session = Depends(get_session),
+    _admin: User = Depends(_require_admin_user),
+):
+    user = User(
+        display_name=payload.display_name, job_title=payload.job_title,
+        login_name=payload.login_name,
+        password_hash=bcrypt.hashpw(payload.password.encode(), bcrypt.gensalt()).decode(),
+        is_superuser=payload.is_superuser, is_active=True, session_version=0,
+    )
+    session.add(user)
+    _commit_unique_account(session)
+    session.refresh(user)
+    return account_dict(user)
+
+
+@router.patch("/accounts/{account_id}")
+def update_account(
+    account_id: str,
+    payload: AccountAdminUpdate,
+    response: Response,
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_app_settings),
+    admin: User = Depends(_require_admin_user),
+):
+    user = _account_or_404(session, account_id)
+    changes = payload.model_dump(exclude_unset=True)
+    if user.id == admin.id and (changes.get("is_active") is False or changes.get("is_superuser") is False):
+        raise HTTPException(409, "不能停用或撤销当前账号的管理员权限")
+    revokes_sessions = any(
+        key in changes and getattr(user, key) != changes[key]
+        for key in ("login_name", "is_active", "is_superuser")
+    )
+    for key, value in changes.items():
+        setattr(user, key, value)
+    if revokes_sessions:
+        user.session_version += 1
+    _commit_unique_account(session)
+    session.refresh(user)
+    if revokes_sessions and user.id == admin.id:
+        token = issue_session_token(user.id, user.is_superuser, user.session_version, settings.session_secret)
+        response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax", secure=False, max_age=86400)
+    return account_dict(user)
+
+
+@router.post("/accounts/{account_id}/password", status_code=204)
+def reset_account_password(
+    account_id: str,
+    payload: AccountPasswordReset,
+    session: Session = Depends(get_session),
+    _admin: User = Depends(_require_admin_user),
+):
+    user = _account_or_404(session, account_id)
+    user.password_hash = bcrypt.hashpw(payload.password.encode(), bcrypt.gensalt()).decode()
+    user.session_version += 1
+    session.commit()
+    return Response(status_code=204)
+
+
+@router.delete("/accounts/{account_id}", status_code=204)
+def delete_account(
+    account_id: str,
+    session: Session = Depends(get_session),
+    admin: User = Depends(_require_admin_user),
+):
+    user = _account_or_404(session, account_id)
+    if user.id == admin.id:
+        raise HTTPException(409, "不能删除当前登录账号")
+    if user.is_superuser and user.is_active:
+        active_admins = session.scalar(select(func.count()).select_from(User).where(
+            User.is_superuser.is_(True), User.is_active.is_(True),
+        )) or 0
+        if active_admins <= 1:
+            raise HTTPException(409, "不能删除最后一个有效管理员")
+    session.delete(user)
+    session.commit()
+    return Response(status_code=204)
 
 
 @internal_router.post("/anomaly-pushes/{job_id}/execute")

@@ -97,16 +97,22 @@
           </svg>
           <span>测试</span>
         </a>
+        <a class="nav-item" data-route="accounts" role="button" tabindex="0" hidden>
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+          </svg>
+          <span>账号管理</span>
+        </a>
       </nav>
 
       <div class="sidebar-footer">
-        <div class="sidebar-user">
-          <div class="user-avatar">SY</div>
+        <button class="sidebar-user" type="button" aria-label="打开我的账号">
+          <div class="user-avatar">--</div>
           <div class="user-meta">
-            <div class="user-name">沈一鸣</div>
-            <div class="user-role">数据工程师</div>
+            <div class="user-name">正在加载…</div>
+            <div class="user-role">账号信息</div>
           </div>
-        </div>
+        </button>
       </div>
     </aside>
     <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
@@ -166,6 +172,8 @@
   <script src="scripts/anomaly_groups.js?v=20260828-independent-deadline"></script>
   <script src="scripts/overview.js?v=20260828-audit-fixes"></script>
   <script src="scripts/tests.js"></script>
+  <script src="scripts/account.js?v=20260829-account-management"></script>
+  <script src="scripts/accounts.js?v=20260829-account-management"></script>
   <script src="scripts/app.js?v=20260826-auth-login"></script>
 </body>
 </html>

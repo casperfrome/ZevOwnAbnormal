@@ -138,6 +138,9 @@ async function mountApp(t, scenario = {}, initialHash = '') {
       <div class="nav-item" data-route="rules"></div>
       <div class="nav-item" data-route="datasets"></div>
       <div class="nav-item" data-route="datasources"></div>
+      <div class="nav-item" data-route="account"></div>
+      <div class="nav-item" data-route="accounts" hidden></div>
+      <button class="sidebar-user"><span class="user-avatar"></span><span class="user-name"></span><span class="user-role"></span></button>
     </aside>
     <div id="sidebar-backdrop"></div><button id="sidebar-toggle"></button>
     <div id="breadcrumb"><span class="crumb-current"></span></div>
@@ -173,6 +176,8 @@ async function mountApp(t, scenario = {}, initialHash = '') {
         }
         return { id: 'user-1', username: 'admin', is_superuser: true };
       },
+      getCurrentUser: () => testScenario.user || { id: 'user-1', display_name: '管理员', job_title: '', login_name: 'admin', is_superuser: true, is_active: true, auto_login: false },
+      isSuperuser: () => (testScenario.user?.is_superuser ?? true) === true,
       setUnauthorizedHandler: handler => { window.unauthorizedHandler = handler; },
       getStats: () => ({ pendingRecords: 1, processingRecords: 0, timedOutRecords: 0, resolvedToday: 0 }),
       getRecords: () => [record],
@@ -193,11 +198,27 @@ async function mountApp(t, scenario = {}, initialHash = '') {
     window.RulesModule = module('rules');
     window.DatasetModule = module('datasets');
     window.DatasourceModule = module('datasources');
+    window.AccountModule = module('account');
+    window.AccountsModule = module('accounts');
   }, scenario);
   if (initialHash) await page.evaluate(hash => history.replaceState(null, '', hash), initialHash);
   await page.addScriptTag({ path: path.join(frontendRoot, 'scripts', 'app.js') });
   return page;
 }
+
+test('authenticated identity populates the sidebar and only administrators see account management', async t => {
+  const admin = await mountApp(t, { user: { id: 'u1', display_name: '沈一鸣', job_title: '数据工程师', login_name: 'shen', is_superuser: true, is_active: true, auto_login: false } });
+  await admin.getByText('records', { exact: true }).waitFor();
+  assert.equal(await admin.locator('.user-name').innerText(), '沈一鸣');
+  assert.equal(await admin.locator('.user-role').innerText(), '数据工程师');
+  assert.equal(await admin.locator('[data-route="accounts"]').getAttribute('hidden'), null);
+
+  const reader = await mountApp(t, { user: { id: 'u2', display_name: '王小明', job_title: '', login_name: 'reader', is_superuser: false, is_active: true, auto_login: false } });
+  await reader.getByText('records', { exact: true }).waitFor();
+  assert.equal(await reader.locator('[data-route="accounts"]').getAttribute('hidden'), '');
+  await reader.evaluate(() => App.navigate('accounts'));
+  assert.match(await reader.locator('#page-root').innerText(), /我的账号/);
+});
 
 test('page headers omit the eyebrow label', async t => {
   const page = await mountApp(t);

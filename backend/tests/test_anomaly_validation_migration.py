@@ -42,6 +42,32 @@ PLAINTEXT_WEBHOOK_MIGRATION_PATH = MIGRATION_PATH.with_name(
 MESSAGE_TEMPLATE_MIGRATION_PATH = MIGRATION_PATH.with_name(
     "20260823_0011_message_templates.py"
 )
+ACCOUNT_MIGRATION_PATH = MIGRATION_PATH.with_name("20260829_0014_account_management.py")
+
+
+def test_account_migration_preserves_login_and_backfills_profile_fields():
+    spec = importlib.util.spec_from_file_location("account_management_0014", ACCOUNT_MIGRATION_PATH)
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+    engine = sa.create_engine("sqlite+pysqlite:///:memory:")
+    with engine.begin() as connection:
+        connection.execute(sa.text(
+            "CREATE TABLE users (id TEXT PRIMARY KEY, username VARCHAR(100) NOT NULL UNIQUE, "
+            "password_hash VARCHAR(255) NOT NULL, is_superuser BOOLEAN NOT NULL, "
+            "created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL)"
+        ))
+        connection.execute(sa.text(
+            "INSERT INTO users VALUES ('u1','admin','hash',1,'2026-08-29','2026-08-29')"
+        ))
+        migration.op = Operations(MigrationContext.configure(connection))
+        migration.upgrade()
+        columns = {column["name"] for column in sa.inspect(connection).get_columns("users")}
+        assert {"login_name", "display_name", "job_title", "is_active", "session_version"} <= columns
+        assert "username" not in columns
+        assert connection.execute(sa.text(
+            "SELECT login_name,display_name,job_title,is_active,session_version FROM users"
+        )).one() == ("admin", "admin", "", 1, 0)
+    engine.dispose()
 
 
 def test_deadline_migration_preserves_history_and_prevents_duplicate_broadcasts():

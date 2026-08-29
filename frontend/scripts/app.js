@@ -10,6 +10,8 @@
     datasources:{ title: '数据源',      desc: '管理 MySQL 与 StarRocks 连接', module: 'DatasourceModule' },
     overview:   { title: '总览',        desc: '平台运行状态全景', module: 'OverviewModule' },
     tests:      { title: '测试',        desc: '验证系统集成与消息通知链路', module: 'TestsModule' },
+    account:    { title: '我的账号',    desc: '维护个人资料与登录安全', module: 'AccountModule' },
+    accounts:   { title: '账号管理',    desc: '管理平台成员、权限和账号状态', module: 'AccountsModule' },
   };
 
   const pageRoot = document.getElementById('page-root');
@@ -127,6 +129,7 @@
       try {
         await Store.login(usernameValue, passwordValue);
         await Store.init();
+        syncUserShell();
         removeStandaloneScreen();
         setBusinessShellVisible(true);
         navigate((loginReturnHash || '#records').replace(/^#/, ''));
@@ -153,6 +156,15 @@
     document.querySelectorAll('.nav-item').forEach(el => {
       el.classList.toggle('active', el.dataset.route === route);
     });
+  }
+
+  function syncUserShell(user = Store.getCurrentUser?.()) {
+    if (!user) return;
+    const avatar = [...String(user.display_name || user.login_name || '?')].slice(0, 2).join('').toUpperCase();
+    document.querySelectorAll('.user-avatar').forEach(el => { el.textContent = avatar; });
+    document.querySelectorAll('.user-name').forEach(el => { el.textContent = user.display_name || user.login_name; });
+    document.querySelectorAll('.user-role').forEach(el => { el.textContent = user.job_title || (user.is_superuser ? '管理员' : '未设置岗位'); });
+    document.querySelectorAll('[data-route="accounts"]').forEach(el => { el.hidden = user.is_superuser !== true; });
   }
 
   function setBreadcrumb(title) {
@@ -191,6 +203,8 @@
       module.render(document.getElementById('page-content'), {
         actionsEl: document.getElementById('page-actions'),
         navigate,
+        onUserChanged: syncUserShell,
+        onLogout: showLogin,
       });
     } else {
       document.getElementById('page-content').innerHTML = UI.emptyState({
@@ -213,7 +227,8 @@
   }
 
   function navigate(target) {
-    const { route, detailId } = parseRoute(target);
+    let { route, detailId } = parseRoute(target);
+    if (route === 'accounts' && !Store.isSuperuser?.()) { route = 'account'; detailId = null; }
     const hash = detailId ? `#${route}/${encodeURIComponent(detailId)}` : '#' + route;
     history.replaceState(null, '', hash);
     renderRoute(route);
@@ -483,6 +498,9 @@
       if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); navigate(el.dataset.route); }
     });
   });
+  document.querySelectorAll('.sidebar-user').forEach(el => {
+    el.addEventListener('click', () => navigate('account'));
+  });
 
   // ---------- Mobile sidebar toggle ----------
   document.getElementById('sidebar-toggle').addEventListener('click', () => {
@@ -506,7 +524,7 @@
   const initial = (location.hash || '#records').slice(1);
   pageRoot.innerHTML = UI.loadingState(6, 5);
   Store.init()
-    .then(() => navigate(initial))
+    .then(() => { syncUserShell(); navigate(initial); })
     .catch(error => {
       if (error.status === 401) showLogin();
       else showBackendFailure(error);

@@ -19,6 +19,112 @@ def _required_text(value, field_name: str = "字段"):
     return normalized
 
 
+def _password(value):
+    if not isinstance(value, str) or not value:
+        raise ValueError("密码不能为空")
+    if len(value.encode("utf-8")) > 72:
+        raise ValueError("密码不能超过 72 个 UTF-8 字节")
+    return value
+
+
+class AccountProfileUpdate(BaseModel):
+    display_name: str = Field(min_length=1, max_length=100)
+    job_title: str = Field(default="", max_length=100)
+
+    @field_validator("display_name", mode="before")
+    @classmethod
+    def normalize_display_name(cls, value):
+        return _required_text(value, "姓名")
+
+    @field_validator("job_title", mode="before")
+    @classmethod
+    def normalize_job_title(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+
+class AccountCredentialsUpdate(BaseModel):
+    login_name: str | None = Field(default=None, min_length=1, max_length=100)
+    password: str | None = None
+
+    @field_validator("login_name", mode="before")
+    @classmethod
+    def normalize_login_name(cls, value):
+        return _required_text(value, "登录名")
+
+    @field_validator("password", mode="before")
+    @classmethod
+    def validate_password(cls, value):
+        return _password(value)
+
+    @model_validator(mode="after")
+    def require_change(self):
+        if self.login_name is None and self.password is None:
+            raise ValueError("请至少修改登录名或密码")
+        return self
+
+
+class AccountCreate(BaseModel):
+    display_name: str = Field(min_length=1, max_length=100)
+    job_title: str = Field(default="", max_length=100)
+    login_name: str = Field(min_length=1, max_length=100)
+    password: str
+    is_superuser: bool = False
+
+    @field_validator("display_name", mode="before")
+    @classmethod
+    def normalize_display_name(cls, value):
+        return _required_text(value, "姓名")
+
+    @field_validator("login_name", mode="before")
+    @classmethod
+    def normalize_login_name(cls, value):
+        return _required_text(value, "登录名")
+
+    @field_validator("job_title", mode="before")
+    @classmethod
+    def normalize_job_title(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("password", mode="before")
+    @classmethod
+    def validate_password(cls, value):
+        return _password(value)
+
+
+class AccountAdminUpdate(BaseModel):
+    display_name: str | None = Field(default=None, min_length=1, max_length=100)
+    job_title: str | None = Field(default=None, max_length=100)
+    login_name: str | None = Field(default=None, min_length=1, max_length=100)
+    is_superuser: bool | None = None
+    is_active: bool | None = None
+
+    @field_validator("display_name", mode="before")
+    @classmethod
+    def normalize_display_name(cls, value):
+        return _required_text(value, "姓名")
+
+    @field_validator("login_name", mode="before")
+    @classmethod
+    def normalize_login_name(cls, value):
+        return _required_text(value, "登录名")
+
+    @field_validator("job_title", mode="before")
+    @classmethod
+    def normalize_job_title(cls, value):
+        if value is None:
+            raise ValueError("岗位不能为空")
+        return value.strip() if isinstance(value, str) else value
+
+
+class AccountPasswordReset(BaseModel):
+    password: str
+
+    @field_validator("password", mode="before")
+    @classmethod
+    def validate_password(cls, value):
+        return _password(value)
+
+
 class DatasourceCreate(BaseModel):
     name: str = Field(min_length=1, max_length=150)
     type: DatasourceType

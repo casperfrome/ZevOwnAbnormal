@@ -1,6 +1,6 @@
 /* API-backed state store. Keeps the existing synchronous read API for views. */
 window.Store = (function () {
-  const state = { datasources: [], datasets: [], rules: [], records: [], overview: null, currentUser: null };
+  const state = { datasources: [], datasets: [], rules: [], records: [], accounts: [], overview: null, currentUser: null };
   let recordsPageSequence = 0;
   let unauthorizedHandler = null;
   let authGeneration = 0;
@@ -326,6 +326,54 @@ window.Store = (function () {
     return user;
   }
 
+  async function updateOwnProfile(payload) {
+    const user = await request('/account/profile', { method: 'PATCH', body: JSON.stringify(payload) });
+    state.currentUser = user;
+    return user;
+  }
+
+  async function updateOwnCredentials(payload) {
+    const user = await request('/account/credentials', { method: 'PATCH', body: JSON.stringify(payload) });
+    authGeneration += 1;
+    unauthorizedGeneration = null;
+    state.currentUser = user;
+    return user;
+  }
+
+  async function logout() {
+    await request('/auth/logout', { method: 'POST' });
+    authGeneration += 1;
+    unauthorizedGeneration = null;
+    state.currentUser = null;
+  }
+
+  async function loadAccounts() {
+    state.accounts = await request('/accounts');
+    return [...state.accounts];
+  }
+
+  async function createAccount(payload) {
+    const account = await request('/accounts', { method: 'POST', body: JSON.stringify(payload) });
+    state.accounts.push(account);
+    return account;
+  }
+
+  async function updateAccount(id, payload) {
+    const account = await request(`/accounts/${id}`, { method: 'PATCH', body: JSON.stringify(payload) });
+    const index = state.accounts.findIndex(item => item.id === id);
+    if (index >= 0) state.accounts[index] = account;
+    return account;
+  }
+
+  async function resetAccountPassword(id, password) {
+    return request(`/accounts/${id}/password`, { method: 'POST', body: JSON.stringify({ password }) });
+  }
+
+  async function deleteAccount(id) {
+    await request(`/accounts/${id}`, { method: 'DELETE' });
+    state.accounts = state.accounts.filter(item => item.id !== id);
+  }
+
   function cacheItem(key, item) {
     refreshSequences[key] += 1;
     const index = state[key].findIndex(existing => existing.id === item.id);
@@ -403,10 +451,14 @@ window.Store = (function () {
   }
 
   return {
-    init, login, refresh, refreshOverview, request, loadRecordsPage, peekRecordsPage,
+    init, login, logout, updateOwnProfile, updateOwnCredentials,
+    loadAccounts, createAccount, updateAccount, resetAccountPassword, deleteAccount,
+    refresh, refreshOverview, request, loadRecordsPage, peekRecordsPage,
     setUnauthorizedHandler: handler => { unauthorizedHandler = typeof handler === 'function' ? handler : null; },
     loadAnomalyGroupsPage, loadAnomalyGroup,
     isSuperuser: () => state.currentUser?.is_superuser === true,
+    getCurrentUser: () => state.currentUser,
+    getAccounts: () => [...state.accounts],
     getDatasources: () => [...state.datasources],
     getDatasource: id => state.datasources.find(item => item.id === id),
     addDatasource: async data => { const item = mapDatasource(await request('/datasources', { method: 'POST', body: JSON.stringify(dsPayload(data)) })); return cacheItem('datasources', item); },

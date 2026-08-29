@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, ForeignKeyConstraint, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.dialects import mysql
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship, synonym
 
 from .database import Base
 
@@ -30,9 +30,14 @@ class TimestampMixin:
 class User(Base, TimestampMixin):
     __tablename__ = "users"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    username: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    login_name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    username = synonym("login_name")
+    display_name: Mapped[str] = mapped_column(String(100), default="", nullable=False)
+    job_title: Mapped[str] = mapped_column(String(100), default="", nullable=False)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     is_superuser: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    session_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
 
 class Datasource(Base, TimestampMixin):

@@ -4,12 +4,16 @@ import jwt
 from cryptography.fernet import Fernet
 
 
-def issue_session_token(username: str, is_superuser: bool, secret: str, now: datetime | None = None) -> str:
+def issue_session_token(
+    user_id: str, is_superuser: bool, session_version: int, secret: str,
+    now: datetime | None = None,
+) -> str:
     issued_at = now or datetime.now(timezone.utc)
     return jwt.encode(
         {
-            "sub": username,
+            "sub": user_id,
             "role": "superadmin" if is_superuser else "user",
+            "session_version": session_version,
             "iat": issued_at,
             "exp": issued_at + timedelta(hours=24),
         },
