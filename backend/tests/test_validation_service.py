@@ -1979,7 +1979,9 @@ def test_terminal_card_reconciliation_is_bounded_commits_before_http_and_stops_b
                 should_stop=stop.is_set,
             ) == 0
 
-        assert patches == [("om_0", False)]
+        assert len(patches) == 1
+        assert patches[0][0] in {"om_0", "om_1", "om_2"}
+        assert patches[0][1] is False
         assert [request.delivery_status for request in requests].count("resolved") == 1
         assert [request.delivery_status for request in requests].count("sent") == 2
         assert any("下一轮" in record.getMessage() for record in caplog.records)

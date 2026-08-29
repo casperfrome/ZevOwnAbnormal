@@ -2,10 +2,18 @@ from __future__ import annotations
 
 import argparse
 import random
+import sys
 import time
 from datetime import date, datetime, timedelta
+from pathlib import Path
 
 import pymysql
+
+ROOT = Path(__file__).resolve().parents[2]
+ENV_FILE = ROOT / ".env"
+sys.path.insert(0, str(ROOT / "backend"))
+
+from scripts.local_infrastructure import load_local_infrastructure_settings
 
 
 PROVINCES = ["北京", "上海", "广东", "浙江", "江苏", "四川", "湖北", "湖南", "福建", "山东", "河南", "安徽"]
@@ -32,15 +40,27 @@ def demo_manager_user_id(store_index: int) -> str:
 
 
 def mysql_connection(database=None, root=True):
+    mysql = load_local_infrastructure_settings(ENV_FILE).mysql
     return pymysql.connect(
-        host="127.0.0.1", port=3306, user="root" if root else "app",
-        password="dev_root_password" if root else "dev_app_password",
+        host=mysql.host,
+        port=mysql.port,
+        user=mysql.admin_user if root else mysql.app_user,
+        password=mysql.admin_password if root else mysql.app_password,
         database=database, charset="utf8mb4", autocommit=True,
     )
 
 
 def starrocks_connection(database=None):
-    return pymysql.connect(host="127.0.0.1", port=9030, user="root", password="", database=database, charset="utf8mb4", autocommit=True)
+    starrocks = load_local_infrastructure_settings(ENV_FILE).starrocks
+    return pymysql.connect(
+        host=starrocks.host,
+        port=starrocks.port,
+        user=starrocks.user,
+        password=starrocks.password,
+        database=database,
+        charset="utf8mb4",
+        autocommit=True,
+    )
 
 
 def _starrocks_column_exists(cursor, table_name: str, column_name: str) -> bool:
@@ -134,7 +154,6 @@ def seed_mysql(args, rng: random.Random):
         if args.reset:
             cur.execute("DROP DATABASE IF EXISTS tastien_prod")
         cur.execute("CREATE DATABASE IF NOT EXISTS tastien_prod CHARACTER SET utf8mb4")
-        cur.execute("GRANT ALL PRIVILEGES ON tastien_prod.* TO 'app'@'%'")
     root.close()
     conn = mysql_connection("tastien_prod")
     with conn.cursor() as cur:
@@ -301,11 +320,15 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=20260809)
     parser.add_argument("--batch-size", type=int, default=5000)
     parser.add_argument("--reset", action="store_true")
+    parser.add_argument("--allow-legacy-demo-reset", action="store_true", help=argparse.SUPPRESS)
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+    if not args.allow_legacy_demo_reset:
+        print("塔斯汀演示数据生成已停用")
+        return
     rng = random.Random(args.seed)
     seed_mysql(args, rng)
     seed_starrocks(args, rng)

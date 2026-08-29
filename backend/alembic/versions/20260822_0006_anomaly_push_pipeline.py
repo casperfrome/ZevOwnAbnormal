@@ -4,7 +4,7 @@ Revision ID: 20260822_0006
 Revises: 20260822_0005
 """
 
-from datetime import datetime, timezone as utc_timezone
+from datetime import datetime, timezone
 
 import sqlalchemy as sa
 from alembic import op
@@ -36,7 +36,7 @@ def upgrade():
                 sa.column("updated_at", sa.DateTime()),
             ),
             [{"id": 1, "generation": 1, "abort_in_progress": False,
-              "updated_at": datetime.now(utc_timezone.utc).replace(tzinfo=None)}],
+              "updated_at": datetime.now(timezone.utc).replace(tzinfo=None)}],
         )
     if "anomaly_push_jobs" not in tables:
         op.create_table(

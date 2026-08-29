@@ -24,8 +24,8 @@
 
 ```powershell
 Push-Location backend
-& 'D:\PythonVEnv\FirstVEnv\Scripts\python.exe' -m alembic -c alembic.ini current
-& 'D:\PythonVEnv\FirstVEnv\Scripts\python.exe' -m alembic -c alembic.ini upgrade head
+& 'D:\PythonVenv\Scripts\python.exe' -m alembic -c alembic.ini current
+& 'D:\PythonVenv\Scripts\python.exe' -m alembic -c alembic.ini upgrade head
 Pop-Location
 ```
 
@@ -33,18 +33,8 @@ Pop-Location
 `20260822_0005` 为卡片失败重试增加持久 `next_attempt_at`、连续失败计数和 eligible 队列索引。`20260822_0006` 增加推送管线代际与持久任务；初始投递和延迟重试均先进入 Kafka，再由共享 DolphinScheduler 工作流调用内部发送接口。
 明确拒绝/发送前失败从 5 分钟开始指数退避（最高 1 小时）；尚未到 claim lease、已经耗尽三次但仍在飞书一小时 UUID 窗口内的请求不会占用维护 batch，进程重启也保留相同调度时间。
 
-演示数据兼容说明：`generate_demo_data.py` 会通过 `information_schema.columns` 检查旧版
-`ads_store_daily_operation`，必要时提交 StarRocks `ADD COLUMN manager_user_id`，等待异步 schema change
-可见后才使用显式列名写入。轮询会检查 `SHOW ALTER TABLE COLUMN FROM tastien_ads`；任务进入
-`CANCELLED`/`FAILED` 时立即报告任务 ID、状态和 StarRocks 返回的原因，超时时也附带最近任务状态。
-三张 `ads_*_daily_operation` 表是此生成器的专用完整输出，所以每次运行（包括不带 `--reset`）都会先仅清空
-这三张表再写入一套确定数据，避免 Duplicate Key 表保留旧 12 列行或叠加重复 snapshot；其他表不会被清空。
-`--reset` 仍额外负责删除并重建整个 demo 数据库。
-
-`seed_platform.py` 只在 datasource 的名称、类型、主机、端口、数据库、用户、SSL、密码占位和描述均匹配
-seed 指纹时创建 demo Dataset/规则；更新时还要求 Dataset 精确匹配旧 demo SQL/字段。即使 SQL/字段看似旧版，
-同名自定义 datasource 也只提示并跳过创建或迁移。规则只有在 demo 特征匹配、`enabled=false`、实时校验未启用且目标为空时才会
-自动加入字段 target；启用中的规则只提示先停用核对，不改 validation 配置。
+旧塔斯汀和 StarRocks 演示造数入口默认停用，不得在当前环境重新创建已清理的数据。
+当前系统只保留 MySQL `test_260828` 的车辆温度数据源、数据集、规则及历史。
 
 可用一次性 SQLite 文件验证完整 `0001 -> head` 链，不触碰正式数据库：
 
@@ -54,11 +44,11 @@ $previousDatabaseUrl = $env:DATABASE_URL
 try {
   $env:DATABASE_URL = 'sqlite+pysqlite:///' + ($acceptanceDb -replace '\\', '/')
   Push-Location backend
-  & 'D:\PythonVEnv\FirstVEnv\Scripts\python.exe' -m alembic -c alembic.ini upgrade 20260809_0001
+  & 'D:\PythonVenv\Scripts\python.exe' -m alembic -c alembic.ini upgrade 20260809_0001
   if ($LASTEXITCODE -ne 0) { throw 'Alembic 0001 migration failed' }
-  & 'D:\PythonVEnv\FirstVEnv\Scripts\python.exe' -m alembic -c alembic.ini upgrade head
+  & 'D:\PythonVenv\Scripts\python.exe' -m alembic -c alembic.ini upgrade head
   if ($LASTEXITCODE -ne 0) { throw 'Alembic head migration failed' }
-  & 'D:\PythonVEnv\FirstVEnv\Scripts\python.exe' -m alembic -c alembic.ini current
+  & 'D:\PythonVenv\Scripts\python.exe' -m alembic -c alembic.ini current
   if ($LASTEXITCODE -ne 0) { throw 'Alembic current check failed' }
   Pop-Location
 } finally {
@@ -77,8 +67,8 @@ $previousDatabaseUrl = $env:DATABASE_URL
 $pushedBackend = $false
 try {
   docker run --detach --rm --name $gateName `
-    --env MYSQL_ALLOW_EMPTY_PASSWORD=yes --env MYSQL_DATABASE=app `
-    --publish 127.0.0.1::3306 mysql:8.4.10 | Out-Null
+    --env MYSQL_ALLOW_EMPTY_PASSWORD=yes --env MYSQL_DATABASE=zev_abnormal_app `
+    --publish 127.0.0.1::3306 mysql:8.4.8 | Out-Null
   $ready = $false
   for ($attempt = 0; $attempt -lt 60; $attempt++) {
     docker exec $gateName mysqladmin ping --silent 2>$null
@@ -88,12 +78,12 @@ try {
   if (-not $ready) { throw 'Disposable MySQL did not become ready' }
   $binding = (docker port $gateName 3306/tcp | Select-Object -First 1).Trim()
   $gatePort = $binding.Substring($binding.LastIndexOf(':') + 1)
-  $env:DATABASE_URL = "mysql+pymysql://root@127.0.0.1:$gatePort/app?charset=utf8mb4"
+  $env:DATABASE_URL = "mysql+pymysql://root@127.0.0.1:$gatePort/zev_abnormal_app?charset=utf8mb4"
   Push-Location backend
   $pushedBackend = $true
-  & 'D:\PythonVEnv\FirstVEnv\Scripts\python.exe' -m alembic -c alembic.ini upgrade head
+  & 'D:\PythonVenv\Scripts\python.exe' -m alembic -c alembic.ini upgrade head
   if ($LASTEXITCODE -ne 0) { throw 'MySQL Alembic upgrade failed' }
-  & 'D:\PythonVEnv\FirstVEnv\Scripts\python.exe' -m alembic -c alembic.ini current
+  & 'D:\PythonVenv\Scripts\python.exe' -m alembic -c alembic.ini current
   if ($LASTEXITCODE -ne 0) { throw 'MySQL Alembic current check failed' }
 } finally {
   if ($pushedBackend) { Pop-Location }

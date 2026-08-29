@@ -1,16 +1,18 @@
-name: local-data-infra
+name: zev-own-abnormal
 
 services:
   mysql:
-    image: mysql:${MYSQL_VERSION:-8.4.10}
+    image: mysql:${MYSQL_VERSION:-8.4.8}
     restart: unless-stopped
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_0900_ai_ci
+      - --lower-case-table-names=1
+      - --default-time-zone=+08:00
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-dev_root_password}
-      MYSQL_DATABASE: ${MYSQL_DATABASE:-app}
-      MYSQL_USER: ${MYSQL_USER:-app}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD must be set in the ignored .env file}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-zev_abnormal_app}
+      MYSQL_USER: ${MYSQL_USER:-sentinel_app}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:-dev_app_password}
       TZ: ${TZ:-Asia/Shanghai}
     ports:
@@ -67,7 +69,7 @@ services:
       timeout: 10s
       retries: 12
       start_period: 30s
-    mem_limit: ${KAFKA_MEMORY_LIMIT:-2g}
+    mem_limit: ${KAFKA_MEMORY_LIMIT:-1536m}
     cpus: ${KAFKA_CPUS:-2.0}
     ulimits:
       nofile:
@@ -97,7 +99,7 @@ services:
       timeout: 5s
       retries: 24
       start_period: 60s
-    mem_limit: ${STARROCKS_MEMORY_LIMIT:-8g}
+    mem_limit: ${STARROCKS_MEMORY_LIMIT:-6g}
     cpus: ${STARROCKS_CPUS:-4.0}
     ulimits:
       nofile:
@@ -127,7 +129,7 @@ services:
       timeout: 5s
       retries: 12
       start_period: 20s
-    mem_limit: ${DOLPHINSCHEDULER_POSTGRES_MEMORY_LIMIT:-768m}
+    mem_limit: ${DOLPHINSCHEDULER_POSTGRES_MEMORY_LIMIT:-512m}
     cpus: ${DOLPHINSCHEDULER_POSTGRES_CPUS:-1.0}
 
   dolphinscheduler-zookeeper:
@@ -149,7 +151,7 @@ services:
       timeout: 5s
       retries: 18
       start_period: 20s
-    mem_limit: ${DOLPHINSCHEDULER_ZOOKEEPER_MEMORY_LIMIT:-512m}
+    mem_limit: ${DOLPHINSCHEDULER_ZOOKEEPER_MEMORY_LIMIT:-384m}
     cpus: ${DOLPHINSCHEDULER_ZOOKEEPER_CPUS:-0.5}
 
   dolphinscheduler-schema-initializer:
@@ -173,7 +175,7 @@ services:
       - dolphinscheduler-resource-local:/dolphinscheduler
     networks:
       - infra
-    mem_limit: ${DOLPHINSCHEDULER_SCHEMA_MEMORY_LIMIT:-1g}
+    mem_limit: ${DOLPHINSCHEDULER_SCHEMA_MEMORY_LIMIT:-768m}
     cpus: ${DOLPHINSCHEDULER_SCHEMA_CPUS:-1.0}
 
   dolphinscheduler-api:
@@ -210,7 +212,7 @@ services:
       timeout: 5s
       retries: 20
       start_period: 60s
-    mem_limit: ${DOLPHINSCHEDULER_API_MEMORY_LIMIT:-1280m}
+    mem_limit: ${DOLPHINSCHEDULER_API_MEMORY_LIMIT:-1g}
     cpus: ${DOLPHINSCHEDULER_API_CPUS:-1.0}
 
   dolphinscheduler-alert:
@@ -237,7 +239,7 @@ services:
       timeout: 5s
       retries: 20
       start_period: 60s
-    mem_limit: ${DOLPHINSCHEDULER_ALERT_MEMORY_LIMIT:-1g}
+    mem_limit: ${DOLPHINSCHEDULER_ALERT_MEMORY_LIMIT:-768m}
     cpus: ${DOLPHINSCHEDULER_ALERT_CPUS:-0.5}
 
   dolphinscheduler-master:
@@ -266,7 +268,7 @@ services:
       timeout: 5s
       retries: 20
       start_period: 60s
-    mem_limit: ${DOLPHINSCHEDULER_MASTER_MEMORY_LIMIT:-2g}
+    mem_limit: ${DOLPHINSCHEDULER_MASTER_MEMORY_LIMIT:-1536m}
     cpus: ${DOLPHINSCHEDULER_MASTER_CPUS:-1.0}
 
   dolphinscheduler-worker:
@@ -274,7 +276,7 @@ services:
     restart: unless-stopped
     environment:
       <<: *dolphinscheduler-environment
-      SENTINEL_API_BASE_URL: ${SENTINEL_API_BASE_URL:-http://host.docker.internal:8000}
+      SENTINEL_API_BASE_URL: ${SENTINEL_DOCKER_API_BASE_URL:-http://host.docker.internal:8000}
       SENTINEL_INTERNAL_TOKEN: ${INTERNAL_EXECUTION_TOKEN:-change-this-internal-token}
       WORKER_TENANT_CONFIG_DEFAULT_TENANT_ENABLED: "true"
       JAVA_OPTS: >-
@@ -306,16 +308,38 @@ services:
 networks:
   infra:
     name: project-infra
+    external: true
 
 volumes:
   mysql-data:
+    name: zev-own-abnormal_mysql-data
   kafka-data:
+    name: local-data-infra_kafka-data
+    external: true
   starrocks-fe-meta:
+    name: local-data-infra_starrocks-fe-meta
+    external: true
   starrocks-be-storage:
+    name: local-data-infra_starrocks-be-storage
+    external: true
   dolphinscheduler-postgresql-data:
+    name: local-data-infra_dolphinscheduler-postgresql-data
+    external: true
   dolphinscheduler-zookeeper-data:
+    name: local-data-infra_dolphinscheduler-zookeeper-data
+    external: true
   dolphinscheduler-zookeeper-datalog:
+    name: local-data-infra_dolphinscheduler-zookeeper-datalog
+    external: true
   dolphinscheduler-worker-data:
+    name: local-data-infra_dolphinscheduler-worker-data
+    external: true
   dolphinscheduler-logs:
+    name: local-data-infra_dolphinscheduler-logs
+    external: true
   dolphinscheduler-shared-local:
+    name: local-data-infra_dolphinscheduler-shared-local
+    external: true
   dolphinscheduler-resource-local:
+    name: local-data-infra_dolphinscheduler-resource-local
+    external: true

@@ -90,7 +90,10 @@ def _upgrade_demo_dataset(dataset: Dataset, starrocks: Datasource) -> bool:
     return False
 
 
-def main():
+def main(*, allow_legacy_demo: bool = False):
+    if not allow_legacy_demo:
+        print("塔斯汀平台演示元数据初始化已停用")
+        return
     settings = get_settings()
     engine, factory = make_session_factory(settings.database_url)
     Base.metadata.create_all(engine)

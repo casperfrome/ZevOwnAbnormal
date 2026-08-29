@@ -16,6 +16,14 @@ def load_script():
     return importlib.import_module("scripts.generate_intransit_temperature_data")
 
 
+def test_legacy_starrocks_temperature_seed_is_disabled_by_default(monkeypatch, capsys):
+    generator = load_script()
+    monkeypatch.setattr(generator, "parse_args", lambda: type("Args", (), {"allow_legacy_starrocks_seed": False, "seed": 1})())
+    monkeypatch.setattr(generator, "generate_rows", lambda *_: (_ for _ in ()).throw(AssertionError("must not seed")))
+    generator.main()
+    assert "已停用" in capsys.readouterr().out
+
+
 def test_generated_rows_are_deterministic_and_contain_exactly_two_distinct_anomalies():
     script = load_script()
 

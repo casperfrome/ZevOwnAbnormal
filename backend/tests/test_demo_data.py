@@ -10,6 +10,19 @@ from scripts import generate_demo_data, seed_platform
 from scripts.generate_demo_data import is_injected_anomaly
 
 
+def test_legacy_platform_seed_is_disabled_by_default(monkeypatch, capsys):
+    monkeypatch.setattr(seed_platform, "get_settings", lambda: (_ for _ in ()).throw(AssertionError("must not connect")))
+    seed_platform.main()
+    assert "已停用" in capsys.readouterr().out
+
+
+def test_legacy_data_generation_requires_explicit_opt_in(monkeypatch):
+    args = type("Args", (), {"allow_legacy_demo_reset": False, "seed": 1})()
+    monkeypatch.setattr(generate_demo_data, "parse_args", lambda: args)
+    monkeypatch.setattr(generate_demo_data, "seed_mysql", lambda *_: (_ for _ in ()).throw(AssertionError("must not seed")))
+    generate_demo_data.main()
+
+
 def test_small_profiles_always_include_a_latest_day_anomaly():
     assert is_injected_anomaly(store_index=1, day_offset=0)
     assert not is_injected_anomaly(store_index=1, day_offset=1)
@@ -183,7 +196,7 @@ def test_seeded_rule_is_disabled_but_ready_for_demo_user_id_field(tmp_path, monk
         lambda: Settings(database_url=database_url),
     )
 
-    seed_platform.main()
+    seed_platform.main(allow_legacy_demo=True)
 
     engine, factory = make_session_factory(database_url, testing=True)
     try:
@@ -231,7 +244,7 @@ def test_seed_platform_upgrades_legacy_demo_metadata_without_enabling_rule(tmp_p
     engine.dispose()
     monkeypatch.setattr(seed_platform, "get_settings", lambda: Settings(database_url=database_url))
 
-    seed_platform.main()
+    seed_platform.main(allow_legacy_demo=True)
 
     engine, factory = make_session_factory(database_url, testing=True)
     try:
@@ -278,7 +291,7 @@ def test_seed_platform_preserves_customized_demo_named_metadata(tmp_path, monkey
     engine.dispose()
     monkeypatch.setattr(seed_platform, "get_settings", lambda: Settings(database_url=database_url))
 
-    seed_platform.main()
+    seed_platform.main(allow_legacy_demo=True)
 
     engine, factory = make_session_factory(database_url, testing=True)
     try:
@@ -320,7 +333,7 @@ def test_seed_platform_does_not_point_new_rule_at_unmigrated_custom_dataset(tmp_
     engine.dispose()
     monkeypatch.setattr(seed_platform, "get_settings", lambda: Settings(database_url=database_url))
 
-    seed_platform.main()
+    seed_platform.main(allow_legacy_demo=True)
 
     engine, factory = make_session_factory(database_url, testing=True)
     try:
@@ -357,7 +370,7 @@ def test_seed_platform_does_not_upgrade_legacy_metadata_on_same_named_custom_dat
     engine.dispose()
     monkeypatch.setattr(seed_platform, "get_settings", lambda: Settings(database_url=database_url))
 
-    seed_platform.main()
+    seed_platform.main(allow_legacy_demo=True)
 
     engine, factory = make_session_factory(database_url, testing=True)
     try:
@@ -388,7 +401,7 @@ def test_seed_platform_skips_demo_dataset_and_rule_for_same_named_custom_datasou
     engine.dispose()
     monkeypatch.setattr(seed_platform, "get_settings", lambda: Settings(database_url=database_url))
 
-    seed_platform.main()
+    seed_platform.main(allow_legacy_demo=True)
 
     engine, factory = make_session_factory(database_url, testing=True)
     try:
@@ -436,7 +449,7 @@ def test_seed_platform_does_not_add_validation_target_to_active_legacy_demo_rule
     engine.dispose()
     monkeypatch.setattr(seed_platform, "get_settings", lambda: Settings(database_url=database_url))
 
-    seed_platform.main()
+    seed_platform.main(allow_legacy_demo=True)
 
     engine, factory = make_session_factory(database_url, testing=True)
     try:

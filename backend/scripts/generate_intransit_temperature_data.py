@@ -201,11 +201,15 @@ def register_platform_dataset(settings: Settings | None = None) -> None:
 def parse_args():
     parser = argparse.ArgumentParser(description="生成运输途中车辆温度 StarRocks 演示数据并注册平台数据集")
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED, help="随机种子，默认 20260822")
+    parser.add_argument("--allow-legacy-starrocks-seed", action="store_true", help=argparse.SUPPRESS)
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    if not args.allow_legacy_starrocks_seed:
+        print("旧 StarRocks 车辆温度演示造数已停用")
+        return
     rows = generate_rows(args.seed)
     seed_starrocks(rows)
     register_platform_dataset()

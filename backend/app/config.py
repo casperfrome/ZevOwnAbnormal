@@ -43,7 +43,7 @@ class Settings(BaseSettings):
         populate_by_name=True,
     )
 
-    database_url: str = "mysql+pymysql://app:dev_app_password@127.0.0.1:3306/app?charset=utf8mb4"
+    database_url: str = "mysql+pymysql://sentinel_app:dev_app_password@127.0.0.1:3306/zev_abnormal_app?charset=utf8mb4"
     datasource_encryption_key: str = Fernet.generate_key().decode("ascii")
     session_secret: str = "change-this-local-session-secret"
     auto_login: bool = False

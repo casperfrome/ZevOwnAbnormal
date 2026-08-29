@@ -62,6 +62,25 @@ def test_bootstrap_env_writes_all_runtime_settings_without_printing_secrets(tmp_
     assert values["SENTINEL_INTERNAL_TOKEN"] not in output
 
 
+def test_backend_utc_modules_load_on_python_310():
+    backend = Path(__file__).resolve().parents[1]
+    migration = backend / "alembic" / "versions" / "20260822_0006_anomaly_push_pipeline.py"
+    commands = [
+        "from app.models import utcnow; assert utcnow().tzinfo is None",
+        f"import runpy; runpy.run_path(r'{migration}', run_name='not_main')",
+    ]
+
+    for command in commands:
+        result = subprocess.run(
+            [sys.executable, "-c", command],
+            cwd=backend,
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0, result.stderr
+
+
 def test_startup_address_filter_changes_only_browser_url_and_preserves_color():
     from scripts.runtime_support import BrowserAddressFilter
     from uvicorn.logging import DefaultFormatter

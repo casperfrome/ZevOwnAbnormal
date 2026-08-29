@@ -1,17 +1,14 @@
-# Sentinel 塔斯汀数据异常监控平台
+# 异常监控平台
 
-Sentinel 是一个基于 FastAPI 的数据异常监控平台。前端页面由 FastAPI 同源提供，平台元数据存储在 MySQL `app`，门店订单演示数据存储在 MySQL `tastien_prod`，经营指标数据存储在 StarRocks `tastien_ads`，Kafka 承接异常推送任务，规则调度与推送任务编排由 DolphinScheduler 执行。DolphinScheduler 的界面、业务对象映射和操作方法见 [DolphinScheduler 使用指南](docs/dolphinscheduler-guide.md)。
+Sentinel 是基于 FastAPI 的数据异常监控平台。平台元数据保存在容器 MySQL 的 `zev_abnormal_app`，车辆温度业务数据保存在 `test_260828`；Kafka 承接推送任务，DolphinScheduler 负责编排，StarRocks 保留为空的数据服务供后续使用。
 
-本文档面向 Windows 本地开发环境，所有命令均在项目根目录 `D:\260809` 下执行。
+本文档面向 Windows 本地开发环境，所有命令均在项目根目录执行。
 
 ## 环境要求
 
 - Windows 与 Docker Desktop
-- 建议至少 16 GiB 可用内存
-- Python 虚拟环境：`D:\PythonVenv\Scripts\python.exe`
-- 项目依赖：`backend\requirements.txt`
-
-先安装 Python 依赖：
+- Python：`D:\PythonVenv\Scripts\python.exe`
+- Node.js 20+
 
 ```powershell
 & 'D:\PythonVenv\Scripts\python.exe' -m pip install -r backend\requirements.txt
@@ -19,99 +16,73 @@ Sentinel 是一个基于 FastAPI 的数据异常监控平台。前端页面由 F
 
 ## 配置
 
-项目根目录包含以下配置文件：
-
-- `.env.example`：本地开发配置模板，包含 Docker 镜像版本、端口、资源限制和默认开发凭据。
-- `.env`：本机实际配置，由应用与 Docker Compose 读取；该文件已被 Git 忽略，不应提交。
-- `backend\scripts\bootstrap_env.py`：生成 `.env`，同时从 `D:\飞书里尔机器人凭证.txt` 读取飞书 App ID 和 App Secret，并随机生成加密密钥、会话密钥和内部令牌。
-
-推荐使用初始化脚本生成配置：
+根目录 `.env` 保存本机凭据且被 Git 忽略，`.env.example` 是模板。初始化脚本只补充配置；已有数据库密码、Fernet 密钥、会话密钥和内部令牌必须保留。
 
 ```powershell
 & 'D:\PythonVenv\Scripts\python.exe' backend\scripts\bootstrap_env.py
 ```
 
-运行前需确保 `D:\飞书里尔机器人凭证.txt` 存在，并包含 `App ID` 和 `App Secret`。脚本会覆盖根目录现有的 `.env`，但不会复制或修改原凭证文件。
-
-脚本会同时生成同值的 `SENTINEL_INTERNAL_TOKEN` 与 `INTERNAL_EXECUTION_TOKEN`。当前 Docker Compose 通过兼容变量向 DolphinScheduler Worker 传递令牌；两者不同会导致调度回调认证失败。以下尖括号内容仅为说明，配置时请替换为实际令牌，不要原样复制：
+关键数据库配置：
 
 ```dotenv
-SENTINEL_INTERNAL_TOKEN=<脚本生成的令牌>
-INTERNAL_EXECUTION_TOKEN=<与上一行完全相同的令牌>
+MYSQL_VERSION=8.4.8
+MYSQL_HOST=127.0.0.1
+MYSQL_PORT=3306
+MYSQL_DATABASE=zev_abnormal_app
+MYSQL_USER=sentinel_app
+MYSQL_PASSWORD=<本机密码>
+DATABASE_URL=mysql+pymysql://sentinel_app:<本机密码>@127.0.0.1:3306/zev_abnormal_app?charset=utf8mb4
 ```
 
-如需手动配置，可从模板创建 `.env`：
+`MYSQL_ROOT_PASSWORD` 只允许存放在 `.env`。不要提交 `.env`、飞书凭据、数据库备份或运行日志。
+
+## 数据库布局
+
+| 服务 | 数据库 | 账号 | 用途 |
+| --- | --- | --- | --- |
+| MySQL `127.0.0.1:3306` | `zev_abnormal_app` | `sentinel_app` | 平台元数据，可读写 |
+| MySQL `127.0.0.1:3306` | `test_260828` | `sentinel_app` | 车辆温度业务数据，只读 |
+| StarRocks `127.0.0.1:9030` | 无预置业务库 | `root` | 保留服务能力 |
+| PostgreSQL（Docker 网络） | `dolphinscheduler` | `dolphinscheduler` | DolphinScheduler 元数据 |
+
+平台仅保留 `test_260828` 数据源、`配送车辆温度` 数据集和同名规则。旧塔斯汀演示造数及平台种子入口默认停用，避免重新创建已删除的数据。
+
+## 首次启动
+
+Compose 项目名固定为 `zev-own-abnormal`，MySQL 是默认服务。Kafka、StarRocks 和 DolphinScheduler 使用显式外部卷名称复用当前本机数据；迁移或排障时不得删除这些卷。
 
 ```powershell
-Copy-Item .env.example .env
-```
-
-手动配置时，至少核对以下变量：
-
-| 类别 | 变量 | 说明 |
-| --- | --- | --- |
-| 应用数据库 | `DATABASE_URL` | Sentinel 元数据库连接地址 |
-| 数据源加密 | `DATASOURCE_ENCRYPTION_KEY` | 必须替换模板占位值，且必须是有效 Fernet 密钥 |
-| 登录会话 | `SESSION_SECRET` | 必须替换模板占位值 |
-| 内部调用 | `SENTINEL_INTERNAL_TOKEN` | FastAPI 与飞书长连接使用的主令牌 |
-| 内部调用 | `INTERNAL_EXECUTION_TOKEN` | 当前 Docker Compose 传给 DolphinScheduler Worker 的兼容变量，值必须与 `SENTINEL_INTERNAL_TOKEN` 相同 |
-| 管理员 | `SUPERADMIN_USERNAME`、`SUPERADMIN_PASSWORD` | Sentinel 登录账号和密码 |
-| 飞书 | `FEISHU_APP_ID`、`FEISHU_APP_SECRET` | 使用飞书通知或长连接时必填 |
-| 服务地址 | `SENTINEL_PUBLIC_BASE_URL` | 卡片详情链接地址，真实验收时必须能从接收者设备访问 |
-| 服务地址 | `SENTINEL_API_BASE_URL` | 飞书长连接进程和 DolphinScheduler Worker 回调 FastAPI 的地址；Docker Worker 使用时必须填写容器可访问的宿主机地址 |
-| 推送队列 | `KAFKA_BOOTSTRAP_SERVERS`、`KAFKA_ANOMALY_PUSH_TOPIC`、`KAFKA_ANOMALY_PUSH_GROUP` | 异常推送 Kafka 地址、专用 topic 与消费组 |
-| 调度平台 | `DOLPHINSCHEDULER_URL`、`DOLPHINSCHEDULER_USERNAME`、`DOLPHINSCHEDULER_PASSWORD` | DolphinScheduler API 连接配置 |
-
-手动复制模板后，必须替换 `DATASOURCE_ENCRYPTION_KEY`、`SESSION_SECRET` 和两个值相同的内部令牌占位值。仅在启用飞书通知或长连接时填写真实 `FEISHU_APP_ID` 和 `FEISHU_APP_SECRET`。
-
-不要将真实飞书凭据、随机密钥或内部令牌写入 README、日志或 Git。
-
-## 本地数据库账号
-
-以下均为仓库内置的本地开发默认值，不应用于生产环境。
-
-| 服务 | 地址 | 数据库 | 用户名 | 密码 | 用途 |
-| --- | --- | --- | --- | --- | --- |
-| MySQL | `127.0.0.1:3306` | `app` | `app` | `dev_app_password` | Sentinel 平台元数据 |
-| MySQL | `127.0.0.1:3306` | `tastien_prod` | `app` | `dev_app_password` | 门店订单演示数据 |
-| MySQL | `127.0.0.1:3306` | 全部数据库 | `root` | `dev_root_password` | 本地数据库管理与演示数据初始化 |
-| StarRocks | `127.0.0.1:9030` | `tastien_ads` | `root` | 空密码 | 经营 ADS 演示数据 |
-| PostgreSQL | `dolphinscheduler-postgresql:5432` | `dolphinscheduler` | `dolphinscheduler` | `dev_dolphinscheduler_password` | DolphinScheduler 内部元数据 |
-
-DolphinScheduler PostgreSQL 默认只在 Docker 网络内使用，没有映射到宿主机端口。
-
-系统页面登录账号与数据库账号相互独立：
-
-| 系统 | 用户名 | 密码 |
-| --- | --- | --- |
-| Sentinel | `admin` | `Admin@123456` |
-| DolphinScheduler | `admin` | `dolphinscheduler123` |
-
-## 首次初始化
-
-完成配置后，启动基础设施并等待所有容器健康：
-
-```powershell
+docker compose config --quiet
 docker compose up -d --wait --wait-timeout 600
-```
-
-随后执行数据库迁移、生成演示数据并初始化平台数据：
-
-```powershell
+& 'D:\PythonVenv\Scripts\python.exe' backend\scripts\bootstrap_host_mysql.py
 Push-Location backend
 & 'D:\PythonVenv\Scripts\python.exe' -m alembic -c alembic.ini upgrade head
-& 'D:\PythonVenv\Scripts\python.exe' scripts\generate_demo_data.py --reset
-& 'D:\PythonVenv\Scripts\python.exe' scripts\seed_platform.py
 Pop-Location
 ```
 
-默认会生成 12,000 家门店、近 30 天 1,000,000 笔订单，以及约 360,000 行门店日 ADS 数据。查看或调整造数参数：
+初始化脚本幂等创建 `zev_abnormal_app`、`test_260828` 和 `sentinel_app` 权限，不会造数或输出凭据。
+
+## 部署验收
 
 ```powershell
-& 'D:\PythonVenv\Scripts\python.exe' backend\scripts\generate_demo_data.py --help
+docker compose ps -a
+$containerIds = docker compose ps -aq
+docker inspect $containerIds --format '{{.Name}} restart={{.RestartCount}} status={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}n/a{{end}} oom={{.State.OOMKilled}} exit={{.State.ExitCode}}'
+Push-Location backend
+& 'D:\PythonVenv\Scripts\python.exe' -m alembic -c alembic.ini current
+& 'D:\PythonVenv\Scripts\python.exe' -m alembic -c alembic.ini heads
+Pop-Location
 ```
 
-`--reset` 会重建 `tastien_prod` 和 `tastien_ads` 演示数据库。执行前请确认其中没有需要保留的数据。
+验收标准：
+
+- 所有常驻容器名称以 `zev-own-abnormal-` 开头且为 `healthy`，schema initializer 为 `Exited (0)`。
+- MySQL 仅有 `zev_abnormal_app`、`test_260828` 和系统库。
+- `sentinel_app` 可读写系统库、可查询 `test_260828.car_temperature`，但不能写业务库。
+- StarRocks 中不存在旧 `tastien_ads`。
+- Alembic current 与 head 一致，车辆温度数据源、数据集、规则和历史记录可用。
+
+备份保存在仓库外，不要移动到项目目录。日常停止只使用 `docker compose down`，不要附加 `-v`。
 
 ## 日常启动
 
@@ -258,7 +229,7 @@ docker compose down
 docker compose down -v
 ```
 
-`-v` 会删除本地 MySQL、StarRocks、Kafka 和 DolphinScheduler 数据卷，其中的数据无法通过 Docker Compose 恢复。
+`-v` 会删除容器 MySQL 数据卷；其他基础设施卷由 Compose 作为外部卷复用。任何情况下都不要把 `down -v` 作为日常停止命令。
 
 ## 注意事项
 
