@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react"
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
@@ -34,6 +34,22 @@ describe("application shell", () => {
     await waitFor(() => expect(screen.getByText("分析师")).toBeInTheDocument())
     expect(screen.queryByRole("link", { name: /账号管理/ })).not.toBeInTheDocument()
     expect(screen.queryByRole("link", { name: /系统测试/ })).not.toBeInTheDocument()
+  })
+
+  it.each(["tests", "accounts"])("redirects regular users from #%s to a coherent records route", async (restrictedRoute) => {
+    window.location.hash = `#${restrictedRoute}`
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path.endsWith("/auth/me")) return json({ id: "u2", login_name: "analyst", display_name: "分析师", is_superuser: false })
+      if (path.includes("/anomalies")) return json({ items: [], total: 0, page: 1, page_size: 20 })
+      return json([])
+    }))
+
+    render(<App />)
+
+    expect(await screen.findByRole("heading", { name: "异常记录" })).toBeInTheDocument()
+    await waitFor(() => expect(window.location.hash).toBe("#records"))
+    expect(within(screen.getByRole("navigation", { name: "breadcrumb" })).getByRole("link", { name: "异常记录" })).toHaveAttribute("aria-current", "page")
   })
 
   it("shows a real pending-record count and never a decorative dot", async () => {

@@ -1,70 +1,259 @@
-import { expect, test } from "@playwright/test"
+import { expect, test, type Page } from "@playwright/test"
 
-const user = { id: "u1", login_name: "admin", display_name: "管理员", job_title: "平台负责人", is_superuser: true, is_active: true }
-const record = { id: "rec-1", title: "订单金额异常", anomaly_key: "ORDER-42", rule_id: "rule-1", rule_name: "订单金额监控", severity: "high", status: "pending", detected_at: "2026-08-30T01:00:00Z", data: { amount: 999 } }
+const admin = { id: "u1", login_name: "admin", display_name: "管理员", job_title: "平台负责人", is_superuser: true, is_active: true }
+const analyst = { id: "u2", login_name: "analyst", display_name: "分析师", job_title: "风险运营", is_superuser: false, is_active: true }
+const record = {
+  id: "rec-1",
+  description: "订单金额异常",
+  business_key: { order_id: "ORDER-42" },
+  rule_id: "rule-1",
+  rule_name: "订单金额监控",
+  dataset_name: "订单",
+  severity: "high",
+  status: "pending",
+  assignee: "王敏",
+  first_seen_at: "2026-08-30T01:00:00Z",
+  created_at: "2026-08-30T01:00:00Z",
+  row_details: { amount: 999, reviewer_id: "ou-reviewer" },
+  matched_conditions: [{ field: "amount", actual: 999 }],
+  validation_requests: [{ recipient_user_id: "ou-reviewer", delivery_status: "sent", delivery_attempts: 1, message_id: "validation-1", last_error: null, delivered_at: "2026-08-30T01:01:00Z" }],
+  deliveries: [{ id: "delivery-1", broadcast_kind: "situation", status: "sent", delivery_attempts: 1, recipient: "ou-owner", message_id: "message-1", error_message: null, delivered_at: "2026-08-30T01:02:00Z" }],
+  push_jobs: [{ id: "push-1", kind: "group_broadcast", status: "sent", publish_attempts: 1, dispatch_attempts: 1, next_attempt_at: null, last_error: null, updated_at: "2026-08-30T01:02:00Z" }],
+  timeline: [{ type: "detected", description: "规则命中", created_at: "2026-08-30T01:00:00Z" }],
+}
+const rule = {
+  id: "rule-1",
+  name: "订单金额监控",
+  description: "检查高金额订单",
+  dataset_id: "ds-1",
+  dataset_name: "订单",
+  severity: "high",
+  logic: "AND",
+  conditions: [{ field: "amount", operator: "gt", value: 100, upper_value: null, baseline: null, value_source: "literal", value_field: null, upper_value_source: "literal", upper_value_field: null }],
+  anomaly_key_fields: ["order_id"],
+  repeat_push_enabled: true,
+  schedule: { frequency: "day", interval: 1, time: "09:00", start_date: "2026-08-30", end_date: null },
+  notification_targets: [{ receive_id_type: "user_id", source: "literal", value: "owner", field: null }],
+  private_message_template: "订单 {order_id} 金额异常",
+  validation_enabled: false,
+  validation_targets: [],
+  deadline_seconds: 86400,
+  validation_method: "pseudo",
+  sql_validation_config: null,
+  group_broadcast: {
+    webhook_url: "https://open.feishu.cn/open-apis/bot/v2/hook/example",
+    situation: { enabled: true, mention_targets: [{ source: "field", field: "reviewer_id", value: null }], message_template: "异常 {order_id列表}" },
+    timeout: { enabled: false, mention_targets: [], message_template: null },
+  },
+  enabled: true,
+  sync_status: "synced",
+  sync_error: null,
+  last_run: "2026-08-30T00:30:00Z",
+  anomaly_count: 1,
+  created_at: "2026-08-01T00:00:00Z",
+  updated_at: "2026-08-30T00:30:00Z",
+}
+const dataset = {
+  id: "ds-1",
+  name: "订单",
+  datasource_id: "source-1",
+  datasource_name: "生产库",
+  description: "订单监控视图",
+  sql: "select order_id, amount, reviewer_id from orders",
+  fields: [{ name: "order_id", type: "VARCHAR" }, { name: "amount", type: "DECIMAL" }, { name: "reviewer_id", type: "VARCHAR" }],
+  row_count: 120,
+  created_at: "2026-08-01T00:00:00Z",
+  updated_at: "2026-08-30T00:00:00Z",
+}
+const datasource = {
+  id: "source-1",
+  name: "生产库",
+  type: "mysql",
+  host: "db.internal",
+  port: 3306,
+  database: "app",
+  username: "reader",
+  ssl: true,
+  description: "只读生产副本",
+  status: "online",
+  last_checked: "2026-08-30T00:00:00Z",
+  error_message: null,
+  has_password: true,
+}
+const group = {
+  group_id: "group-1",
+  rule_id: "rule-1",
+  rule_name: "订单金额监控",
+  detected_at: "2026-08-30T01:00:00Z",
+  scanned_rows: 120,
+  matched_rows: 8,
+  new_anomalies: 3,
+  status_counts: { pending: 2, processing: 1, resolved: 4, timed_out: 1 },
+  situation_broadcast_status: "sent",
+  timeout_broadcast_status: "waiting",
+  timeout_waiting_count: 5,
+  timeout_waiting_delivery_count: 6,
+}
 
-test.beforeEach(async ({ page }) => {
+const consoleFailures = new WeakMap<Page, string[]>()
+
+async function installApiFixtures(page: Page, currentUser = admin) {
   await page.route("**/api/v1/**", async (route) => {
     const url = new URL(route.request().url())
     const path = url.pathname
-    let body: unknown = {}
-    if (path.endsWith("/auth/me") || path.endsWith("/auth/login")) body = user
-    else if (path === "/api/v1/rules") body = [{ id: "rule-1", name: "订单金额监控", description: "检查高金额订单", dataset_id: "ds-1", dataset_name: "订单", severity: "high", logic: "AND", conditions: [{ field: "amount", operator: "gt", value: 100, value_source: "literal" }], anomaly_key_fields: ["order_id"], repeat_push_enabled: true, schedule: { frequency: "day", interval: 1, time: "09:00", start_date: "2026-08-30" }, notification_targets: [{ receive_id_type: "user_id", source: "literal", value: "owner" }], validation_enabled: false, validation_targets: [], deadline_seconds: 86400, validation_method: "pseudo", group_broadcast: { webhook_url: "https://open.feishu.cn/open-apis/bot/v2/hook/example", situation: { enabled: true, mention_targets: [{ source: "field", field: "reviewer_id" }], message_template: "异常 {order_id列表}" }, timeout: { enabled: false, mention_targets: [], message_template: null } }, enabled: true, sync_status: "synced" }]
-    else if (path === "/api/v1/datasets") body = [{ id: "ds-1", name: "订单", datasource_id: "source-1", datasource_name: "生产库", sql: "select * from orders", fields: [{ name: "order_id", type: "VARCHAR" }, { name: "amount", type: "DECIMAL" }, { name: "reviewer_id", type: "VARCHAR" }] }]
-    else if (path === "/api/v1/datasources") body = [{ id: "source-1", name: "生产库", type: "mysql", host: "db", port: 3306, database: "app", username: "reader", ssl: false, status: "online" }]
+    let body: unknown
+
+    if (path === "/api/v1/auth/me" || path === "/api/v1/auth/login") body = currentUser
+    else if (path === "/api/v1/rules") body = [rule]
+    else if (path === "/api/v1/datasets") body = [dataset]
+    else if (path === "/api/v1/datasources") body = [datasource]
     else if (path === "/api/v1/anomalies/rec-1") body = record
-    else if (path === "/api/v1/anomalies") body = { items: [record], total: 1, page: 1, page_size: 20 }
-    else if (path === "/api/v1/anomaly-groups/group-1") body = { group: { group_id: "group-1", rule_name: "订单金额监控", detected_at: "2026-08-30T01:00:00Z", scanned_rows: 20, matched_rows: 1, new_anomalies: 1, status_counts: { pending: 1 }, situation_broadcast_status: "sent", timeout_broadcast_status: "waiting" }, items: [record], deliveries: [], total: 1, page: 1, page_size: 20 }
-    else if (path === "/api/v1/anomaly-groups") body = { items: [{ group_id: "group-1", rule_name: "订单金额监控", detected_at: "2026-08-30T01:00:00Z", scanned_rows: 20, matched_rows: 1, new_anomalies: 1, status_counts: { pending: 1 }, situation_broadcast_status: "sent", timeout_broadcast_status: "waiting" }], total: 1, page: 1, page_size: 20 }
-    else if (path === "/api/v1/accounts") body = [user]
-    else if (path === "/api/v1/overview") body = { stats: { pending_records: 1, active_rules: 1, online_datasources: 1 } }
+    else if (path === "/api/v1/anomalies") {
+      const status = url.searchParams.get("status_filter")
+      const severity = url.searchParams.get("severity")
+      const isCount = url.searchParams.get("page_size") === "1"
+      const matches = (!status || status === "pending") && (!severity || severity === "high")
+      body = { items: isCount ? [] : matches ? [record] : [], total: matches ? 1 : 0, page: 1, page_size: Number(url.searchParams.get("page_size") ?? 20), pages: 1 }
+    }
+    else if (path === "/api/v1/anomaly-groups/group-1") body = {
+      group,
+      items: [record],
+      deliveries: [{ id: "broadcast-1", broadcast_kind: "situation", status: "sent", delivery_attempts: 1, error_message: null, delivered_at: "2026-08-30T01:02:00Z" }],
+      total: 1,
+      page: 1,
+      page_size: 20,
+    }
+    else if (path === "/api/v1/anomaly-groups") body = { items: [group], total: 1, page: 1, page_size: 20, pages: 1 }
+    else if (path === "/api/v1/accounts") body = [admin, analyst]
+    else if (path === "/api/v1/overview") body = {
+      stats: { active_rules: 1, total_rules: 1, pending_records: 1, processing_records: 0, timed_out_records: 0, resolved_records: 4, online_datasources: 1, total_datasources: 1, high_anomalies: 1 },
+      trend: [{ date: "2026-08-29", count: 2 }, { date: "2026-08-30", count: 1 }],
+      recent_anomalies: [record],
+      top_rules: [{ id: "rule-1", name: "订单金额监控", dataset_name: "订单", anomaly_count: 1 }],
+      days: Number(url.searchParams.get("days") ?? 30),
+      timezone: "Asia/Shanghai",
+    }
+    else throw new Error(`Unhandled API fixture: ${route.request().method()} ${url.pathname}${url.search}`)
+
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) })
   })
+}
+
+async function assertRouteHealth(page: Page) {
+  const text = await page.locator("body").innerText()
+  expect(text).not.toContain("[object Object]")
+  expect(page.getByText("•", { exact: true })).toHaveCount(0)
+
+  const pendingBadge = page.getByLabel(/条待处理异常/)
+  if (await pendingBadge.count()) await expect(pendingBadge).toHaveText(/^\d+$/)
+
+  const layout = await page.evaluate(() => {
+    const documentOverflow = document.documentElement.scrollWidth - window.innerWidth
+    const unreachable = Array.from(document.querySelectorAll<HTMLElement>("main a, main button, main input, main select, main textarea, main [tabindex]:not([tabindex='-1']), header a, header button, header input"))
+      .filter((element) => {
+        const rect = element.getBoundingClientRect()
+        if (rect.width === 0 || rect.height === 0) return false
+        const style = getComputedStyle(element)
+        if (style.display === "none" || style.visibility === "hidden") return false
+        if (rect.right > 0 && rect.left < window.innerWidth) return false
+        let ancestor = element.parentElement
+        while (ancestor) {
+          const overflow = getComputedStyle(ancestor).overflowX
+          if ((overflow === "auto" || overflow === "scroll") && ancestor.scrollWidth > ancestor.clientWidth) return false
+          ancestor = ancestor.parentElement
+        }
+        return true
+      })
+      .map((element) => element.getAttribute("aria-label") || element.textContent?.trim().slice(0, 80) || element.tagName)
+    return { documentOverflow, unreachable }
+  })
+
+  expect(layout.documentOverflow).toBeLessThanOrEqual(1)
+  expect(layout.unreachable).toEqual([])
+}
+
+test.beforeEach(async ({ page }) => {
+  const errors: string[] = []
+  consoleFailures.set(page, errors)
+  page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()) })
+  page.on("pageerror", (error) => errors.push(error.message))
+  await installApiFixtures(page)
 })
 
-test("supports authenticated navigation, global search and record deep links", async ({ page }, testInfo) => {
-  const errors: string[] = []
-  page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()) })
-  await page.goto("/#records/rec-1")
-  await expect(page.getByRole("heading", { name: "异常记录" })).toBeVisible()
+test.afterEach(async ({ page }) => {
+  expect(consoleFailures.get(page) ?? []).toEqual([])
+})
+
+const primaryRoutes = [
+  ["records", "异常记录"],
+  ["anomaly-groups", "异常记录组"],
+  ["rules", "异常规则"],
+  ["datasets", "数据集"],
+  ["datasources", "数据源"],
+  ["overview", "总览"],
+  ["tests", "系统测试"],
+  ["accounts", "账号管理"],
+  ["account", "个人账号"],
+] as const
+
+for (const [route, heading] of primaryRoutes) {
+  test(`keeps the ${route} route accessible and within the viewport`, async ({ page }) => {
+    await page.goto(`/#${route}`)
+    await expect(page.getByRole("heading", { name: heading, exact: true })).toBeVisible()
+    await assertRouteHealth(page)
+  })
+}
+
+test("supports record, group, rule and dataset deep links", async ({ page }) => {
+  const deepLinks = [
+    ["records/rec-1", "异常记录详情"],
+    ["anomaly-groups/group-1", "异常记录组详情"],
+    ["rules/rule-1/edit", "编辑异常规则"],
+    ["datasets/ds-1/edit", "编辑数据集"],
+  ] as const
+
+  for (const [route, heading] of deepLinks) {
+    await page.goto(`/#${route}`)
+    await expect(page.getByRole("heading", { name: heading, exact: true })).toBeVisible()
+    expect(new URL(page.url()).hash).toBe(`#${route}`)
+    await assertRouteHealth(page)
+  }
+})
+
+test("restores focus when Escape closes record details and global search", async ({ page }) => {
+  await page.goto("/#records")
+  const detailTrigger = page.getByRole("button", { name: "查看 rec-1 详情" })
+  await detailTrigger.click()
   await expect(page.getByRole("heading", { name: "异常记录详情" })).toBeVisible()
   await page.keyboard.press("Escape")
-  await page.keyboard.press("Control+k")
+  await expect(page.getByRole("heading", { name: "异常记录详情" })).toBeHidden()
+  await expect(detailTrigger).toBeFocused()
+  expect(new URL(page.url()).hash).toBe("#records")
+
+  const searchTrigger = page.getByRole("button", { name: /搜索规则、数据集|打开全局搜索/ })
+  await searchTrigger.click()
   await expect(page.getByPlaceholder("搜索规则、数据集或页面…")).toBeVisible()
+  await page.keyboard.press("Escape")
+  await expect(page.getByPlaceholder("搜索规则、数据集或页面…")).toBeHidden()
+  await expect(searchTrigger).toBeFocused()
+
+  await searchTrigger.click()
   await page.getByPlaceholder("搜索规则、数据集或页面…").fill("订单金额监控")
   await page.getByRole("option", { name: /订单金额监控/ }).click()
   await expect(page.getByRole("heading", { name: "编辑异常规则" })).toBeVisible()
-  await expect(page.getByText("7 群广播")).toBeVisible()
-  await page.screenshot({ path: testInfo.outputPath("rule-editor.png"), fullPage: true })
-  expect(errors).toEqual([])
 })
 
-test("keeps administrator routes reachable on narrow screens", async ({ page }, testInfo) => {
-  const errors: string[] = []
-  page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()) })
-  await page.goto("/#accounts")
-  await expect(page.getByRole("heading", { name: "账号管理" })).toBeVisible()
-  await expect(page.getByText("管理员").first()).toBeVisible()
-  await page.screenshot({ path: testInfo.outputPath("accounts.png"), fullPage: true })
-  expect(errors).toEqual([])
-})
-
-test("aligns each rule switch with the rule title", async ({ page }) => {
+test("keeps each rule switch aligned with its rule title", async ({ page }) => {
   await page.goto("/#rules")
-
   const ruleRow = page.getByRole("row").filter({ hasText: "订单金额监控" })
-  const ruleSwitch = ruleRow.getByRole("switch", { name: "启用/停用 订单金额监控" })
-  const ruleTitle = ruleRow.getByRole("button", { name: "订单金额监控", exact: true })
-
-  await expect(ruleSwitch).toBeVisible()
-  const switchBox = await ruleSwitch.boundingBox()
-  const titleBox = await ruleTitle.boundingBox()
+  const switchBox = await ruleRow.getByRole("switch", { name: "启用/停用 订单金额监控" }).boundingBox()
+  const titleBox = await ruleRow.getByRole("button", { name: "订单金额监控", exact: true }).boundingBox()
   expect(switchBox).not.toBeNull()
   expect(titleBox).not.toBeNull()
   expect(Math.abs(switchBox!.y - titleBox!.y)).toBeLessThanOrEqual(1)
 })
 
-test("keeps complete rule drafts, mobile tabs, actions and tooltips reachable", async ({ page }) => {
+test("keeps complete rule drafts and editor controls reachable across tabs", async ({ page }) => {
   await page.goto("/#rules/rule-1/edit")
   const description = page.getByLabel("描述")
   await description.fill("尚未保存的跨分区草稿")
@@ -78,29 +267,72 @@ test("keeps complete rule drafts, mobile tabs, actions and tooltips reachable", 
   await expect(page.getByRole("button", { name: "保存规则" })).toBeVisible()
   await page.getByRole("tab", { name: "7 群广播" }).click()
   await expect(page.getByLabel("群机器人 Webhook")).toHaveValue(/open\.feishu\.cn/)
-
-  await page.goto("/#rules")
-  const sync = page.getByRole("button", { name: "同步调度 订单金额监控" })
-  await sync.hover()
-  await expect(page.getByRole("tooltip")).toContainText("同步调度")
 })
 
-test("restores readable anomaly operations and keyboard-operable record groups", async ({ page }, testInfo) => {
+test("keeps readable record operations in both responsive layouts", async ({ page }, testInfo) => {
   await page.goto("/#records")
   if (testInfo.project.name === "desktop") {
     await expect(page.getByRole("columnheader", { name: "异常字段 / 值" })).toBeVisible()
     await expect(page.getByRole("columnheader", { name: "处理人" })).toBeVisible()
-    await expect(page.getByText("ORDER-42").first()).toBeVisible()
+    await expect(page.getByText("order_id: ORDER-42").first()).toBeVisible()
   } else {
     await expect(page.getByText(/字段：amount: 999/)).toBeVisible()
-    await expect(page.getByText(/处理人：未分配/)).toBeVisible()
-    await expect(page.getByRole("button", { name: "查看 rec-1 详情" }).last()).toBeVisible()
+    await expect(page.getByText(/处理人：王敏/)).toBeVisible()
+    await expect(page.getByRole("button", { name: "查看 rec-1 详情" })).toBeVisible()
   }
+})
 
+test("exposes every rule icon action to hover and keyboard focus", async ({ page }) => {
+  for (const label of ["立即执行 订单金额监控", "同步调度 订单金额监控", "编辑 订单金额监控", "删除 订单金额监控"]) {
+    await page.goto("/#rules")
+    const action = page.getByRole("button", { name: label })
+    await expect(action).toBeVisible()
+    await action.focus()
+    await expect(action).toBeFocused()
+    await expect(page.getByRole("tooltip", { name: label })).toBeVisible()
+    await action.evaluate((element) => element.blur())
+    await expect(page.getByRole("tooltip", { name: label })).toBeHidden()
+    await action.hover()
+    await expect(page.getByRole("tooltip", { name: label })).toBeVisible()
+  }
+})
+
+test("shows complete record-group summaries and keyboard-reachable members", async ({ page }) => {
   await page.goto("/#anomaly-groups")
-  const group = page.getByRole("button", { name: /订单金额监控/ }).first()
-  await expect(group).toBeVisible()
-  await group.press("Enter")
+  const groupTrigger = page.getByRole("button", { name: "查看 订单金额监控 记录组" })
+  await expect(groupTrigger.getByText("120 / 8 / 3")).toBeVisible()
+  await expect(groupTrigger.getByText(/待处理 2 · 处理中 1 · 已解决 4 · 已超时 1 · 超时待播报 5 · 超时待投递 6/)).toBeVisible()
+  await groupTrigger.focus()
+  await groupTrigger.press("Enter")
   await expect(page.getByRole("heading", { name: "异常记录组详情" })).toBeVisible()
-  await expect(page.getByText("组内异常记录")).toBeVisible()
+  await expect(page.getByRole("heading", { name: "组内异常记录" })).toBeVisible()
+  await expect(page.getByText("order_id: ORDER-42")).toBeVisible()
+  await expect(page.getByRole("cell", { name: "异常情况播报" })).toBeVisible()
+})
+
+test("redirects regular users away from administrator deep links", async ({ page }) => {
+  await page.unroute("**/api/v1/**")
+  await installApiFixtures(page, analyst)
+
+  for (const restrictedRoute of ["tests", "accounts"]) {
+    await page.goto(`/#${restrictedRoute}`)
+    await expect(page).toHaveURL(/#records$/)
+    await expect(page.getByRole("heading", { name: "异常记录", exact: true })).toBeVisible()
+    await expect(page.getByRole("navigation", { name: "breadcrumb" }).getByRole("link", { name: "异常记录" })).toHaveAttribute("aria-current", "page")
+    await expect(page.getByRole("link", { name: /系统测试/ })).toHaveCount(0)
+    await expect(page.getByRole("link", { name: /账号管理/ })).toHaveCount(0)
+  }
+})
+
+test("keeps interactive overlays compatible with reduced motion", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" })
+  await page.goto("/#overview")
+  expect(await page.evaluate(() => matchMedia("(prefers-reduced-motion: reduce)").matches)).toBe(true)
+  await expect(page.getByRole("heading", { name: "总览", exact: true })).toBeVisible()
+
+  const searchTrigger = page.getByRole("button", { name: /搜索规则、数据集|打开全局搜索/ })
+  await searchTrigger.click()
+  await expect(page.getByPlaceholder("搜索规则、数据集或页面…")).toBeVisible()
+  await page.keyboard.press("Escape")
+  await expect(searchTrigger).toBeFocused()
 })
