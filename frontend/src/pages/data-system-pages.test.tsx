@@ -1,3 +1,4 @@
+import { StrictMode } from "react"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
@@ -7,6 +8,7 @@ import { DatasetsPage, DatasetEditorPage } from "./datasets"
 import { DatasourcesPage } from "./datasources"
 import { OverviewPage } from "./overview"
 import { AccountPage, AccountsPage, TestsPage } from "./system"
+import { ApiError } from "@/api/client"
 
 const state = vi.hoisted(() => ({
   user: { id: "admin", login_name: "admin", display_name: "管理员", job_title: "运维", is_superuser: true, is_active: true },
@@ -32,6 +34,11 @@ function renderPage(node: React.ReactNode) {
   return render(<QueryClientProvider client={client}>{node}</QueryClientProvider>)
 }
 
+function renderStrictPage(node: React.ReactNode) {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
+  return render(<StrictMode><QueryClientProvider client={client}>{node}</QueryClientProvider></StrictMode>)
+}
+
 const source = { id: "source-1", name: "生产库", type: "mysql", host: "db.internal", port: 3306, database: "orders", username: "reader", ssl: true, status: "error", error_message: "连接超时", has_password: true }
 const datasets = [
   { id: "dataset-1", name: "订单明细", description: "高金额订单", datasource_id: "source-1", datasource_name: "生产库", sql: "SELECT * FROM orders", fields: [{ name: "order_id" }], row_count: 2 },
@@ -47,6 +54,11 @@ beforeEach(() => {
     state.user,
     { id: "u2", login_name: "analyst", display_name: "王小明", job_title: "分析师", is_superuser: false, is_active: true },
   ])
+  state.resources.datasets.create.mockResolvedValue(datasets[0])
+  state.resources.datasets.update.mockResolvedValue(datasets[0])
+  state.resources.datasources.create.mockResolvedValue(source)
+  state.resources.datasources.update.mockResolvedValue(source)
+  state.resources.datasources.testConfig.mockResolvedValue({ ok: true })
 })
 
 describe("data pages", () => {
@@ -90,6 +102,48 @@ describe("data pages", () => {
     expect(screen.getByText("A-1")).toBeInTheDocument()
   })
 
+  it("resets editor ownership on an A to B deep-link change and ignores the late A preview", async () => {
+    const sourceB = { ...source, id: "source-2", name: "库存库", status: "online", error_message: undefined }
+    const datasetA = { ...datasets[0], id: "dataset-a", name: "数据集 A", datasource_id: source.id, sql: "SELECT 'A'" }
+    const datasetB = { ...datasets[1], id: "dataset-b", name: "数据集 B", datasource_id: sourceB.id, datasource_name: sourceB.name, sql: "SELECT 'B'" }
+    state.resources.datasets.list.mockResolvedValue([datasetA, datasetB])
+    state.resources.datasources.list.mockResolvedValue([source, sourceB])
+    let finishA: ((value: unknown) => void) | undefined
+    state.resources.datasets.preview.mockImplementation(() => new Promise((resolve) => { finishA = resolve }))
+    state.resources.datasets.update.mockResolvedValue(datasetB)
+    const navigate = vi.fn()
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
+    const view = render(<QueryClientProvider client={client}><DatasetEditorPage id="dataset-a" navigate={navigate} /></QueryClientProvider>)
+
+    expect(await screen.findByLabelText("名称")).toHaveValue("数据集 A")
+    fireEvent.change(screen.getByLabelText("名称"), { target: { value: "A 的未保存草稿" } })
+    await userEvent.click(screen.getByRole("button", { name: /执行预览/ }))
+    view.rerender(<QueryClientProvider client={client}><DatasetEditorPage id="dataset-b" navigate={navigate} /></QueryClientProvider>)
+
+    await waitFor(() => expect(screen.getByLabelText("名称")).toHaveValue("数据集 B"))
+    expect(screen.getByLabelText("SQL")).toHaveValue("SELECT 'B'")
+    expect(screen.getByText("尚未预览")).toBeInTheDocument()
+    finishA?.({ fields: [{ name: "late_a" }], rows: [["A-LATE"]], row_count: 1 })
+    await waitFor(() => expect(screen.queryByText("A-LATE")).not.toBeInTheDocument())
+
+    await userEvent.click(screen.getByRole("button", { name: "保存数据集" }))
+    await waitFor(() => expect(state.resources.datasets.update).toHaveBeenCalledWith("dataset-b", { name: "数据集 B", description: "门店库存", datasourceId: "source-2", sql: "SELECT 'B'" }))
+    expect(navigate).toHaveBeenCalledWith("#datasets")
+  })
+
+  it("keeps dataset preview, toast and navigation live through StrictMode effect replay", async () => {
+    state.resources.datasets.preview.mockResolvedValue({ fields: [{ name: "ok" }], rows: [[1]], row_count: 1 })
+    const navigate = vi.fn()
+    renderStrictPage(<DatasetEditorPage id="dataset-1" navigate={navigate} />)
+
+    await screen.findByDisplayValue("订单明细")
+    await userEvent.click(screen.getByRole("button", { name: /执行预览/ }))
+    expect(await screen.findByRole("columnheader", { name: "ok" })).toBeInTheDocument()
+    await userEvent.click(screen.getByRole("button", { name: "保存数据集" }))
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith("#datasets"))
+    expect(state.toastSuccess).toHaveBeenCalledWith("数据集已更新")
+  })
+
   it("searches datasources, exposes connection errors and guards saved tests", async () => {
     let finishTest: (() => void) | undefined
     state.resources.datasources.test.mockImplementation(() => new Promise((resolve) => { finishTest = () => resolve({ ok: true }) }))
@@ -107,15 +161,44 @@ describe("data pages", () => {
     finishTest?.()
     await waitFor(() => expect(test).not.toBeDisabled())
   })
+
+  it("offers only backend datasource literals and sends the selected create/test payload", async () => {
+    renderPage(<DatasourcesPage />)
+    await screen.findByText("生产库")
+    await userEvent.click(screen.getByRole("button", { name: "新建数据源" }))
+    await userEvent.click(screen.getByRole("combobox", { name: "数据库类型" }))
+    expect(await screen.findByRole("option", { name: "MySQL" })).toBeInTheDocument()
+    expect(screen.getByRole("option", { name: "StarRocks" })).toBeInTheDocument()
+    expect(screen.queryByRole("option", { name: "PostgreSQL" })).not.toBeInTheDocument()
+    expect(screen.queryByRole("option", { name: "ClickHouse" })).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole("option", { name: "StarRocks" }))
+    fireEvent.change(screen.getByLabelText("名称"), { target: { value: "分析库" } })
+    fireEvent.change(screen.getByLabelText("主机"), { target: { value: "sr.internal" } })
+    fireEvent.change(screen.getByLabelText("数据库"), { target: { value: "ads" } })
+    fireEvent.change(screen.getByLabelText("用户名"), { target: { value: "reader" } })
+    await userEvent.click(screen.getByRole("button", { name: "测试配置" }))
+    expect(state.resources.datasources.testConfig).toHaveBeenCalledWith(expect.objectContaining({ type: "starrocks", port: 9030 }))
+    await userEvent.click(screen.getByRole("button", { name: "保存" }))
+    expect(state.resources.datasources.create).toHaveBeenCalledWith(expect.objectContaining({ type: "starrocks", port: 9030 }))
+  })
+
+  it("keeps datasource dialogs and toast ownership live through StrictMode effect replay", async () => {
+    renderStrictPage(<DatasourcesPage />)
+    await screen.findByText("生产库")
+    await userEvent.click(screen.getByRole("button", { name: "编辑 生产库" }))
+    expect(await screen.findByRole("dialog", { name: "编辑数据源" })).toBeInTheDocument()
+    await userEvent.click(screen.getByRole("button", { name: "测试配置" }))
+    await waitFor(() => expect(state.toastSuccess).toHaveBeenCalledWith("配置连接成功"))
+    expect(screen.getByRole("dialog", { name: "编辑数据源" })).toBeInTheDocument()
+  })
 })
 
 describe("overview and system pages", () => {
   it("uses authoritative overview data with 7/30/90 ranges and zero-safe Beijing charts", async () => {
     state.resources.overview.mockImplementation((days: number) => Promise.resolve({
       days, timezone: "Asia/Shanghai",
-      stats: { pending_records: 2, processing_records: 1, timed_out_records: 0, resolved_records: 8, active_rules: 3, total_rules: 4, online_datasources: 1, total_datasources: 2 },
       trend: [{ date: "2026-08-29", count: 0 }, { date: "2026-08-30", count: 0 }],
-      severity_distribution: [{ severity: "high", count: 0 }],
+      stats: { pending_records: 2, processing_records: 1, timed_out_records: 0, resolved_records: 8, active_rules: 3, total_rules: 4, online_datasources: 1, total_datasources: 2, high_anomalies: 5 },
       recent_anomalies: [{ id: "a1", rule_name: "真实异常", dataset_name: "订单", severity: "high", status: "pending", detected_at: "2026-08-30T00:00:00Z" }],
       top_rules: [{ id: "r1", name: "真实规则", dataset_name: "订单", anomaly_count: 12 }],
     }))
@@ -125,6 +208,8 @@ describe("overview and system pages", () => {
     expect(screen.getByText("真实规则")).toBeInTheDocument()
     expect(screen.getAllByText(/北京时间/).length).toBeGreaterThan(0)
     expect(screen.queryByText(/健康度|87|92%/)).not.toBeInTheDocument()
+    expect(screen.getByText("暂无严重级别分布数据")).toBeInTheDocument()
+    expect(screen.getByText(/高风险未解决 5/)).toBeInTheDocument()
     expect(document.body.innerHTML).not.toMatch(/NaN|Infinity/)
     await userEvent.click(screen.getByRole("button", { name: "7 天" }))
     await waitFor(() => expect(state.resources.overview).toHaveBeenLastCalledWith(14, expect.anything()))
@@ -145,6 +230,41 @@ describe("overview and system pages", () => {
     expect(state.resources.pushes.recover).toHaveBeenCalledTimes(1)
     finishRecover?.({ status: "completed", requeued_jobs: 3, skipped_jobs: 2, requeued_by_kind: { notification: 1, validation: 1, group_broadcast: 1 }, errors: [] })
     expect(await screen.findByText(/已重新入队 3 个任务/)).toBeInTheDocument()
+  })
+
+  it("renders structured partial recovery counts and stage errors from a 502 response", async () => {
+    state.resources.pushes.recover.mockRejectedValue(new ApiError("请求失败（502）", 502, {
+      status: "partial_failed", checks: { kafka: "unhealthy", dolphinscheduler: "healthy" }, requeued_jobs: 0, skipped_jobs: 2,
+      errors: [{ stage: "kafka", message: "broker unavailable" }],
+    }))
+    renderPage(<TestsPage />)
+
+    await userEvent.click(screen.getByRole("button", { name: "恢复待推送" }))
+    await userEvent.click(await screen.findByRole("button", { name: "确认恢复" }))
+    expect(await screen.findByText("失败推送部分失败")).toBeInTheDocument()
+    expect(screen.getByText(/已重新入队 0 个任务，跳过 2 个任务/)).toBeInTheDocument()
+    expect(screen.getByText(/kafka：broker unavailable/)).toBeInTheDocument()
+  })
+
+  it("renders structured partial abort counts and stage errors from a 502 response", async () => {
+    state.resources.pushes.abort.mockRejectedValue(new ApiError("请求失败（502）", 502, {
+      status: "partial_failed", aborted_jobs: 4, stopped_ds_instances: 1,
+      errors: [{ stage: "dolphinscheduler", message: "stop failed" }],
+    }))
+    renderPage(<TestsPage />)
+
+    await userEvent.click(screen.getByRole("button", { name: "中止全部推送" }))
+    await userEvent.click(await screen.findByRole("button", { name: "确认中止" }))
+    expect(await screen.findByText("推送积压部分失败")).toBeInTheDocument()
+    expect(screen.getByText(/已中止 4 个任务，停止 1 个调度实例/)).toBeInTheDocument()
+    expect(screen.getByText(/dolphinscheduler：stop failed/)).toBeInTheDocument()
+  })
+
+  it("does not expose the admin-only Feishu test to a non-admin reader", () => {
+    state.user = { ...state.user, is_superuser: false }
+    renderPage(<TestsPage />)
+    expect(screen.getByText("需要超级管理员权限")).toBeInTheDocument()
+    expect(screen.queryByText("飞书测试消息")).not.toBeInTheDocument()
   })
 })
 
@@ -167,6 +287,16 @@ describe("account pages", () => {
     fireEvent.change(screen.getByLabelText("登录名"), { target: { value: "admin-new" } })
     await userEvent.click(screen.getByRole("button", { name: "更新凭据" }))
     expect(state.resources.account.credentials).toHaveBeenCalledWith({ login_name: "admin-new" })
+  })
+
+  it("keeps account context and toast updates live through StrictMode effect replay", async () => {
+    const updated = { ...state.user, display_name: "严格模式管理员" }
+    state.resources.account.profile.mockResolvedValue(updated)
+    renderStrictPage(<AccountPage />)
+    fireEvent.change(screen.getByLabelText("显示名称"), { target: { value: updated.display_name } })
+    await userEvent.click(screen.getByRole("button", { name: "保存资料" }))
+    await waitFor(() => expect(state.setUser).toHaveBeenCalledWith(updated))
+    expect(state.toastSuccess).toHaveBeenCalledWith("个人资料已保存")
   })
 
   it("lets administrators search, edit status and role, reset passwords and delete accounts", async () => {
@@ -201,5 +331,17 @@ describe("account pages", () => {
     await userEvent.click(within(row).getByRole("button", { name: "编辑 管理员" }))
     expect(await screen.findByRole("switch", { name: "超级管理员" })).toBeDisabled()
     expect(screen.getByRole("switch", { name: "账号启用" })).toBeDisabled()
+  })
+
+  it("updates AppContext when the current administrator identity is edited", async () => {
+    const updated = { ...state.user, display_name: "平台管理员", login_name: "platform-admin" }
+    state.resources.accounts.update.mockResolvedValue(updated)
+    renderPage(<AccountsPage />)
+    const row = await screen.findByRole("row", { name: /@admin/ })
+    await userEvent.click(within(row).getByRole("button", { name: "编辑 管理员" }))
+    fireEvent.change(screen.getByLabelText("显示名称"), { target: { value: updated.display_name } })
+    fireEvent.change(screen.getByLabelText("登录名"), { target: { value: updated.login_name } })
+    await userEvent.click(screen.getByRole("button", { name: "保存更改" }))
+    await waitFor(() => expect(state.setUser).toHaveBeenCalledWith(updated))
   })
 })

@@ -2,6 +2,7 @@ export class ApiError extends Error {
   constructor(
     message: string,
     readonly status: number,
+    readonly details?: unknown,
   ) {
     super(message)
     this.name = "ApiError"
@@ -51,9 +52,10 @@ export class ApiClient {
 
     if (!response.ok) {
       let message = `请求失败（${response.status}）`
+      let details: unknown
       try {
-        const payload = await response.json() as { detail?: string }
-        if (payload.detail) message = payload.detail
+        details = await response.json()
+        if (details && typeof details === "object" && "detail" in details && typeof details.detail === "string") message = details.detail
       } catch {
         // Preserve the status-based fallback when the response is not JSON.
       }
@@ -61,7 +63,7 @@ export class ApiClient {
         this.unauthorizedNotified = true
         this.onUnauthorized?.()
       }
-      throw new ApiError(message, response.status)
+      throw new ApiError(message, response.status, details)
     }
 
     if (options.responseType === "blob") return await response.blob() as T

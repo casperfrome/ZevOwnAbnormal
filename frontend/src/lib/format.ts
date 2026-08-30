@@ -9,7 +9,8 @@ export function csvText(rows: Array<Record<string, unknown>>) {
   const columns = [...new Set(rows.flatMap((row) => Object.keys(row)))]
   const escape = (value: unknown) => {
     const raw = value == null ? "" : typeof value === "object" ? JSON.stringify(value) : String(value)
-    const text = typeof value === "string" && /^[=+\-@\t\r]/.test(raw) ? `'${raw}` : raw
+    const firstVisible = [...raw].find((character) => character.trim() !== "" && character.charCodeAt(0) > 31 && character.charCodeAt(0) !== 127)
+    const text = typeof value === "string" && firstVisible !== undefined && "=+-@".includes(firstVisible) ? `'${raw}` : raw
     return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text
   }
   return `\uFEFF${[columns.join(","), ...rows.map((row) => columns.map((column) => escape(row[column])).join(","))].join("\r\n")}`

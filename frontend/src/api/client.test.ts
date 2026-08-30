@@ -51,4 +51,24 @@ describe("ApiClient", () => {
     const client = new ApiClient()
     await expect(client.request("/anomalies/export", { responseType: "blob" })).resolves.toEqual(blob)
   })
+
+  it("preserves structured JSON details on a 502 response", async () => {
+    const details = {
+      status: "partial_failed",
+      requeued_jobs: 0,
+      skipped_jobs: 2,
+      errors: [{ stage: "kafka", message: "broker unavailable" }],
+    }
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(details), {
+      status: 502,
+      headers: { "content-type": "application/json" },
+    })))
+
+    const client = new ApiClient()
+    await expect(client.request("/pushes/recover", { method: "POST" })).rejects.toMatchObject({
+      message: "请求失败（502）",
+      status: 502,
+      details,
+    })
+  })
 })

@@ -88,7 +88,7 @@ export function mapAnomalyGroup(value: Record<string, unknown>): AnomalyGroup {
 
 export function mapOverview(value: Record<string, unknown>): Overview {
   const rawTrend = Array.isArray(value.trend) ? value.trend : Array.isArray(value.trends) ? value.trends : []
-  return { ...value, stats: records(value.stats) as Record<string, number>, trend: rawTrend.map((item) => ({ date: String(records(item).date ?? ""), count: Number(records(item).count ?? 0) })), trends: Array.isArray(value.trends) ? value.trends.map(records) : [], severity_distribution: Array.isArray(value.severity_distribution) ? value.severity_distribution.map(records) : [], recent_anomalies: Array.isArray(value.recent_anomalies) ? value.recent_anomalies.map(records).map(mapRecord) : [], top_rules: Array.isArray(value.top_rules) ? value.top_rules.map(records) : [] }
+  return { ...value, stats: records(value.stats) as Record<string, number>, trend: rawTrend.map((item) => ({ date: String(records(item).date ?? ""), count: Number(records(item).count ?? 0) })), trends: Array.isArray(value.trends) ? value.trends.map(records) : [], recent_anomalies: Array.isArray(value.recent_anomalies) ? value.recent_anomalies.map(records).map(mapRecord) : [], top_rules: Array.isArray(value.top_rules) ? value.top_rules.map(records) : [] }
 }
 
 export function mapDatasetExecution(value: Record<string, unknown>): DatasetExecution {

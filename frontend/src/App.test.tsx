@@ -33,6 +33,7 @@ describe("application shell", () => {
     render(<App />)
     await waitFor(() => expect(screen.getByText("分析师")).toBeInTheDocument())
     expect(screen.queryByRole("link", { name: /账号管理/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole("link", { name: /系统测试/ })).not.toBeInTheDocument()
   })
 
   it("shows a real pending-record count and never a decorative dot", async () => {

@@ -12,6 +12,16 @@ describe("format helpers", () => {
     )
   })
 
+  it("neutralizes formulas after leading whitespace and control characters without rewriting the cell", () => {
+    expect(csvText([
+      { value: " =1" },
+      { value: "\n+cmd" },
+      { value: "\t-1" },
+      { value: "\u0000@cmd" },
+    ])).toBe("\uFEFFvalue\r\n' =1\r\n\"'\n+cmd\"\r\n'\t-1\r\n'\u0000@cmd")
+    expect(csvText([{ value: -7 }])).toBe("\uFEFFvalue\r\n-7")
+  })
+
   it("formats absent dates consistently", () => {
     expect(formatDateTime()).toBe("—")
   })
