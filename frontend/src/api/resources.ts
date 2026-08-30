@@ -23,6 +23,9 @@ export const datasetPayload = (data: DatasetInput) => ({ name: data.name, dataso
 
 export function mapRecord(value: Record<string, unknown>): AnomalyRecord {
   const businessKey = value.business_key ?? value.anomaly_key ?? ""
+  const matched = Array.isArray(value.matched_conditions) && value.matched_conditions[0] && typeof value.matched_conditions[0] === "object" ? value.matched_conditions[0] as Record<string, unknown> : {}
+  const data = (value.row_details ?? value.data ?? {}) as Record<string, unknown>
+  const field = String(value.field ?? value.anomaly_field ?? matched.field ?? "")
   return {
     ...value,
     id: String(value.id ?? ""),
@@ -35,7 +38,9 @@ export function mapRecord(value: Record<string, unknown>): AnomalyRecord {
     detected_at: String(value.first_seen_at ?? value.detected_at ?? value.created_at ?? ""),
     created_at: String(value.created_at ?? value.first_seen_at ?? ""),
     push_status: String(value.delivery_status ?? value.push_status ?? "none"),
-    data: (value.row_details ?? value.data ?? {}) as Record<string, unknown>,
+    field: field || undefined,
+    anomalous_value: value.value ?? value.anomalous_value ?? matched.actual ?? (field ? data[field] : undefined),
+    data,
   }
 }
 
@@ -66,6 +71,13 @@ export function mapAnomalyGroup(value: Record<string, unknown>): AnomalyGroup {
     processing_count: Number(statusCounts.processing ?? value.processing_count ?? 0),
     resolved_count: Number(statusCounts.resolved ?? value.resolved_count ?? 0),
     timed_out_count: Number(statusCounts.timed_out ?? value.timed_out_count ?? 0),
+    scanned_rows: Number(value.scanned_rows ?? 0),
+    matched_rows: Number(value.matched_rows ?? 0),
+    new_anomalies: Number(value.new_anomalies ?? 0),
+    situation_broadcast_status: String(value.situation_broadcast_status ?? value.broadcast_status ?? "disabled"),
+    timeout_broadcast_status: String(value.timeout_broadcast_status ?? "disabled"),
+    timeout_waiting_count: Number(value.timeout_waiting_count ?? 0),
+    timeout_waiting_delivery_count: Number(value.timeout_waiting_delivery_count ?? 0),
   }
 }
 
@@ -146,7 +158,7 @@ export function createResources(client: ApiClient) {
     },
     groups: {
       list: async (filters: { page?: number; pageSize?: number; search?: string; ruleId?: string } = {}, signal?: AbortSignal) => { const q = new URLSearchParams(); const values = { page: filters.page, page_size: filters.pageSize, search: filters.search, rule_id: filters.ruleId }; Object.entries(values).forEach(([key, value]) => { if (value !== undefined && value !== "") q.set(key, String(value)) }); const payload = await client.request<Paginated<Record<string, unknown>>>(`/anomaly-groups${q.size ? `?${q}` : ""}`, { signal }); return { ...payload, items: payload.items.map(mapAnomalyGroup) } },
-      detail: async (id: string, signal?: AbortSignal): Promise<AnomalyGroupDetail> => { const payload = await client.request<{ group: Record<string, unknown>; items: Array<Record<string, unknown>>; deliveries?: Array<Record<string, unknown>>; total?: number; page?: number; page_size?: number }>(`/anomaly-groups/${id}`, { signal }); return { ...mapAnomalyGroup(payload.group), records: payload.items.map(mapRecord), deliveries: (payload.deliveries ?? []).map(mapBroadcastDelivery), total: payload.total, page: payload.page, page_size: payload.page_size } },
+      detail: async (id: string, filters: { page?: number; pageSize?: number } = {}, signal?: AbortSignal): Promise<AnomalyGroupDetail> => { const q = new URLSearchParams(); if (filters.page) q.set("page", String(filters.page)); if (filters.pageSize) q.set("page_size", String(filters.pageSize)); const payload = await client.request<{ group: Record<string, unknown>; items: Array<Record<string, unknown>>; deliveries?: Array<Record<string, unknown>>; total?: number; page?: number; page_size?: number }>(`/anomaly-groups/${id}${q.size ? `?${q}` : ""}`, { signal }); return { ...mapAnomalyGroup(payload.group), records: payload.items.map(mapRecord), deliveries: (payload.deliveries ?? []).map(mapBroadcastDelivery), total: payload.total, page: payload.page, page_size: payload.page_size } },
     },
     accounts: {
       list: (signal?: AbortSignal) => client.request<User[]>("/accounts", { signal }),
