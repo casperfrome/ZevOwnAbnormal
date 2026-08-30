@@ -65,19 +65,58 @@ describe("monitor pages", () => {
     expect(navigate).toHaveBeenCalledWith("#anomaly-groups/group-1")
   })
 
-  it("does not announce a completed record transition after its route is replaced", async () => {
+  it("refreshes shared record caches but not the old detail after its route is replaced", async () => {
     records.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 20 })
     recordCounts.mockResolvedValue(0)
     let finish: ((value: unknown) => void) | undefined
     recordDetail.mockImplementation((id: string) => Promise.resolve({ id, severity: "high", status: "pending", business_key_summary: id, data: {}, validation_requests: [], deliveries: [], delivery_diagnostics: [], push_jobs: [] }))
     recordStatus.mockImplementation(() => new Promise((resolve) => { finish = resolve }))
     toastSuccess.mockClear()
-    const page = renderPage(<RecordsPage detailId="old" navigate={vi.fn()} />)
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const invalidateQueries = vi.spyOn(client, "invalidateQueries")
+    const page = render(<QueryClientProvider client={client}><RecordsPage detailId="old" navigate={vi.fn()} /></QueryClientProvider>)
 
     await screen.findByRole("button", { name: "已解决" })
     fireEvent.click(screen.getByRole("button", { name: "已解决" }))
-    page.rerender(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><RecordsPage detailId="new" navigate={vi.fn()} /></QueryClientProvider>)
+    await waitFor(() => expect(recordStatus).toHaveBeenCalledWith("old", "resolved"))
+    page.rerender(<QueryClientProvider client={client}><RecordsPage detailId="new" navigate={vi.fn()} /></QueryClientProvider>)
+    await screen.findByText("new")
     finish?.({ id: "old" })
-    await waitFor(() => expect(toastSuccess).not.toHaveBeenCalled())
+    await waitFor(() => {
+      expect(invalidateQueries).toHaveBeenCalledWith({ queryKey: ["records"] })
+      expect(invalidateQueries).toHaveBeenCalledWith({ queryKey: ["record-counts"] })
+    })
+    expect(invalidateQueries).not.toHaveBeenCalledWith({ queryKey: ["record", "old"] })
+    expect(toastSuccess).not.toHaveBeenCalled()
+  })
+
+  it("renders mapped Chinese detail tables for validation, push jobs, deliveries, and timeline", async () => {
+    records.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 20 })
+    recordCounts.mockResolvedValue(0)
+    recordDetail.mockResolvedValue({
+      id: "detail-1",
+      severity: "high",
+      status: "pending",
+      business_key_summary: "order_id: ORDER-99",
+      data: { amount: 999 },
+      validation_requests: [{ recipient_user_id: "validator-1", delivery_status: "sent", delivery_attempts: 2, message_id: "validation-message", last_error: "", delivered_at: "2026-08-30T01:00:00Z" }],
+      push_jobs: [{ id: "push-1", kind: "group_broadcast", status: "partial_failed", publish_attempts: 2, dispatch_attempts: 1, next_attempt_at: "2026-08-30T02:00:00Z", error: "queue timeout" }],
+      deliveries: [{ kind: "notification", status: "failed", attempts: 3, recipient: "ou-notification", message_id: "delivery-message", error: "network error" }],
+      delivery_diagnostics: [],
+      timeline: [{ type: "resolved", description: "人工关闭", created_at: "2026-08-30T03:00:00Z" }],
+    })
+
+    renderPage(<RecordsPage detailId="detail-1" navigate={vi.fn()} />)
+
+    expect(await screen.findByRole("columnheader", { name: "校验对象" })).toBeInTheDocument()
+    expect(screen.getByRole("columnheader", { name: "推送类型" })).toBeInTheDocument()
+    expect(screen.getByRole("columnheader", { name: "接收对象" })).toBeInTheDocument()
+    expect(screen.getByRole("columnheader", { name: "事件说明" })).toBeInTheDocument()
+    expect(screen.getByText("validator-1")).toBeInTheDocument()
+    expect(screen.getByText("group_broadcast")).toBeInTheDocument()
+    expect(screen.getByText("ou-notification")).toBeInTheDocument()
+    expect(screen.getByText("人工关闭")).toBeInTheDocument()
+    expect(screen.queryByText("publish_attempts")).not.toBeInTheDocument()
+    expect(screen.queryByText("recipient_user_id")).not.toBeInTheDocument()
   })
 })
