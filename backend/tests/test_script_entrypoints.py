@@ -129,6 +129,30 @@ def test_port_check_rejects_existing_listener():
             check_port(listener.getsockname()[1])
 
 
+def test_frontend_build_runs_when_dependencies_exist(tmp_path, monkeypatch):
+    from scripts import start_services as runtime
+    frontend = tmp_path / 'frontend'
+    (frontend / 'node_modules').mkdir(parents=True)
+    (frontend / 'package.json').write_text('{}', encoding='utf-8')
+    calls = []
+    monkeypatch.setattr(runtime.subprocess, 'run', lambda command, **options: calls.append((command, options)) or type('Result', (), {'returncode': 0})())
+
+    assert runtime.build_frontend(tmp_path) == 0
+    expected_npm = 'npm.cmd' if runtime.os.name == 'nt' else 'npm'
+    assert calls[0][0] == [expected_npm, 'run', 'build']
+    assert calls[0][1]['cwd'] == frontend
+
+
+def test_frontend_build_explains_npm_ci_when_dependencies_are_missing(tmp_path, capsys):
+    from scripts import start_services as runtime
+    frontend = tmp_path / 'frontend'
+    frontend.mkdir()
+    (frontend / 'package.json').write_text('{}', encoding='utf-8')
+
+    assert runtime.build_frontend(tmp_path) != 0
+    assert 'npm ci' in capsys.readouterr().out
+
+
 @pytest.fixture
 def service_runtime(monkeypatch, tmp_path):
     from scripts import start_services as runtime
@@ -155,6 +179,7 @@ def service_runtime(monkeypatch, tmp_path):
 
     monkeypatch.setattr(runtime, 'spawn', spawn)
     monkeypatch.setattr(runtime, 'check_port', lambda *a: events.append('port'))
+    monkeypatch.setattr(runtime, 'build_frontend', lambda *a: events.append('build') or 0)
     monkeypatch.setattr(runtime, 'run_migrations', lambda *a: events.append('migrate') or 0)
     monkeypatch.setattr(runtime, 'wait_ready', lambda *a, **kw: events.append('healthy'))
     monkeypatch.setattr(runtime.time, 'sleep', lambda _: setattr(children['api'], 'returncode', 0))
@@ -164,7 +189,7 @@ def service_runtime(monkeypatch, tmp_path):
 def test_unified_start_orders_readiness_before_feishu_and_cleans_owned_children(service_runtime):
     runtime, events, _, root = service_runtime
     assert runtime.run_services(root) == 0
-    assert events == ['port', 'migrate', 'start:api', 'healthy', 'start:feishu',
+    assert events == ['port', 'build', 'migrate', 'start:api', 'healthy', 'start:feishu',
                       'stop:feishu', 'stop:api']
 
 
@@ -172,7 +197,7 @@ def test_migration_failure_starts_no_services(service_runtime, monkeypatch):
     runtime, events, _, root = service_runtime
     monkeypatch.setattr(runtime, 'run_migrations', lambda *a: 7)
     assert runtime.run_services(root) == 7
-    assert events == ['port']
+    assert events == ['port', 'build']
 
 
 def test_unhealthy_backend_is_stopped_without_starting_feishu(service_runtime, monkeypatch):
@@ -183,7 +208,7 @@ def test_unhealthy_backend_is_stopped_without_starting_feishu(service_runtime, m
 
     monkeypatch.setattr(runtime, 'wait_ready', unhealthy)
     assert runtime.run_services(root) != 0
-    assert events == ['port', 'migrate', 'start:api', 'stop:api']
+    assert events == ['port', 'build', 'migrate', 'start:api', 'stop:api']
 
 
 def test_feishu_exit_warns_once_without_stopping_or_restarting_backend(service_runtime, monkeypatch, capsys):

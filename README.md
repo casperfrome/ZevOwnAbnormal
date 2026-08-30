@@ -250,9 +250,12 @@ Push-Location frontend
 npm ci
 npx playwright install chromium
 npm test
+npm run typecheck
+npm run lint
+npm run test:e2e
+npm run build
 Pop-Location
-Get-ChildItem frontend\scripts\*.js | ForEach-Object { node --check $_.FullName }
 docker compose config --quiet
 ```
 
-测试使用 Node.js 20+ 和固定的 Playwright 1.62.1。需要使用已有浏览器时，通过 `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` 指定路径，详见前端 README。登录会话由服务端校验 24 小时有效期；升级前不含过期时间的旧会话需要重新登录。
+测试使用 Node.js 20+。统一启动脚本仅在 `frontend/node_modules` 已存在时自动执行生产构建，依赖缺失时请先运行 `npm ci`。FastAPI 托管 `frontend/dist`，构建产物不会提交。登录会话由服务端校验 24 小时有效期；升级前不含过期时间的旧会话需要重新登录。

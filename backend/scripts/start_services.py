@@ -51,6 +51,26 @@ def run_migrations(root: Path, env: dict[str, str]) -> int:
         migration.stop()
 
 
+def build_frontend(root: Path) -> int:
+    frontend = root / 'frontend'
+    if not (frontend / 'package.json').exists():
+        report('未找到 frontend/package.json，无法构建前端')
+        return 1
+    if not (frontend / 'node_modules').is_dir():
+        report('前端依赖尚未安装；请先执行：cd frontend && npm ci')
+        return 1
+    report('正在构建 React 前端')
+    try:
+        npm_command = 'npm.cmd' if os.name == 'nt' else 'npm'
+        result = subprocess.run([npm_command, 'run', 'build'], cwd=frontend, check=False)
+    except OSError as exc:
+        report(f'前端构建命令不可用 error_type={type(exc).__name__}；请确认 Node.js/npm 已安装，并执行 npm ci')
+        return 1
+    if result.returncode:
+        report(f'前端构建失败 exit_code={result.returncode}')
+    return result.returncode
+
+
 def wait_ready(api, timeout: float = 60) -> None:
     deadline = time.monotonic() + timeout
     while True:
@@ -81,6 +101,9 @@ def run_services(root: Path = ROOT) -> int:
             return 1
         check_port()
         env = {**os.environ, 'PYTHONUTF8': '1', 'PYTHONIOENCODING': 'utf-8'}
+        code = build_frontend(root)
+        if code:
+            return code
         code = run_migrations(root, env)
         if code:
             report(f'数据库迁移失败，停止启动 exit_code={code}')

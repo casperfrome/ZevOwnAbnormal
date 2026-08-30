@@ -128,17 +128,18 @@ Invoke-RestMethod 'http://127.0.0.1:8000/api/v1/health'
 以下测试在 HTTP 边界使用本地 fake/mock，不会向真实飞书发送消息：
 
 ```powershell
-& 'D:\PythonVEnv\FirstVEnv\Scripts\python.exe' -m pytest backend\tests tests -q
+& 'D:\PythonVenv\Scripts\python.exe' -m pytest backend\tests tests -q
 
-# Codex 桌面开发环境：先使用 “Load workspace dependencies” 加载内置 Playwright。
-# 标准开发环境：按团队锁定的 Node 依赖安装流程提供 playwright，然后确认：
-node -e "require.resolve('playwright'); console.log('Playwright dependency ready')"
 Push-Location frontend
-node --test
+npm ci
+npm run typecheck
+npm run lint
+npm test
+npm run test:e2e
+npm run build
 Pop-Location
 
-& 'D:\PythonVEnv\FirstVEnv\Scripts\python.exe' -m compileall -q backend tests 飞书长连接启动
-Get-ChildItem frontend -Recurse -Filter '*.js' -File | ForEach-Object { node --check $_.FullName }
+& 'D:\PythonVenv\Scripts\python.exe' -m compileall -q backend tests 飞书长连接启动
 ```
 
 不要把 Codex 用户名、runtime hash 或绝对 `node_modules` 路径写入项目文档，也不要联网安装未锁定的临时版本。
@@ -156,7 +157,7 @@ Get-ChildItem frontend -Recurse -Filter '*.js' -File | ForEach-Object { node --c
 | 超时幂等、迟交、超时/提交竞态 | `test_timeout_is_idempotent_and_late_submission_resolves`、`test_expiration_cannot_overwrite_a_concurrent_resolution` |
 | 管理员解决与竞态保护 | `test_named_admin_can_manually_resolve`、`backend/tests/test_validation_api.py::test_manual_resolution_uses_authenticated_admin_not_forged_assignee` |
 | 卡片关闭失败重试与收敛 | `test_card_patch_failure_is_retryable_and_does_not_rollback_resolution`、`test_timed_out_card_reconciliation_converges_after_one_success` |
-| 有效深链实际拉取并打开详情；未知 UUID 提示且保留列表 | `frontend/tests/anomaly_validation_ui.test.js` 的两条 real `records.js` deep-link 回归 |
+| 有效深链实际拉取并打开详情、桌面/窄屏路由与零运行时错误 | `frontend/e2e/app.spec.ts` 的 Playwright 深链回归 |
 | 长连接订阅、标准化与错误隔离 | `tests/test_feishu_long_connection.py` |
 
 ## 5. 真实消息人工 smoke（必须再次授权）
