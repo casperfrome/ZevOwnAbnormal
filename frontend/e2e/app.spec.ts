@@ -32,7 +32,7 @@ const recordDetail = {
   last_sql_validation_result: null,
   timeline: [{ type: "detected", description: "规则命中", created_at: "2026-08-30T01:00:00Z" }],
   validation_requests: [{ recipient_user_id: "ou-reviewer", delivery_status: "sent", delivery_attempts: 1, message_id: "validation-1", last_error: null, delivered_at: "2026-08-30T01:01:00Z" }],
-  deliveries: [{ receive_id_type: "open_id", recipient: "ou-owner", status: "sent", attempts: 1, message_id: "message-1", last_error: null, delivered_at: "2026-08-30T01:02:00Z" }],
+  deliveries: [{ receive_id_type: "open_id", recipient: "ou-owner", status: "sent", attempts: 1, message_id: "message-1", last_error: null }],
   push_jobs: [
     { id: "push-notification", kind: "notification", status: "sent", publish_attempts: 1, dispatch_attempts: 1, next_attempt_at: null, last_error: null, updated_at: "2026-08-30T01:02:00Z" },
     { id: "push-validation", kind: "validation", status: "sent", publish_attempts: 1, dispatch_attempts: 1, next_attempt_at: null, last_error: null, updated_at: "2026-08-30T01:02:00Z" },
@@ -60,15 +60,18 @@ const rule = {
   validation_method: "pseudo",
   sql_validation_config: null,
   group_broadcast: {
+    enabled: true,
     webhook_url: "https://open.feishu.cn/open-apis/bot/v2/hook/example",
+    mention_targets: [{ source: "field", field: "reviewer_id", value: null }],
+    message_template: "异常 {order_id列表}",
     situation: { enabled: true, mention_targets: [{ source: "field", field: "reviewer_id", value: null }], message_template: "异常 {order_id列表}" },
     timeout: { enabled: false, mention_targets: [], message_template: null },
   },
   enabled: true,
   sync_status: "synced",
   sync_error: null,
-  last_run: "2026-08-30T00:30:00Z",
-  anomaly_count: 1,
+  ds_workflow_code: "workflow-1",
+  ds_schedule_id: "schedule-1",
   created_at: "2026-08-01T00:00:00Z",
   updated_at: "2026-08-30T00:30:00Z",
 }
@@ -108,6 +111,7 @@ const group = {
   matched_rows: 8,
   new_anomalies: 3,
   status_counts: { pending: 2, processing: 1, resolved: 4, timed_out: 1 },
+  broadcast_status: "sent",
   situation_broadcast_status: "sent",
   timeout_broadcast_status: "waiting",
   timeout_waiting_count: 5,
@@ -123,7 +127,7 @@ const groupRecords = ["pending", "pending", "processing", "resolved", "resolved"
 
 const consoleFailures = new WeakMap<Page, string[]>()
 
-async function installApiFixtures(page: Page, currentUser = admin) {
+async function installApiFixtures(page: Page, currentUser = admin, pendingCount = 1) {
   await page.route("**/api/v1/**", async (route) => {
     const url = new URL(route.request().url())
     const path = url.pathname
@@ -138,8 +142,8 @@ async function installApiFixtures(page: Page, currentUser = admin) {
       const status = url.searchParams.get("status_filter")
       const severity = url.searchParams.get("severity")
       const isCount = url.searchParams.get("page_size") === "1"
-      const matches = (!status || status === "pending") && (!severity || severity === "high")
-      body = { items: isCount ? [] : matches ? [record] : [], total: matches ? 1 : 0, page: 1, page_size: Number(url.searchParams.get("page_size") ?? 20) }
+      const matches = pendingCount > 0 && (!status || status === "pending") && (!severity || severity === "high")
+      body = { items: isCount ? [] : matches ? [record] : [], total: matches ? pendingCount : 0, page: 1, page_size: Number(url.searchParams.get("page_size") ?? 20) }
     }
     else if (path === "/api/v1/anomaly-groups/group-1") body = {
       group,
@@ -151,13 +155,33 @@ async function installApiFixtures(page: Page, currentUser = admin) {
     }
     else if (path === "/api/v1/anomaly-groups") body = { items: [group], total: 1, page: 1, page_size: 20 }
     else if (path === "/api/v1/accounts") body = [admin, analyst]
-    else if (path === "/api/v1/overview") body = {
-      stats: { active_rules: 1, total_rules: 1, pending_records: 1, processing_records: 0, timed_out_records: 0, resolved_records: 4, online_datasources: 1, total_datasources: 1, high_anomalies: 1 },
-      trend: [{ date: "2026-08-29", count: 2 }, { date: "2026-08-30", count: 1 }],
-      recent_anomalies: [record],
-      top_rules: [{ id: "rule-1", name: "订单金额监控", dataset_name: "订单", anomaly_count: 1 }],
-      days: Number(url.searchParams.get("days") ?? 30),
-      timezone: "Asia/Shanghai",
+    else if (path === "/api/v1/overview") {
+      const overviewDays = Number(url.searchParams.get("days") ?? 30)
+      const endDate = Date.UTC(2026, 7, 30)
+      body = {
+        stats: {
+          pending_records: 1,
+          processing_records: 0,
+          timed_out_records: 0,
+          resolved_records: 4,
+          high_anomalies: 1,
+          critical_anomalies: 1,
+          push_in_transit_anomalies: 0,
+          active_rules: 1,
+          total_rules: 1,
+          online_datasources: 1,
+          total_datasources: 1,
+          total_datasets: 1,
+        },
+        trend: Array.from({ length: overviewDays }, (_, index) => ({
+          date: new Date(endDate - (overviewDays - index - 1) * 86_400_000).toISOString().slice(0, 10),
+          count: index === overviewDays - 2 ? 2 : index === overviewDays - 1 ? 1 : 0,
+        })),
+        recent_anomalies: [record],
+        top_rules: [{ id: "rule-1", name: "订单金额监控", dataset_name: "订单", anomaly_count: 1 }],
+        days: overviewDays,
+        timezone: "Asia/Shanghai",
+      }
     }
     else throw new Error(`Unhandled API fixture: ${route.request().method()} ${url.pathname}${url.search}`)
 
@@ -199,6 +223,43 @@ async function assertRouteHealth(page: Page) {
   expect(layout.unreachable).toEqual([])
 }
 
+async function assertRecordNavigationHasNoDecorativeDot(page: Page, expectedCount: number | null, mobile: boolean) {
+  const link = page.locator('a.app-nav-item[href="#records"]')
+  if (mobile && !await link.isVisible()) await page.getByRole("button", { name: "打开导航" }).click()
+  await expect(link).toBeVisible()
+
+  const navItem = link.locator("xpath=..")
+  const badges = navItem.locator('[data-sidebar="menu-badge"]')
+  await expect(badges).toHaveCount(expectedCount === null ? 0 : 1)
+  if (expectedCount !== null) {
+    await expect(badges).toHaveAttribute("aria-label", `${expectedCount} 条待处理异常`)
+    await expect(badges).toHaveText(new RegExp(`^${expectedCount}$`))
+  }
+
+  const decorativeDots = await navItem.evaluate((item) => {
+    const forbidden = /[•·●]|(?:^|[\s"'(])dot(?:$|[\s"')])/i
+    const textNodes: string[] = []
+    const walker = document.createTreeWalker(item, NodeFilter.SHOW_TEXT)
+    while (walker.nextNode()) {
+      const value = walker.currentNode.textContent ?? ""
+      if (forbidden.test(value)) textNodes.push(`${walker.currentNode.parentElement?.tagName.toLowerCase() ?? "text"} text: ${value}`)
+    }
+    const elementDecorations = [item, ...item.querySelectorAll("*")].flatMap((node) => {
+      const element = node as HTMLElement
+      const candidates = [
+        ["aria-label", element.getAttribute("aria-label") ?? ""],
+        ["::before", getComputedStyle(element, "::before").content],
+        ["::after", getComputedStyle(element, "::after").content],
+      ] as const
+      return candidates
+        .filter(([, value]) => forbidden.test(value))
+        .map(([source, value]) => `${element.tagName.toLowerCase()} ${source}: ${value}`)
+    })
+    return [...textNodes, ...elementDecorations]
+  })
+  expect(decorativeDots).toEqual([])
+}
+
 test.beforeEach(async ({ page }) => {
   const errors: string[] = []
   consoleFailures.set(page, errors)
@@ -233,6 +294,19 @@ for (const routeCase of primaryRoutes) {
     await assertRouteHealth(page)
   })
 }
+
+test("uses only an accessible numeric record-navigation badge, never a decorative dot", async ({ page }, testInfo) => {
+  const mobile = testInfo.project.name === "mobile"
+  await page.goto("/#records")
+  await expect(page.getByRole("button", { name: "查看 rec-1 详情" })).toBeVisible()
+  await assertRecordNavigationHasNoDecorativeDot(page, 1, mobile)
+
+  await page.unroute("**/api/v1/**")
+  await installApiFixtures(page, admin, 0)
+  await page.reload()
+  await expect(page.getByText("暂无匹配的异常记录")).toBeVisible()
+  await assertRecordNavigationHasNoDecorativeDot(page, null, mobile)
+})
 
 test("supports record, group, rule and dataset deep links", async ({ page }) => {
   const deepLinks = [
