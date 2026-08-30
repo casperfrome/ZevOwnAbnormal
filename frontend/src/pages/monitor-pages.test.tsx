@@ -100,7 +100,11 @@ describe("monitor pages", () => {
       business_key_summary: "order_id: ORDER-99",
       data: { amount: 999 },
       validation_requests: [{ recipient_user_id: "validator-1", delivery_status: "sent", delivery_attempts: 2, message_id: "validation-message", last_error: "", delivered_at: "2026-08-30T01:00:00Z" }],
-      push_jobs: [{ id: "push-1", kind: "group_broadcast", status: "partial_failed", publish_attempts: 2, dispatch_attempts: 1, next_attempt_at: "2026-08-30T02:00:00Z", error: "queue timeout" }],
+      push_jobs: [
+        { id: "push-1", kind: "group_broadcast", status: "partial_failed", publish_attempts: 2, dispatch_attempts: 1, next_attempt_at: "2026-08-30T02:00:00Z", error: "queue timeout" },
+        { id: "push-2", kind: "notification", status: "sent", publish_attempts: 1, dispatch_attempts: 1 },
+        { id: "push-3", kind: "validation", status: "pending", publish_attempts: 1, dispatch_attempts: 0 },
+      ],
       deliveries: [{ kind: "notification", status: "failed", attempts: 3, recipient: "ou-notification", message_id: "delivery-message", error: "network error" }],
       delivery_diagnostics: [],
       timeline: [{ type: "resolved", description: "人工关闭", created_at: "2026-08-30T03:00:00Z" }],
@@ -114,7 +118,11 @@ describe("monitor pages", () => {
     expect(screen.getByRole("columnheader", { name: "事件说明" })).toBeInTheDocument()
     expect(screen.getByText("validator-1")).toBeInTheDocument()
     expect(screen.getByText("群广播")).toBeInTheDocument()
+    expect(screen.getByText("通知推送")).toBeInTheDocument()
+    expect(screen.getByText("校验推送")).toBeInTheDocument()
     expect(screen.queryByText("group_broadcast")).not.toBeInTheDocument()
+    expect(screen.queryByText("notification")).not.toBeInTheDocument()
+    expect(screen.queryByText("validation")).not.toBeInTheDocument()
     expect(screen.getByText("ou-notification")).toBeInTheDocument()
     expect(screen.getByText("人工关闭")).toBeInTheDocument()
     expect(screen.queryByText("publish_attempts")).not.toBeInTheDocument()

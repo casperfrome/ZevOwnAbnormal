@@ -4,22 +4,41 @@ const admin = { id: "u1", login_name: "admin", display_name: "管理员", job_ti
 const analyst = { id: "u2", login_name: "analyst", display_name: "分析师", job_title: "风险运营", is_superuser: false, is_active: true }
 const record = {
   id: "rec-1",
-  description: "订单金额异常",
-  business_key: { order_id: "ORDER-42" },
   rule_id: "rule-1",
   rule_name: "订单金额监控",
   dataset_name: "订单",
   severity: "high",
   status: "pending",
-  assignee: "王敏",
-  first_seen_at: "2026-08-30T01:00:00Z",
-  created_at: "2026-08-30T01:00:00Z",
+  business_key: { order_id: "ORDER-42" },
   row_details: { amount: 999, reviewer_id: "ou-reviewer" },
   matched_conditions: [{ field: "amount", actual: 999 }],
-  validation_requests: [{ recipient_user_id: "ou-reviewer", delivery_status: "sent", delivery_attempts: 1, message_id: "validation-1", last_error: null, delivered_at: "2026-08-30T01:01:00Z" }],
-  deliveries: [{ id: "delivery-1", broadcast_kind: "situation", status: "sent", delivery_attempts: 1, recipient: "ou-owner", message_id: "message-1", error_message: null, delivered_at: "2026-08-30T01:02:00Z" }],
-  push_jobs: [{ id: "push-1", kind: "group_broadcast", status: "sent", publish_attempts: 1, dispatch_attempts: 1, next_attempt_at: null, last_error: null, updated_at: "2026-08-30T01:02:00Z" }],
+  hit_count: 1,
+  first_seen_at: "2026-08-30T01:00:00Z",
+  last_seen_at: "2026-08-30T01:00:00Z",
+  resolved_at: null,
+  assignee: "王敏",
+  description: "订单金额异常",
+  validation_deadline: "2026-08-31T01:00:00Z",
+  deadline_seconds_snapshot: 86400,
+  first_delivered_at: "2026-08-30T01:02:00Z",
+  timed_out_at: null,
+  resolution_source: null,
+  resolved_by_user_id: null,
+  validation_method: "pseudo",
+  delivery_status: "sent",
+}
+const recordDetail = {
+  ...record,
+  last_sql_validation_result: null,
   timeline: [{ type: "detected", description: "规则命中", created_at: "2026-08-30T01:00:00Z" }],
+  validation_requests: [{ recipient_user_id: "ou-reviewer", delivery_status: "sent", delivery_attempts: 1, message_id: "validation-1", last_error: null, delivered_at: "2026-08-30T01:01:00Z" }],
+  deliveries: [{ receive_id_type: "open_id", recipient: "ou-owner", status: "sent", attempts: 1, message_id: "message-1", last_error: null, delivered_at: "2026-08-30T01:02:00Z" }],
+  push_jobs: [
+    { id: "push-notification", kind: "notification", status: "sent", publish_attempts: 1, dispatch_attempts: 1, next_attempt_at: null, last_error: null, updated_at: "2026-08-30T01:02:00Z" },
+    { id: "push-validation", kind: "validation", status: "sent", publish_attempts: 1, dispatch_attempts: 1, next_attempt_at: null, last_error: null, updated_at: "2026-08-30T01:02:00Z" },
+    { id: "push-broadcast", kind: "group_broadcast", status: "sent", publish_attempts: 1, dispatch_attempts: 1, next_attempt_at: null, last_error: null, updated_at: "2026-08-30T01:02:00Z" },
+  ],
+  validation_submission: null,
 }
 const rule = {
   id: "rule-1",
@@ -94,6 +113,13 @@ const group = {
   timeout_waiting_count: 5,
   timeout_waiting_delivery_count: 6,
 }
+const groupRecords = ["pending", "pending", "processing", "resolved", "resolved", "resolved", "resolved", "timed_out"].map((status, index) => ({
+  ...record,
+  id: index === 0 ? "rec-1" : `rec-${index + 1}`,
+  status,
+  business_key: { order_id: `ORDER-${42 + index}` },
+  description: `订单 ${42 + index} 金额异常`,
+}))
 
 const consoleFailures = new WeakMap<Page, string[]>()
 
@@ -107,23 +133,23 @@ async function installApiFixtures(page: Page, currentUser = admin) {
     else if (path === "/api/v1/rules") body = [rule]
     else if (path === "/api/v1/datasets") body = [dataset]
     else if (path === "/api/v1/datasources") body = [datasource]
-    else if (path === "/api/v1/anomalies/rec-1") body = record
+    else if (path === "/api/v1/anomalies/rec-1") body = recordDetail
     else if (path === "/api/v1/anomalies") {
       const status = url.searchParams.get("status_filter")
       const severity = url.searchParams.get("severity")
       const isCount = url.searchParams.get("page_size") === "1"
       const matches = (!status || status === "pending") && (!severity || severity === "high")
-      body = { items: isCount ? [] : matches ? [record] : [], total: matches ? 1 : 0, page: 1, page_size: Number(url.searchParams.get("page_size") ?? 20), pages: 1 }
+      body = { items: isCount ? [] : matches ? [record] : [], total: matches ? 1 : 0, page: 1, page_size: Number(url.searchParams.get("page_size") ?? 20) }
     }
     else if (path === "/api/v1/anomaly-groups/group-1") body = {
       group,
-      items: [record],
-      deliveries: [{ id: "broadcast-1", broadcast_kind: "situation", status: "sent", delivery_attempts: 1, error_message: null, delivered_at: "2026-08-30T01:02:00Z" }],
-      total: 1,
+      deliveries: [{ id: "broadcast-1", broadcast_kind: "situation", round_index: 0, part_index: 1, total_parts: 1, status: "sent", attempts: 1, last_error: null, delivered_at: "2026-08-30T01:02:00Z" }],
+      items: groupRecords,
+      total: groupRecords.length,
       page: 1,
       page_size: 20,
     }
-    else if (path === "/api/v1/anomaly-groups") body = { items: [group], total: 1, page: 1, page_size: 20, pages: 1 }
+    else if (path === "/api/v1/anomaly-groups") body = { items: [group], total: 1, page: 1, page_size: 20 }
     else if (path === "/api/v1/accounts") body = [admin, analyst]
     else if (path === "/api/v1/overview") body = {
       stats: { active_rules: 1, total_rules: 1, pending_records: 1, processing_records: 0, timed_out_records: 0, resolved_records: 4, online_datasources: 1, total_datasources: 1, high_anomalies: 1 },
@@ -142,10 +168,11 @@ async function installApiFixtures(page: Page, currentUser = admin) {
 async function assertRouteHealth(page: Page) {
   const text = await page.locator("body").innerText()
   expect(text).not.toContain("[object Object]")
-  expect(page.getByText("•", { exact: true })).toHaveCount(0)
 
-  const pendingBadge = page.getByLabel(/条待处理异常/)
-  if (await pendingBadge.count()) await expect(pendingBadge).toHaveText(/^\d+$/)
+  const pendingBadge = page.locator('[aria-label$="条待处理异常"]')
+  const pendingBadgeCount = await pendingBadge.count()
+  expect(pendingBadgeCount).toBeLessThanOrEqual(1)
+  if (pendingBadgeCount === 1) await expect(pendingBadge).toHaveText(/^\d+$/)
 
   const layout = await page.evaluate(() => {
     const documentOverflow = document.documentElement.scrollWidth - window.innerWidth
@@ -185,36 +212,40 @@ test.afterEach(async ({ page }) => {
 })
 
 const primaryRoutes = [
-  ["records", "异常记录"],
-  ["anomaly-groups", "异常记录组"],
-  ["rules", "异常规则"],
-  ["datasets", "数据集"],
-  ["datasources", "数据源"],
-  ["overview", "总览"],
-  ["tests", "系统测试"],
-  ["accounts", "账号管理"],
-  ["account", "个人账号"],
+  { route: "records", heading: "异常记录", loaded: (page: Page) => page.getByRole("button", { name: "查看 rec-1 详情" }) },
+  { route: "anomaly-groups", heading: "异常记录组", loaded: (page: Page) => page.getByRole("button", { name: "查看 订单金额监控 记录组" }) },
+  { route: "rules", heading: "异常规则", loaded: (page: Page) => page.getByRole("button", { name: "订单金额监控", exact: true }) },
+  { route: "datasets", heading: "数据集", loaded: (page: Page) => page.getByRole("button", { name: "编辑 订单" }) },
+  { route: "datasources", heading: "数据源", loaded: (page: Page) => page.getByRole("button", { name: "测试 生产库" }) },
+  { route: "overview", heading: "总览", loaded: (page: Page) => page.getByText("高风险未解决 1") },
+  { route: "tests", heading: "系统测试", loaded: (page: Page) => page.getByRole("button", { name: "发送测试消息" }) },
+  { route: "accounts", heading: "账号管理", loaded: (page: Page) => page.getByRole("button", { name: "编辑 管理员" }) },
+  { route: "account", heading: "个人账号", loaded: (page: Page) => page.getByLabel("显示名称"), value: "管理员" },
 ] as const
 
-for (const [route, heading] of primaryRoutes) {
+for (const routeCase of primaryRoutes) {
+  const { route, heading, loaded } = routeCase
   test(`keeps the ${route} route accessible and within the viewport`, async ({ page }) => {
     await page.goto(`/#${route}`)
     await expect(page.getByRole("heading", { name: heading, exact: true })).toBeVisible()
+    if ("value" in routeCase) await expect(loaded(page)).toHaveValue(routeCase.value)
+    else await expect(loaded(page)).toBeVisible()
     await assertRouteHealth(page)
   })
 }
 
 test("supports record, group, rule and dataset deep links", async ({ page }) => {
   const deepLinks = [
-    ["records/rec-1", "异常记录详情"],
-    ["anomaly-groups/group-1", "异常记录组详情"],
-    ["rules/rule-1/edit", "编辑异常规则"],
-    ["datasets/ds-1/edit", "编辑数据集"],
+    { route: "records/rec-1", heading: "异常记录详情", loaded: async (page: Page) => { await expect(page.getByRole("heading", { name: "推送诊断" })).toBeVisible(); await expect(page.getByText("通知推送")).toBeVisible() } },
+    { route: "anomaly-groups/group-1", heading: "异常记录组详情", loaded: async (page: Page) => { await expect(page.getByRole("heading", { name: "组内异常记录" })).toBeVisible(); await expect(page.getByText("order_id: ORDER-42")).toBeVisible() } },
+    { route: "rules/rule-1/edit", heading: "编辑异常规则", loaded: async (page: Page) => { await expect(page.getByLabel("描述")).toHaveValue("检查高金额订单") } },
+    { route: "datasets/ds-1/edit", heading: "编辑数据集", loaded: async (page: Page) => { await expect(page.getByLabel("SQL")).toHaveValue("select order_id, amount, reviewer_id from orders") } },
   ] as const
 
-  for (const [route, heading] of deepLinks) {
+  for (const { route, heading, loaded } of deepLinks) {
     await page.goto(`/#${route}`)
     await expect(page.getByRole("heading", { name: heading, exact: true })).toBeVisible()
+    await loaded(page)
     expect(new URL(page.url()).hash).toBe(`#${route}`)
     await assertRouteHealth(page)
   }
@@ -315,12 +346,15 @@ test("redirects regular users away from administrator deep links", async ({ page
   await installApiFixtures(page, analyst)
 
   for (const restrictedRoute of ["tests", "accounts"]) {
+    await page.goto("/#overview")
     await page.goto(`/#${restrictedRoute}`)
     await expect(page).toHaveURL(/#records$/)
     await expect(page.getByRole("heading", { name: "异常记录", exact: true })).toBeVisible()
     await expect(page.getByRole("navigation", { name: "breadcrumb" }).getByRole("link", { name: "异常记录" })).toHaveAttribute("aria-current", "page")
     await expect(page.getByRole("link", { name: /系统测试/ })).toHaveCount(0)
     await expect(page.getByRole("link", { name: /账号管理/ })).toHaveCount(0)
+    await page.goBack()
+    await expect(page).toHaveURL(/#overview$/)
   }
 })
 
@@ -329,8 +363,22 @@ test("keeps interactive overlays compatible with reduced motion", async ({ page 
   await page.goto("/#overview")
   expect(await page.evaluate(() => matchMedia("(prefers-reduced-motion: reduce)").matches)).toBe(true)
   await expect(page.getByRole("heading", { name: "总览", exact: true })).toBeVisible()
+  await expect(page.getByText("高风险未解决 1")).toBeVisible()
 
   const searchTrigger = page.getByRole("button", { name: /搜索规则、数据集|打开全局搜索/ })
+  const durations = await searchTrigger.evaluate((element) => {
+    const maximumMilliseconds = (value: string) => Math.max(...value.split(",").map((part) => {
+      const token = part.trim()
+      return token.endsWith("ms") ? Number.parseFloat(token) : Number.parseFloat(token) * 1000
+    }))
+    const style = getComputedStyle(element)
+    return {
+      animationMilliseconds: maximumMilliseconds(style.animationDuration),
+      transitionMilliseconds: maximumMilliseconds(style.transitionDuration),
+    }
+  })
+  expect(durations.animationMilliseconds).toBeLessThanOrEqual(0.02)
+  expect(durations.transitionMilliseconds).toBeLessThanOrEqual(0.02)
   await searchTrigger.click()
   await expect(page.getByPlaceholder("搜索规则、数据集或页面…")).toBeVisible()
   await page.keyboard.press("Escape")
