@@ -15,26 +15,22 @@ const enableRule = vi.fn()
 const removeRule = vi.fn()
 const updateRule = vi.fn()
 
-vi.mock("@/app/context", () => ({
-  useApp: () => ({
-    resources: {
-      rules: { list: listRules, execute: executeRule, sync: syncRule, enable: enableRule, remove: removeRule, update: updateRule, create: vi.fn() },
-      datasets: { list: listDatasets },
-      datasources: { list: listDatasources },
-    },
-  }),
-}))
+vi.mock("@/app/context", () => ({ useApp: () => ({ resources: { rules: { list: listRules, execute: executeRule, sync: syncRule, enable: enableRule, remove: removeRule, update: updateRule, create: vi.fn() }, datasets: { list: listDatasets }, datasources: { list: listDatasources } } }) }))
 
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() } }))
 
 const rules = [
   { id: "rule-1", name: "订单金额监控", description: "检查高金额订单", dataset_id: "ds-1", dataset_name: "订单", severity: "high", logic: "AND", enabled: true, conditions: [{ field: "amount", operator: "gt", value: 100 }], anomaly_key_fields: ["order_id"], repeat_push_enabled: false, schedule: { frequency: "day", interval: 1, time: "09:00", start_date: "2026-08-30" }, notification_targets: [{ receive_id_type: "user_id", source: "literal", value: "owner" }], validation_targets: [], deadline_seconds: 86400, validation_method: "pseudo", group_broadcast: { situation: { enabled: false }, timeout: { enabled: false } }, sync_status: "synced" },
-  { id: "rule-2", name: "库存阈值", description: "检查库存", dataset_id: "ds-2", dataset_name: "库存", severity: "medium", logic: "OR", enabled: false, conditions: [{ field: "stock", operator: "lt", value: 3 }], anomaly_key_fields: ["sku"], schedule: { frequency: "hour", interval: 2, start_date: "2026-08-30" }, notification_targets: [{ receive_id_type: "user_id", source: "literal", value: "owner" }], validation_targets: [], deadline_seconds: 3600, validation_method: "pseudo", group_broadcast: { situation: { enabled: false }, timeout: { enabled: false } }, sync_status: "pending" },
+  { id: "rule-2", name: "库存阈值", description: "检查库存", dataset_id: "ds-2", dataset_name: "库存", severity: "medium", logic: "OR", enabled: false, conditions: [{ field: "stock", operator: "lt", value: 3 }], anomaly_key_fields: ["sku"], schedule: { frequency: "hour", interval: 2, start_date: "2026-08-30" }, notification_targets: [{ receive_id_type: "user_id", source: "literal", value: "owner" }], validation_targets: [], deadline_seconds: 3600, validation_method: "pseudo", group_broadcast: { situation: { enabled: false }, timeout: { enabled: false } }, sync_status: "pending" }
 ]
 
 function renderPage(node: React.ReactNode) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  return render(<QueryClientProvider client={client}><TooltipProvider>{node}</TooltipProvider></QueryClientProvider>)
+  return render(
+    <QueryClientProvider client={client}>
+      <TooltipProvider>{node}</TooltipProvider>
+    </QueryClientProvider>
+  )
 }
 
 describe("rule pages", () => {
@@ -42,15 +38,47 @@ describe("rule pages", () => {
     vi.clearAllMocks()
     listRules.mockResolvedValue(rules)
     listDatasets.mockResolvedValue([
-      { id: "ds-1", name: "订单", datasource_id: "source-1", sql: "select * from orders", fields: [{ name: "order_id", type: "VARCHAR" }, { name: "amount", type: "DECIMAL" }, { name: "limit", type: "DECIMAL" }, { name: "reviewer_id", type: "VARCHAR" }] },
-      { id: "ds-2", name: "库存", datasource_id: "source-1", sql: "select * from stock", fields: [{ name: "sku", type: "VARCHAR" }, { name: "stock", type: "INTEGER" }] },
+      {
+        id: "ds-1",
+        name: "订单",
+        datasource_id: "source-1",
+        sql: "select * from orders",
+        fields: [
+          { name: "order_id", type: "VARCHAR" },
+          { name: "amount", type: "DECIMAL" },
+          { name: "limit", type: "DECIMAL" },
+          { name: "reviewer_id", type: "VARCHAR" }
+        ]
+      },
+      {
+        id: "ds-2",
+        name: "库存",
+        datasource_id: "source-1",
+        sql: "select * from stock",
+        fields: [
+          { name: "sku", type: "VARCHAR" },
+          { name: "stock", type: "INTEGER" }
+        ]
+      }
     ])
     listDatasources.mockResolvedValue([{ id: "source-1", name: "生产库", type: "mysql", host: "db", port: 3306, database: "app", username: "reader", ssl: false }])
   })
 
   it("filters the operational list and keeps pending state scoped to the selected action", async () => {
     let finishExecute: ((value: unknown) => void) | undefined
-    executeRule.mockImplementation(() => new Promise((resolve) => { finishExecute = resolve }))
+    let finishEnable: ((value: unknown) => void) | undefined
+    executeRule.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishExecute = resolve
+        })
+    )
+    enableRule.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishEnable = resolve
+        })
+    )
     renderPage(<RulesPage navigate={vi.fn()} />)
 
     expect(await screen.findByText("规则总数")).toBeInTheDocument()
@@ -71,6 +99,36 @@ describe("rule pages", () => {
     expect(await screen.findByRole("tooltip")).toHaveTextContent("同步调度")
     finishExecute?.({ new_anomalies: 0 })
     await waitFor(() => expect(execute).not.toBeDisabled())
+
+    const toggle = within(row).getByRole("switch", { name: "启用/停用 订单金额监控" })
+    await userEvent.click(toggle)
+    expect(toggle).toBeDisabled()
+    expect(enableRule).toHaveBeenCalledWith("rule-1", false)
+    finishEnable?.({ ...rules[0], enabled: false })
+    await waitFor(() => expect(toggle).not.toBeDisabled())
+  })
+
+  it("deletes only after confirmation", async () => {
+    removeRule.mockResolvedValue(undefined)
+    renderPage(<RulesPage navigate={vi.fn()} />)
+
+    const row = await screen.findByRole("row", { name: /订单金额监控/ })
+    await userEvent.click(within(row).getByRole("button", { name: "删除 订单金额监控" }))
+    await userEvent.click(await screen.findByRole("button", { name: "确认删除" }))
+
+    await waitFor(() => expect(removeRule).toHaveBeenCalledWith("rule-1"))
+  })
+
+  it("localizes every current rule synchronization status", async () => {
+    listRules.mockResolvedValue([rules[0], rules[1], { ...rules[0], id: "rule-3", name: "同步异常规则", sync_status: "sync_error", sync_error: "调度服务不可用" }])
+
+    renderPage(<RulesPage navigate={vi.fn()} />)
+
+    expect(await screen.findByText("已同步")).toBeInTheDocument()
+    expect(screen.getAllByText("待同步").length).toBeGreaterThan(0)
+    expect(screen.getByText("同步失败")).toBeInTheDocument()
+    expect(screen.queryByText("synced")).not.toBeInTheDocument()
+    expect(screen.queryByText("sync_error")).not.toBeInTheDocument()
   })
 
   it("opens the owning tab and focuses the first invalid condition field", async () => {
@@ -116,5 +174,91 @@ describe("rule pages", () => {
     await userEvent.type(input, "alpha, beta")
 
     expect(input).toHaveValue("alpha, beta")
+  })
+
+  it("rejects a nonnumeric literal for a numeric comparison and focuses its input", async () => {
+    renderPage(<RuleEditorPage id="rule-1" navigate={vi.fn()} />)
+    await screen.findByRole("heading", { name: "编辑异常规则" })
+    await userEvent.click(screen.getByRole("tab", { name: "2 触发条件" }))
+    const operand = screen.getByLabelText("条件 1 比较值")
+    await userEvent.clear(operand)
+    await userEvent.type(operand, "not-a-number")
+
+    await userEvent.click(screen.getByRole("button", { name: "保存规则" }))
+
+    expect(await screen.findByText("当前运算符需要数值比较值")).toBeInTheDocument()
+    await waitFor(() => expect(operand).toHaveFocus())
+    expect(updateRule).not.toHaveBeenCalled()
+  })
+
+  it("rejects an incomplete Markdown link and focuses the private template", async () => {
+    renderPage(<RuleEditorPage id="rule-1" navigate={vi.fn()} />)
+    await screen.findByRole("heading", { name: "编辑异常规则" })
+    await userEvent.click(screen.getByRole("tab", { name: "6 私聊通知" }))
+    const template = screen.getByLabelText("私聊消息模板")
+    fireEvent.change(template, { target: { value: "[查看说明](" } })
+
+    await userEvent.click(screen.getByRole("button", { name: "保存规则" }))
+
+    expect(await screen.findByText("超链接格式不完整")).toBeInTheDocument()
+    await waitFor(() => expect(template).toHaveFocus())
+    expect(updateRule).not.toHaveBeenCalled()
+  })
+
+  it("rejects a non-Feishu webhook and focuses the broadcast input", async () => {
+    renderPage(<RuleEditorPage id="rule-1" navigate={vi.fn()} />)
+    await screen.findByRole("heading", { name: "编辑异常规则" })
+    await userEvent.click(screen.getByRole("tab", { name: "7 群广播" }))
+    const webhook = screen.getByLabelText("群机器人 Webhook")
+    await userEvent.type(webhook, "https://example.com/hook")
+
+    await userEvent.click(screen.getByRole("button", { name: "保存规则" }))
+
+    expect(await screen.findByText("群机器人 webhook 必须是飞书官方 HTTPS 地址")).toBeInTheDocument()
+    await waitFor(() => expect(webhook).toHaveFocus())
+    expect(updateRule).not.toHaveBeenCalled()
+  })
+
+  it("keeps an incomplete notification field row visible and focuses its inline error", async () => {
+    renderPage(<RuleEditorPage id="rule-1" navigate={vi.fn()} />)
+    await screen.findByRole("heading", { name: "编辑异常规则" })
+    await userEvent.click(screen.getByRole("tab", { name: "6 私聊通知" }))
+    await userEvent.click(screen.getByRole("button", { name: "添加字段目标" }))
+
+    await userEvent.click(screen.getByRole("button", { name: "保存规则" }))
+
+    const row = screen.getByTestId("notification-target-row-1")
+    expect(within(row).getByText("字段目标需要选择字段")).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByLabelText("字段目标 1 字段")).toHaveFocus())
+    expect(updateRule).not.toHaveBeenCalled()
+  })
+
+  it("keeps an incomplete validation literal target visible and focuses its input", async () => {
+    listRules.mockResolvedValue([{ ...rules[0], validation_targets: [{ source: "literal", value: "" }] }])
+    renderPage(<RuleEditorPage id="rule-1" navigate={vi.fn()} />)
+    await screen.findByRole("heading", { name: "编辑异常规则" })
+
+    await userEvent.click(screen.getByRole("button", { name: "保存规则" }))
+
+    const tab = screen.getByRole("tab", { name: "5 实时校验" })
+    await waitFor(() => expect(tab).toHaveAttribute("data-state", "active"))
+    expect(screen.getByText("固定验证目标需要填写 value")).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByLabelText("固定验证 user_id")).toHaveFocus())
+    expect(updateRule).not.toHaveBeenCalled()
+  })
+
+  it("keeps an incomplete broadcast field target visible and focuses its row", async () => {
+    listRules.mockResolvedValue([{ ...rules[0], group_broadcast: { situation: { enabled: false, mention_targets: [{ source: "field", field: "" }] }, timeout: { enabled: false, mention_targets: [] } } }])
+    renderPage(<RuleEditorPage id="rule-1" navigate={vi.fn()} />)
+    await screen.findByRole("heading", { name: "编辑异常规则" })
+
+    await userEvent.click(screen.getByRole("button", { name: "保存规则" }))
+
+    const tab = screen.getByRole("tab", { name: "7 群广播" })
+    await waitFor(() => expect(tab).toHaveAttribute("data-state", "active"))
+    const row = screen.getByTestId("situation-target-row-0")
+    expect(within(row).getByText("字段 @ 目标需要选择字段")).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByLabelText("异常情况播报字段目标 1")).toHaveFocus())
+    expect(updateRule).not.toHaveBeenCalled()
   })
 })

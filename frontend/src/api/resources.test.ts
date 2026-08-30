@@ -131,6 +131,26 @@ describe("API resource mappings", () => {
     })
   })
 
+  it("does not silently discard incomplete configured target rows", () => {
+    const model = ruleToEditorModel({
+      id: "r-targets", name: "目标草稿", dataset_id: "ds-1", severity: "medium", logic: "AND", enabled: false,
+      conditions: [{ field: "amount", operator: "gt", value: 1 }], anomaly_key_fields: ["order_id"],
+      schedule: { frequency: "day", interval: 1, time: "09:00", start_date: "2026-08-30" },
+      notification_targets: [{ receive_id_type: "user_id", source: "field", field: "" }],
+      validation_targets: [{ source: "literal", value: "" }],
+      group_broadcast: { situation: { enabled: false, mention_targets: [{ source: "field", field: "" }] }, timeout: { enabled: false, mention_targets: [{ source: "literal", value: "" }] } },
+    })
+
+    const payload = rulePayload(model)
+
+    expect(payload.notification_targets).toEqual([{ receive_id_type: "user_id", source: "field", field: "" }])
+    expect(payload.validation_targets).toEqual([{ source: "literal", value: "" }])
+    expect(payload.group_broadcast).toMatchObject({
+      situation: { mention_targets: [{ source: "field", field: "" }] },
+      timeout: { mention_targets: [{ source: "literal", value: "" }] },
+    })
+  })
+
   it("loads the actual pending record count through the paginated anomalies endpoint", async () => {
     const client = new ApiClient()
     vi.spyOn(client, "request").mockResolvedValue({ items: [], total: 3, page: 1, page_size: 1 })
