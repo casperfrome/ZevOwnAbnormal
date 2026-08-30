@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest"
 
 import { ApiClient } from "./client"
 import type { Rule } from "./types"
-import { createResources, datasourceUpdatePayload, mapAnomalyGroup, mapBroadcastDelivery, mapOverview, mapRecord, mapRecordDetail, recordQuery, rulePayload, ruleToEditorModel } from "./resources"
+import { createResources, datasourceUpdatePayload, mapAnomalyGroup, mapBroadcastDelivery, mapDatasetExecution, mapOverview, mapRecord, mapRecordDetail, recordQuery, rulePayload, ruleToEditorModel } from "./resources"
 
 describe("API resource mappings", () => {
   it("encodes record filters and repeated ids", () => {
@@ -63,6 +63,22 @@ describe("API resource mappings", () => {
     expect(detail).toMatchObject({ id: "a1", business_key: { order_id: "A-42" }, data: { amount: 9 }, validation_requests: [{ status: "sent" }] })
     expect(mapBroadcastDelivery({ id: "d1", broadcast_kind: "timeout", status: "failed", error_message: "network" })).toMatchObject({ id: "d1", kind: "timeout", status: "failed", error: "network" })
     expect(mapOverview({ stats: { pending_records: 4 }, recent_anomalies: [{ id: "a1" }] })).toMatchObject({ stats: { pending_records: 4 }, recent_anomalies: [{ id: "a1" }] })
+  })
+
+  it("normalizes the backend trend and dataset execution field contracts", () => {
+    expect(mapOverview({ days: 7, timezone: "Asia/Shanghai", trend: [{ date: "2026-08-30", count: 2 }] })).toMatchObject({
+      days: 7,
+      timezone: "Asia/Shanghai",
+      trend: [{ date: "2026-08-30", count: 2 }],
+    })
+    expect(mapDatasetExecution({ fields: [{ name: "order_id", type: "VARCHAR" }, { name: "amount", type: "DECIMAL" }], rows: [["A-1", 9]], row_count: 1, elapsed_ms: 3 })).toEqual({
+      fields: [{ name: "order_id", type: "VARCHAR" }, { name: "amount", type: "DECIMAL" }],
+      columns: ["order_id", "amount"],
+      rows: [["A-1", 9]],
+      row_count: 1,
+      elapsed_ms: 3,
+      duration_ms: 3,
+    })
   })
 
   it("keeps push-job diagnostics distinct from notification deliveries", () => {

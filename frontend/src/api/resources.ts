@@ -87,7 +87,14 @@ export function mapAnomalyGroup(value: Record<string, unknown>): AnomalyGroup {
 }
 
 export function mapOverview(value: Record<string, unknown>): Overview {
-  return { ...value, stats: records(value.stats) as Record<string, number>, trends: Array.isArray(value.trends) ? value.trends.map(records) : [], severity_distribution: Array.isArray(value.severity_distribution) ? value.severity_distribution.map(records) : [], recent_anomalies: Array.isArray(value.recent_anomalies) ? value.recent_anomalies.map(records).map(mapRecord) : [], top_rules: Array.isArray(value.top_rules) ? value.top_rules.map(records) : [] }
+  const rawTrend = Array.isArray(value.trend) ? value.trend : Array.isArray(value.trends) ? value.trends : []
+  return { ...value, stats: records(value.stats) as Record<string, number>, trend: rawTrend.map((item) => ({ date: String(records(item).date ?? ""), count: Number(records(item).count ?? 0) })), trends: Array.isArray(value.trends) ? value.trends.map(records) : [], severity_distribution: Array.isArray(value.severity_distribution) ? value.severity_distribution.map(records) : [], recent_anomalies: Array.isArray(value.recent_anomalies) ? value.recent_anomalies.map(records).map(mapRecord) : [], top_rules: Array.isArray(value.top_rules) ? value.top_rules.map(records) : [] }
+}
+
+export function mapDatasetExecution(value: Record<string, unknown>): DatasetExecution {
+  const fields = Array.isArray(value.fields) ? value.fields.map((field) => ({ name: String(records(field).name ?? ""), type: typeof records(field).type === "string" ? String(records(field).type) : undefined })) : []
+  const columns = Array.isArray(value.columns) ? value.columns.map(String) : fields.map((field) => field.name)
+  return { ...value, fields, columns, rows: Array.isArray(value.rows) ? value.rows as DatasetExecution["rows"] : [], row_count: Number(value.row_count ?? 0), elapsed_ms: Number(value.elapsed_ms ?? value.duration_ms ?? 0), duration_ms: Number(value.duration_ms ?? value.elapsed_ms ?? 0) }
 }
 
 export function ruleToEditorModel(rule: Rule): RuleEditorModel {
@@ -151,8 +158,8 @@ export function createResources(client: ApiClient) {
       create: (data: DatasetInput) => client.request<Dataset>("/datasets", { method: "POST", body: datasetPayload(data) }),
       update: (id: string, data: DatasetInput) => client.request<Dataset>(`/datasets/${id}`, { method: "PATCH", body: datasetPayload(data) }),
       remove: (id: string) => client.request<void>(`/datasets/${id}`, { method: "DELETE" }),
-      execute: (id: string) => client.request<DatasetExecution>(`/datasets/${id}/execute`, { method: "POST" }),
-      preview: (datasource_id: string, sql: string) => client.request<DatasetExecution>("/datasets/execute", { method: "POST", body: { datasource_id, sql } }),
+      execute: async (id: string) => mapDatasetExecution(await client.request<Record<string, unknown>>(`/datasets/${id}/execute`, { method: "POST" })),
+      preview: async (datasource_id: string, sql: string) => mapDatasetExecution(await client.request<Record<string, unknown>>("/datasets/execute", { method: "POST", body: { datasource_id, sql } })),
       validate: (sql: string) => client.request<Record<string, unknown>>("/datasets/validate", { method: "POST", body: { sql } }),
     },
     rules: {

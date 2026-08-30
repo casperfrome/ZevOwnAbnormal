@@ -6,6 +6,12 @@ describe("format helpers", () => {
     expect(csvText([{ name: "a,b", note: "x\"y\nz" }])).toBe('\uFEFFname,note\r\n"a,b","x""y\nz"')
   })
 
+  it("neutralizes spreadsheet formulas without corrupting negative numbers", () => {
+    expect(csvText([{ formula: "=SUM(1,2)", command: "\t +cmd", debit: -7 }])).toBe(
+      '\uFEFFformula,command,debit\r\n"\'=SUM(1,2)",\'\t +cmd,-7',
+    )
+  })
+
   it("formats absent dates consistently", () => {
     expect(formatDateTime()).toBe("—")
   })

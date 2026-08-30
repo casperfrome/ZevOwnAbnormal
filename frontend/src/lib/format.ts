@@ -8,7 +8,8 @@ export function formatDateTime(value?: string | number | Date) {
 export function csvText(rows: Array<Record<string, unknown>>) {
   const columns = [...new Set(rows.flatMap((row) => Object.keys(row)))]
   const escape = (value: unknown) => {
-    const text = value == null ? "" : typeof value === "object" ? JSON.stringify(value) : String(value)
+    const raw = value == null ? "" : typeof value === "object" ? JSON.stringify(value) : String(value)
+    const text = typeof value === "string" && /^[=+\-@\t\r]/.test(raw) ? `'${raw}` : raw
     return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text
   }
   return `\uFEFF${[columns.join(","), ...rows.map((row) => columns.map((column) => escape(row[column])).join(","))].join("\r\n")}`
