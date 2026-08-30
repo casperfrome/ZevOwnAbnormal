@@ -14,8 +14,9 @@ const syncRule = vi.fn()
 const enableRule = vi.fn()
 const removeRule = vi.fn()
 const updateRule = vi.fn()
+const capability = vi.hoisted(() => ({ canManage: true }))
 
-vi.mock("@/app/context", () => ({ useApp: () => ({ resources: { rules: { list: listRules, execute: executeRule, sync: syncRule, enable: enableRule, remove: removeRule, update: updateRule, create: vi.fn() }, datasets: { list: listDatasets }, datasources: { list: listDatasources } } }) }))
+vi.mock("@/app/context", () => ({ useApp: () => ({ resources: { rules: { list: listRules, execute: executeRule, sync: syncRule, enable: enableRule, remove: removeRule, update: updateRule, create: vi.fn() }, datasets: { list: listDatasets }, datasources: { list: listDatasources } }, canManage: capability.canManage }) }))
 
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() } }))
 
@@ -36,6 +37,7 @@ function renderPage(node: React.ReactNode) {
 describe("rule pages", () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    capability.canManage = true
     listRules.mockResolvedValue(rules)
     listDatasets.mockResolvedValue([
       {
@@ -86,7 +88,7 @@ describe("rule pages", () => {
     const search = screen.getByRole("searchbox", { name: "搜索异常规则" })
     fireEvent.change(search, { target: { value: "库存" } })
     expect(screen.queryByText("订单金额监控")).not.toBeInTheDocument()
-    expect(screen.getByText("库存阈值")).toBeInTheDocument()
+    expect(screen.getAllByText("库存阈值").length).toBeGreaterThan(0)
     fireEvent.change(search, { target: { value: "" } })
 
     const row = screen.getByRole("row", { name: /订单金额监控/ })
@@ -106,6 +108,38 @@ describe("rule pages", () => {
     expect(enableRule).toHaveBeenCalledWith("rule-1", false)
     finishEnable?.({ ...rules[0], enabled: false })
     await waitFor(() => expect(toggle).not.toBeDisabled())
+  })
+
+  it("keeps the rule list readable while hiding every write control from an analyst", async () => {
+    capability.canManage = false
+    renderPage(<RulesPage navigate={vi.fn()} />)
+
+    expect((await screen.findAllByText("订单金额监控")).length).toBeGreaterThan(0)
+    expect(screen.getAllByText("检查高金额订单").length).toBeGreaterThan(0)
+    expect(screen.queryByRole("button", { name: "新建规则" })).not.toBeInTheDocument()
+    expect(screen.queryByRole("switch", { name: "启用/停用 订单金额监控" })).not.toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: "立即执行 订单金额监控" })).not.toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: "同步调度 订单金额监控" })).not.toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: "编辑 订单金额监控" })).not.toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: "删除 订单金额监控" })).not.toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: /^订单金额监控$/ })).not.toBeInTheDocument()
+  })
+
+  it("offers readable mobile rule cards with reachable management actions", async () => {
+    renderPage(<RulesPage navigate={vi.fn()} />)
+    const cards = await screen.findByRole("region", { name: "规则卡片列表" })
+    expect(within(cards).getByText("订单金额监控")).toBeInTheDocument()
+    expect(within(cards).getByText("每日 09:00")).toBeInTheDocument()
+    expect(within(cards).getByRole("button", { name: "立即执行 订单金额监控" })).toBeInTheDocument()
+  })
+
+  it("restores focus to the rule delete button after cancellation", async () => {
+    renderPage(<RulesPage navigate={vi.fn()} />)
+    const row = await screen.findByRole("row", { name: /订单金额监控/ })
+    const remove = within(row).getByRole("button", { name: "删除 订单金额监控" })
+    await userEvent.click(remove)
+    await userEvent.click(await screen.findByRole("button", { name: "取消" }))
+    await waitFor(() => expect(remove).toHaveFocus())
   })
 
   it("guards duplicate synchronization while leaving unrelated rule actions available", async () => {
@@ -156,11 +190,46 @@ describe("rule pages", () => {
 
     renderPage(<RulesPage navigate={vi.fn()} />)
 
-    expect(await screen.findByText("已同步")).toBeInTheDocument()
+    expect((await screen.findAllByText("已同步")).length).toBeGreaterThan(0)
     expect(screen.getAllByText("待同步").length).toBeGreaterThan(0)
-    expect(screen.getByText("同步失败")).toBeInTheDocument()
+    expect(screen.getAllByText("同步失败").length).toBeGreaterThan(0)
     expect(screen.queryByText("synced")).not.toBeInTheDocument()
     expect(screen.queryByText("sync_error")).not.toBeInTheDocument()
+  })
+
+  it("replaces all editor ownership when navigating directly from rule A to rule B", async () => {
+    const navigate = vi.fn()
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
+    const view = render(<QueryClientProvider client={client}><TooltipProvider><RuleEditorPage id="rule-1" navigate={navigate} /></TooltipProvider></QueryClientProvider>)
+
+    await screen.findByRole("heading", { name: "编辑异常规则" })
+    fireEvent.change(screen.getByLabelText("规则名称"), { target: { value: "规则 A 未保存草稿" } })
+    await userEvent.click(screen.getByLabelText("关联数据集"))
+    await userEvent.click(await screen.findByRole("option", { name: "库存" }))
+    await userEvent.click(screen.getByRole("tab", { name: "2 触发条件" }))
+    await userEvent.click(screen.getByRole("button", { name: "保存规则" }))
+    expect(await screen.findByText("请选择有效的条件字段")).toBeInTheDocument()
+    view.rerender(<QueryClientProvider client={client}><TooltipProvider><RuleEditorPage id="rule-2" navigate={navigate} /></TooltipProvider></QueryClientProvider>)
+
+    await waitFor(() => expect(screen.getByLabelText("规则名称")).toHaveValue("库存阈值"))
+    expect(screen.getByRole("tab", { name: "1 基本信息" })).toHaveAttribute("data-state", "active")
+    expect(screen.queryByText("请选择有效的条件字段")).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole("button", { name: "保存规则" }))
+    await waitFor(() => expect(updateRule).toHaveBeenCalledWith("rule-2", expect.objectContaining({ name: "库存阈值", datasetId: "ds-2" })))
+  })
+
+  it.each([
+    ["规则", listRules],
+    ["数据集", listDatasets],
+    ["数据源", listDatasources],
+  ])("shows a retryable error when the %s query fails", async (label, queryMock) => {
+    queryMock.mockRejectedValueOnce(new Error(`${label}加载失败`))
+    renderPage(<RuleEditorPage id="rule-1" navigate={vi.fn()} />)
+
+    expect(await screen.findByText(`${label}加载失败`)).toBeInTheDocument()
+    expect(screen.queryByText("未找到该规则")).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole("button", { name: "重试" }))
+    expect(await screen.findByRole("heading", { name: "编辑异常规则" })).toBeInTheDocument()
   })
 
   it("opens the owning tab and focuses the first invalid condition field", async () => {

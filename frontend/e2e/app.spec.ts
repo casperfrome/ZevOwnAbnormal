@@ -314,12 +314,12 @@ test.afterEach(async ({ page }) => {
 const primaryRoutes = [
   { route: "records", heading: "异常记录", loaded: (page: Page) => page.getByRole("button", { name: "查看 rec-1 详情" }) },
   { route: "anomaly-groups", heading: "异常记录组", loaded: (page: Page) => page.getByRole("button", { name: "查看 订单金额监控 记录组" }) },
-  { route: "rules", heading: "异常规则", loaded: (page: Page) => page.getByRole("button", { name: "订单金额监控", exact: true }) },
-  { route: "datasets", heading: "数据集", loaded: (page: Page) => page.getByRole("button", { name: "编辑 订单" }) },
-  { route: "datasources", heading: "数据源", loaded: (page: Page) => page.getByRole("button", { name: "测试 生产库" }) },
+  { route: "rules", heading: "异常规则", loaded: (page: Page) => page.locator('button:visible, [data-slot="card-title"]:visible').filter({ hasText: "订单金额监控" }).first() },
+  { route: "datasets", heading: "数据集", loaded: (page: Page) => page.locator('button[aria-label="编辑 订单"]:visible') },
+  { route: "datasources", heading: "数据源", loaded: (page: Page) => page.locator('button[aria-label="测试 生产库"]:visible') },
   { route: "overview", heading: "总览", loaded: (page: Page) => page.getByText("高风险未解决 1") },
   { route: "tests", heading: "系统测试", loaded: (page: Page) => page.getByRole("button", { name: "发送测试消息" }) },
-  { route: "accounts", heading: "账号管理", loaded: (page: Page) => page.getByRole("button", { name: "编辑 管理员" }) },
+  { route: "accounts", heading: "账号管理", loaded: (page: Page) => page.locator('button[aria-label="编辑 管理员"]:visible') },
   { route: "account", heading: "个人账号", loaded: (page: Page) => page.getByLabel("显示名称"), value: "管理员" },
 ] as const
 
@@ -387,7 +387,8 @@ test("restores focus when Escape closes record details and global search", async
   await expect(page.getByRole("heading", { name: "编辑异常规则" })).toBeVisible()
 })
 
-test("keeps each rule switch aligned with its rule title", async ({ page }) => {
+test("keeps each rule switch aligned with its rule title", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name === "mobile", "Mobile rules use card actions")
   await page.goto("/#rules")
   const ruleRow = page.getByRole("row").filter({ hasText: "订单金额监控" })
   const switchBox = await ruleRow.getByRole("switch", { name: "启用/停用 订单金额监控" }).boundingBox()
@@ -426,7 +427,8 @@ test("keeps readable record operations in both responsive layouts", async ({ pag
   }
 })
 
-test("exposes every rule icon action to hover and keyboard focus", async ({ page }) => {
+test("exposes every rule icon action to hover and keyboard focus", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name === "mobile", "Mobile cards use visible text actions instead of icon-only controls")
   for (const label of ["立即执行 订单金额监控", "同步调度 订单金额监控", "编辑 订单金额监控", "删除 订单金额监控"]) {
     await page.goto("/#rules")
     const action = page.getByRole("button", { name: label })
@@ -439,6 +441,120 @@ test("exposes every rule icon action to hover and keyboard focus", async ({ page
     await action.hover()
     await expect(page.getByRole("tooltip", { name: label })).toBeVisible()
   }
+})
+
+test("uses cards with reachable management actions for every management inventory on Pixel 7", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "mobile", "Responsive card assertions target the Pixel 7 project")
+  const cases = [
+    { route: "rules", region: "规则卡片列表", text: "每日 09:00", action: "立即执行 订单金额监控" },
+    { route: "datasets", region: "数据集卡片列表", text: "生产库", action: "编辑 订单" },
+    { route: "datasources", region: "数据源卡片列表", text: "db.internal:3306", action: "测试 生产库" },
+    { route: "accounts", region: "账号卡片列表", text: "@analyst", action: "重置密码 分析师" },
+  ]
+  for (const item of cases) {
+    await page.goto(`/#${item.route}`)
+    const cards = page.getByRole("region", { name: item.region })
+    await expect(cards).toBeVisible()
+    await expect(cards.getByText(item.text, { exact: false }).first()).toBeVisible()
+    await expect(cards.getByRole("button", { name: item.action })).toBeVisible()
+    await expect(page.getByRole("table")).toBeHidden()
+  }
+})
+
+test("shows hover and focus tooltips for dataset, datasource and account icon actions", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name === "mobile", "Mobile cards expose visible text labels")
+  const cases = [
+    { route: "datasets", labels: ["编辑 订单", "删除 订单"] },
+    { route: "datasources", labels: ["测试 生产库", "编辑 生产库", "删除 生产库"] },
+    { route: "accounts", labels: ["编辑 分析师", "重置密码 分析师", "删除 分析师"] },
+  ]
+  for (const item of cases) {
+    await page.goto(`/#${item.route}`)
+    for (const label of item.labels) {
+      const action = page.locator(`button[aria-label="${label}"]:visible`)
+      await action.focus()
+      await expect(action).toBeFocused()
+      await expect(page.getByRole("tooltip", { name: label })).toBeVisible()
+      await action.evaluate((element) => element.blur())
+      await page.mouse.move(0, 0)
+      await expect(page.getByRole("tooltip", { name: label })).toBeHidden()
+      await action.hover()
+      await expect(page.getByRole("tooltip", { name: label })).toBeVisible()
+    }
+  }
+})
+
+test("restores focus after management sheets and dialogs close", async ({ page }) => {
+  await page.goto("/#anomaly-groups")
+  const groupTrigger = page.locator('[role="button"][aria-label="查看 订单金额监控 记录组"]:visible')
+  await groupTrigger.click()
+  await page.keyboard.press("Escape")
+  await expect(groupTrigger).toBeFocused()
+
+  await page.goto("/#datasources")
+  const datasourceEdit = page.locator('button[aria-label="编辑 生产库"]:visible')
+  await datasourceEdit.click()
+  await page.keyboard.press("Escape")
+  await expect(datasourceEdit).toBeFocused()
+
+  await page.goto("/#accounts")
+  const accountEdit = page.locator('button[aria-label="编辑 分析师"]:visible')
+  await accountEdit.click()
+  await page.keyboard.press("Escape")
+  await expect(accountEdit).toBeFocused()
+  const accountReset = page.locator('button[aria-label="重置密码 分析师"]:visible')
+  await accountReset.click()
+  await page.getByRole("button", { name: "取消" }).click()
+  await expect(accountReset).toBeFocused()
+
+  await page.goto("/#rules")
+  const ruleDelete = page.locator('button[aria-label="删除 订单金额监控"]:visible')
+  await ruleDelete.click()
+  await page.getByRole("button", { name: "取消" }).click()
+  await expect(ruleDelete).toBeFocused()
+})
+
+test("keeps analyst records, rules, datasets and datasources readable but immutable", async ({ page }, testInfo) => {
+  await page.unroute("**/api/v1/**")
+  await installApiFixtures(page, analyst)
+
+  await page.goto("/#records/rec-1")
+  await expect(page.getByRole("heading", { name: "异常记录详情" })).toBeVisible()
+  await expect(page.getByRole("dialog").getByText("order_id: ORDER-42").first()).toBeVisible()
+  await expect(page.getByRole("button", { name: "处理中" })).toHaveCount(0)
+  await expect(page.getByRole("button", { name: "已解决" })).toHaveCount(0)
+
+  await page.goto("/#rules")
+  const rulesSurface = testInfo.project.name === "mobile" ? page.getByRole("region", { name: "规则卡片列表" }) : page.locator("table:visible")
+  await expect(rulesSurface.getByText("订单金额监控", { exact: true }).first()).toBeVisible()
+  await expect(page.getByRole("button", { name: "新建规则" })).toHaveCount(0)
+  await expect(page.getByRole("button", { name: "立即执行 订单金额监控" })).toHaveCount(0)
+  await expect(page.getByRole("button", { name: "编辑 订单金额监控" })).toHaveCount(0)
+
+  await page.goto("/#datasets")
+  const datasetsSurface = testInfo.project.name === "mobile" ? page.getByRole("region", { name: "数据集卡片列表" }) : page.locator("table:visible")
+  await expect(datasetsSurface.getByText("订单", { exact: true }).first()).toBeVisible()
+  await expect(page.getByRole("button", { name: "新建数据集" })).toHaveCount(0)
+  await expect(page.getByRole("button", { name: "编辑 订单" })).toHaveCount(0)
+
+  await page.goto("/#datasources")
+  const datasourcesSurface = testInfo.project.name === "mobile" ? page.getByRole("region", { name: "数据源卡片列表" }) : page.locator("table:visible")
+  await expect(datasourcesSurface.getByText("生产库", { exact: true }).first()).toBeVisible()
+  await expect(page.getByRole("button", { name: "新建数据源" })).toHaveCount(0)
+  await expect(page.getByRole("button", { name: "测试 生产库" })).toHaveCount(0)
+
+  for (const item of [
+    ["rules/new", "rules"], ["rules/rule-1/edit", "rules"],
+    ["datasets/new", "datasets"], ["datasets/ds-1/edit", "datasets"],
+  ]) {
+    await page.goto(`/#${item[0]}`)
+    await expect(page).toHaveURL(new RegExp(`#${item[1]}$`))
+  }
+
+  const searchTrigger = page.getByRole("button", { name: /搜索规则、数据集|打开全局搜索/ })
+  await searchTrigger.click()
+  await page.getByPlaceholder("搜索规则、数据集或页面…").fill("订单金额监控")
+  await expect(page.getByRole("option", { name: /订单金额监控/ })).toHaveCount(0)
 })
 
 test("shows complete record-group summaries and keyboard-reachable members", async ({ page }) => {

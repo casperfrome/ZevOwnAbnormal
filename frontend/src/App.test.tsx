@@ -52,6 +52,45 @@ describe("application shell", () => {
     expect(within(screen.getByRole("navigation", { name: "breadcrumb" })).getByRole("link", { name: "异常记录" })).toHaveAttribute("aria-current", "page")
   })
 
+  it.each([
+    ["rules/new", "#rules", "异常规则"],
+    ["rules/rule-1/edit", "#rules", "异常规则"],
+    ["datasets/new", "#datasets", "数据集"],
+    ["datasets/dataset-1/edit", "#datasets", "数据集"],
+  ])("redirects a regular user from #%s to the read-only %s list", async (restrictedRoute, fallback, heading) => {
+    window.location.hash = `#${restrictedRoute}`
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path.endsWith("/auth/me")) return json({ id: "u2", login_name: "analyst", display_name: "分析师", is_superuser: false })
+      if (path.includes("/anomalies")) return json({ items: [], total: 0, page: 1, page_size: 20 })
+      return json([])
+    }))
+
+    render(<App />)
+
+    expect(await screen.findByRole("heading", { name: heading })).toBeInTheDocument()
+    await waitFor(() => expect(window.location.hash).toBe(fallback))
+    expect(screen.queryByRole("button", { name: /保存规则|保存数据集/ })).not.toBeInTheDocument()
+  })
+
+  it("omits global-search editor results for a regular reader", async () => {
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path.endsWith("/auth/me")) return json({ id: "u2", login_name: "analyst", display_name: "分析师", is_superuser: false })
+      if (path.endsWith("/rules")) return json([{ id: "rule-1", name: "仅管理员可编辑规则" }])
+      if (path.endsWith("/datasets")) return json([{ id: "dataset-1", name: "仅管理员可编辑数据集" }])
+      if (path.includes("/anomalies")) return json({ items: [], total: 0, page: 1, page_size: 20 })
+      return json({ stats: {} })
+    }))
+    render(<App />)
+
+    await screen.findByText("分析师")
+    await userEvent.click(screen.getByRole("button", { name: /搜索规则、数据集/ }))
+    expect(await screen.findByPlaceholderText("搜索规则、数据集或页面…")).toBeInTheDocument()
+    expect(screen.queryByText("仅管理员可编辑规则")).not.toBeInTheDocument()
+    expect(screen.queryByText("仅管理员可编辑数据集")).not.toBeInTheDocument()
+  })
+
   it("shows a numeric pending-record badge when the count is positive", async () => {
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
       const path = String(input)
@@ -91,12 +130,14 @@ describe("application shell", () => {
     expect(await screen.findByRole("tooltip", { name: "打开全局搜索" })).toBeInTheDocument()
   })
 
-  it("renders Chinese labels for current delivery statuses", () => {
-    render(<div>{["in_transit", "waiting", "waiting_delivery", "none", "partial_failed"].map((value) => <StatusBadge key={value} value={value} />)}</div>)
-    expect(screen.getByText("传输中")).toBeInTheDocument()
-    expect(screen.getByText("等待处理")).toBeInTheDocument()
-    expect(screen.getByText("等待投递")).toBeInTheDocument()
-    expect(screen.getByText("未推送")).toBeInTheDocument()
-    expect(screen.getByText("部分失败")).toBeInTheDocument()
+  it.each([
+    ["pending_publish", "待发布"], ["publishing", "发布中"], ["kafka_queued", "已进入消息队列"],
+    ["dispatching", "调度中"], ["ds_scheduled", "已提交调度"], ["executing", "执行中"],
+    ["running", "运行中"], ["success", "成功"], ["completed", "已完成"], ["scheduled", "已调度"],
+    ["update_failed", "状态回写失败"], ["in_transit", "传输中"], ["waiting", "等待处理"],
+    ["waiting_delivery", "等待投递"], ["none", "未推送"], ["partial_failed", "部分失败"],
+  ])("renders the current backend status %s as %s", (value, label) => {
+    render(<StatusBadge value={value} />)
+    expect(screen.getByText(label)).toBeInTheDocument()
   })
 })

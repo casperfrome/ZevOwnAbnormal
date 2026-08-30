@@ -7,7 +7,7 @@ import { ruleToEditorModel } from "@/api/resources"
 import { useApp } from "@/app/context"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from "@/components/ui/alert-dialog"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel, FieldLegend, FieldSet } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
@@ -129,8 +129,13 @@ function IconAction({ label, pending, children, onClick }: { label: string; pend
   )
 }
 
+function RuleDeleteAction({ rule, pending, mobile = false, onDelete }: { rule: Rule; pending: boolean; mobile?: boolean; onDelete: () => void }) {
+  const button = <Button variant={mobile ? "outline" : "ghost"} size={mobile ? "sm" : "icon-sm"} aria-label={`删除 ${rule.name}`} disabled={pending}><Trash2 {...(mobile ? { "data-icon": "inline-start" } : {})} />{mobile && "删除"}</Button>
+  return <AlertDialog>{mobile ? <AlertDialogTrigger asChild>{button}</AlertDialogTrigger> : <IconTooltip label={`删除 ${rule.name}`}><AlertDialogTrigger asChild>{button}</AlertDialogTrigger></IconTooltip>}<AlertDialogContent><AlertDialogHeader><AlertDialogTitle>删除“{rule.name}”？</AlertDialogTitle><AlertDialogDescription>历史异常不会删除，但该规则将不再执行。</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>取消</AlertDialogCancel><AlertDialogAction disabled={pending} onClick={onDelete}>确认删除</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
+}
+
 export function RulesPage({ navigate }: { navigate: (hash: string) => void }) {
-  const { resources } = useApp()
+  const { resources, canManage } = useApp()
   const client = useQueryClient()
   const query = useQuery({ queryKey: ["rules"], queryFn: ({ signal }) => resources.rules.list(signal) })
   const [search, setSearch] = useState("")
@@ -176,10 +181,10 @@ export function RulesPage({ navigate }: { navigate: (hash: string) => void }) {
               {pending.has("refresh:all") ? <Spinner data-icon="inline-start" /> : <RefreshCw data-icon="inline-start" />}
               刷新
             </Button>
-            <Button onClick={() => navigate("#rules/new")}>
+            {canManage && <Button onClick={() => navigate("#rules/new")}>
               <Plus data-icon="inline-start" />
               新建规则
-            </Button>
+            </Button>}
           </>
         }
       />
@@ -208,9 +213,9 @@ export function RulesPage({ navigate }: { navigate: (hash: string) => void }) {
             </CardHeader>
             <CardContent className="p-0">
               {!filtered.length ? (
-                <EmptyState title={rules.length ? "没有匹配的规则" : "还没有异常规则"} description={rules.length ? "调整搜索内容后重试。" : "创建第一条规则以开始监控。"} action={!rules.length ? <Button onClick={() => navigate("#rules/new")}>新建规则</Button> : undefined} />
+                <EmptyState title={rules.length ? "没有匹配的规则" : "还没有异常规则"} description={rules.length ? "调整搜索内容后重试。" : canManage ? "创建第一条规则以开始监控。" : "当前没有可查看的异常规则。"} action={canManage && !rules.length ? <Button onClick={() => navigate("#rules/new")}>新建规则</Button> : undefined} />
               ) : (
-                <div className="overflow-x-auto">
+                <><div className="grid gap-3 px-4 pb-4 lg:hidden" role="region" aria-label="规则卡片列表">{filtered.map((rule) => <Card key={rule.id} size="sm"><CardHeader><CardTitle className="flex items-center justify-between gap-2"><span>{rule.name}</span><StatusBadge value={rule.enabled ? "enabled" : "disabled"} /></CardTitle><CardDescription>{rule.description || rule.dataset_name || rule.dataset_id}</CardDescription></CardHeader><CardContent className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs"><span className="text-muted-foreground">数据集</span><span>{rule.dataset_name || rule.dataset_id}</span><span className="text-muted-foreground">级别 / 同步</span><span className="flex gap-1"><StatusBadge value={rule.severity} /><StatusBadge value={(rule.sync_status ?? "pending") === "pending" ? "sync_pending" : rule.sync_status} /></span><span className="text-muted-foreground">调度</span><span>{scheduleSummary(rule.schedule as Record<string, unknown>)}</span><span className="text-muted-foreground">最近执行</span><span>{formatDateTime(rule.last_run as string | undefined)}</span></CardContent>{canManage && <CardFooter className="flex-wrap justify-end gap-2"><Button variant="outline" size="sm" aria-label={`立即执行 ${rule.name}`} disabled={pending.has(pendingKey("execute", rule.id))} onClick={() => run("execute", rule)}><Play data-icon="inline-start" />执行</Button><Button variant="outline" size="sm" aria-label={`同步调度 ${rule.name}`} disabled={pending.has(pendingKey("sync", rule.id))} onClick={() => run("sync", rule)}><RefreshCw data-icon="inline-start" />同步</Button><Button variant="outline" size="sm" aria-label={`编辑 ${rule.name}`} onClick={() => navigate(`#rules/${rule.id}/edit`)}><Pencil data-icon="inline-start" />编辑</Button><RuleDeleteAction rule={rule} mobile pending={pending.has(pendingKey("delete", rule.id))} onDelete={() => run("delete", rule)} /></CardFooter>}</Card>)}</div><div className="hidden overflow-x-auto lg:block">
                   <Table className="dense-table">
                     <TableHeader>
                       <TableRow>
@@ -221,19 +226,17 @@ export function RulesPage({ navigate }: { navigate: (hash: string) => void }) {
                         <TableHead>调度</TableHead>
                         <TableHead>同步</TableHead>
                         <TableHead>最近执行</TableHead>
-                        <TableHead className="text-right">操作</TableHead>
+                        {canManage && <TableHead className="text-right">操作</TableHead>}
                       </TableRow>
                     </TableHeader>
                     <TableBody>
                       {filtered.map((rule) => (
                         <TableRow key={rule.id}>
                           <TableCell>
-                            <Switch aria-label={`启用/停用 ${rule.name}`} checked={rule.enabled} disabled={pending.has(pendingKey("enable", rule.id))} onCheckedChange={(value) => run("enable", rule, value)} />
+                            {canManage ? <Switch aria-label={`启用/停用 ${rule.name}`} checked={rule.enabled} disabled={pending.has(pendingKey("enable", rule.id))} onCheckedChange={(value) => run("enable", rule, value)} /> : <StatusBadge value={rule.enabled ? "enabled" : "disabled"} />}
                           </TableCell>
                           <TableCell>
-                            <button className="font-medium hover:underline focus-visible:rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => navigate(`#rules/${rule.id}/edit`)}>
-                              {rule.name}
-                            </button>
+                            {canManage ? <button className="font-medium hover:underline focus-visible:rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => navigate(`#rules/${rule.id}/edit`)}>{rule.name}</button> : <div className="font-medium">{rule.name}</div>}
                             {rule.description && <div className="max-w-80 truncate text-xs text-muted-foreground">{rule.description}</div>}
                           </TableCell>
                           <TableCell>{rule.dataset_name || rule.dataset_id}</TableCell>
@@ -245,7 +248,7 @@ export function RulesPage({ navigate }: { navigate: (hash: string) => void }) {
                             <StatusBadge value={(rule.sync_status ?? "pending") === "pending" ? "sync_pending" : rule.sync_status} />
                           </TableCell>
                           <TableCell>{formatDateTime(rule.last_run as string | undefined)}</TableCell>
-                          <TableCell>
+                          {canManage && <TableCell>
                             <div className="flex justify-end gap-1">
                               <IconAction label={`立即执行 ${rule.name}`} pending={pending.has(pendingKey("execute", rule.id))} onClick={() => run("execute", rule)}>
                                 <Play />
@@ -256,34 +259,14 @@ export function RulesPage({ navigate }: { navigate: (hash: string) => void }) {
                               <IconAction label={`编辑 ${rule.name}`} onClick={() => navigate(`#rules/${rule.id}/edit`)}>
                                 <Pencil />
                               </IconAction>
-                              <AlertDialog>
-                                <AlertDialogTrigger asChild>
-                                  <span>
-                                    <IconAction label={`删除 ${rule.name}`} pending={pending.has(pendingKey("delete", rule.id))}>
-                                      <Trash2 />
-                                    </IconAction>
-                                  </span>
-                                </AlertDialogTrigger>
-                                <AlertDialogContent>
-                                  <AlertDialogHeader>
-                                    <AlertDialogTitle>删除“{rule.name}”？</AlertDialogTitle>
-                                    <AlertDialogDescription>历史异常不会删除，但该规则将不再执行。</AlertDialogDescription>
-                                  </AlertDialogHeader>
-                                  <AlertDialogFooter>
-                                    <AlertDialogCancel>取消</AlertDialogCancel>
-                                    <AlertDialogAction disabled={pending.has(pendingKey("delete", rule.id))} onClick={() => run("delete", rule)}>
-                                      确认删除
-                                    </AlertDialogAction>
-                                  </AlertDialogFooter>
-                                </AlertDialogContent>
-                              </AlertDialog>
+                              <RuleDeleteAction rule={rule} pending={pending.has(pendingKey("delete", rule.id))} onDelete={() => run("delete", rule)} />
                             </div>
-                          </TableCell>
+                          </TableCell>}
                         </TableRow>
                       ))}
                     </TableBody>
                   </Table>
-                </div>
+                </div></>
               )}
             </CardContent>
           </Card>
@@ -557,7 +540,7 @@ function clearIncompatible(form: RuleEditorModel, validFields: Set<string>): Rul
   return { ...form, conditions: form.conditions.map((condition) => ({ ...condition, field: validFields.has(condition.field) ? condition.field : "", value_field: condition.value_field && validFields.has(condition.value_field) ? condition.value_field : null, upper_value_field: condition.upper_value_field && validFields.has(condition.upper_value_field) ? condition.upper_value_field : null })), anomalyKeyFields: (form.anomalyKeyFields ?? []).filter((field) => validFields.has(field)), notificationTargets: (form.notificationTargets ?? []).map((target) => (target.source === "field" && !validFields.has(target.field ?? "") ? { ...target, field: "" } : target)), validationTargets: cleanTargets(form.validationTargets), sqlValidationConfig: sql ? { ...sql, parameters: sql.parameters.map((parameter) => ({ ...parameter, field: validFields.has(parameter.field) ? parameter.field : "" })) } : sql, groupBroadcast: form.groupBroadcast ? { ...form.groupBroadcast, situation: { ...form.groupBroadcast.situation, mentionTargets: cleanTargets(form.groupBroadcast.situation?.mentionTargets) }, timeout: { ...form.groupBroadcast.timeout, mentionTargets: cleanTargets(form.groupBroadcast.timeout?.mentionTargets) } } : form.groupBroadcast }
 }
 
-export function RuleEditorPage({ id, navigate }: { id?: string; navigate: (hash: string) => void }) {
+function RuleEditorContent({ id, navigate }: { id?: string; navigate: (hash: string) => void }) {
   const { resources } = useApp()
   const client = useQueryClient()
   const rules = useQuery({ queryKey: ["rules"], queryFn: ({ signal }) => resources.rules.list(signal) })
@@ -610,6 +593,8 @@ export function RuleEditorPage({ id, navigate }: { id?: string; navigate: (hash:
     }
   })
   if ((id && rules.isLoading) || datasets.isLoading || datasources.isLoading) return <LoadingState />
+  const queryError = rules.error || datasets.error || datasources.error
+  if (queryError) return <ErrorState error={queryError} retry={() => { void Promise.all([rules.refetch(), datasets.refetch(), datasources.refetch()]) }} />
   if (id && !existing) return <ErrorState error={new Error("未找到该规则")} />
   const changeDataset = (datasetId: string) => {
     const nextFields = datasetFields(datasets.data?.find((item) => item.id === datasetId))
@@ -1043,4 +1028,8 @@ export function RuleEditorPage({ id, navigate }: { id?: string; navigate: (hash:
       </div>
     </div>
   )
+}
+
+export function RuleEditorPage(props: { id?: string; navigate: (hash: string) => void }) {
+  return <RuleEditorContent key={props.id ?? "new"} {...props} />
 }

@@ -1,6 +1,7 @@
 export type Id = string
 export type Severity = "low" | "medium" | "high" | "critical" | string
 export type RecordStatus = "pending" | "processing" | "resolved" | "ignored" | "timed_out" | string
+export type RecordWriteStatus = "pending" | "processing" | "resolved"
 export type BusinessKey = string | number | boolean | null | Record<string, unknown>
 
 export interface User { id: Id; login_name: string; display_name: string; job_title?: string; is_superuser: boolean; is_active?: boolean }

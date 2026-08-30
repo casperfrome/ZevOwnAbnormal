@@ -1,5 +1,5 @@
 import type { ApiClient } from "./client"
-import type { AnomalyGroup, AnomalyGroupDetail, AnomalyRecord, AnomalyRecordDetail, BroadcastDelivery, Dataset, DatasetExecution, DatasetInput, Datasource, DatasourceInput, NotificationTarget, Overview, Paginated, PushJobDiagnostic, RecordFilters, Rule, RuleEditorModel, SqlValidationConfigEditor, User, ValidationTarget } from "./types"
+import type { AnomalyGroup, AnomalyGroupDetail, AnomalyRecord, AnomalyRecordDetail, BroadcastDelivery, Dataset, DatasetExecution, DatasetInput, Datasource, DatasourceInput, NotificationTarget, Overview, Paginated, PushJobDiagnostic, RecordFilters, RecordWriteStatus, Rule, RuleEditorModel, SqlValidationConfigEditor, User, ValidationTarget } from "./types"
 import { businessKeyText } from "@/lib/format"
 
 const clean = <T extends Record<string, unknown>>(value: T) => Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined)) as T
@@ -176,8 +176,8 @@ export function createResources(client: ApiClient) {
       detail: async (id: string, signal?: AbortSignal) => mapRecordDetail(await client.request<Record<string, unknown>>(`/anomalies/${id}`, { signal })),
       pendingCount: async (signal?: AbortSignal) => (await client.request<Paginated<Record<string, unknown>>>("/anomalies?page=1&page_size=1&status_filter=pending", { signal })).total,
       count: async (filters: RecordFilters = {}, signal?: AbortSignal) => (await client.request<Paginated<Record<string, unknown>>>(`/anomalies?${recordQuery({ ...filters, page: 1, pageSize: 1 })}`, { signal })).total,
-      status: (id: string, status: string, assignee?: string) => client.request<AnomalyRecord>(`/anomalies/${id}/status`, { method: "PATCH", body: { status, assignee } }),
-      bulkStatus: (ids: string[], status: string) => client.request<Record<string, unknown>>("/anomalies/bulk-status", { method: "POST", body: { ids, status } }),
+      status: (id: string, status: RecordWriteStatus, assignee?: string) => client.request<AnomalyRecord>(`/anomalies/${id}/status`, { method: "PATCH", body: { status, assignee } }),
+      bulkStatus: (ids: string[], status: RecordWriteStatus) => client.request<Record<string, unknown>>("/anomalies/bulk-status", { method: "POST", body: { ids, status } }),
       export: (filters: RecordFilters = {}) => client.request<Blob>(`/anomalies/export${recordQuery(filters) ? `?${recordQuery(filters)}` : ""}`, { responseType: "blob" }),
     },
     groups: {

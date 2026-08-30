@@ -9,9 +9,11 @@ import { DatasourcesPage } from "./datasources"
 import { OverviewPage } from "./overview"
 import { AccountPage, AccountsPage, TestsPage } from "./system"
 import { ApiError } from "@/api/client"
+import { TooltipProvider } from "@/components/ui/tooltip"
 
 const state = vi.hoisted(() => ({
   user: { id: "admin", login_name: "admin", display_name: "管理员", job_title: "运维", is_superuser: true, is_active: true },
+  canManage: true,
   setUser: vi.fn(),
   toastSuccess: vi.fn(),
   toastError: vi.fn(),
@@ -26,17 +28,17 @@ const state = vi.hoisted(() => ({
   },
 }))
 
-vi.mock("@/app/context", () => ({ useApp: () => ({ resources: state.resources, user: state.user, setUser: state.setUser }) }))
+vi.mock("@/app/context", () => ({ useApp: () => ({ resources: state.resources, user: state.user, setUser: state.setUser, canManage: state.canManage }) }))
 vi.mock("sonner", () => ({ toast: { success: state.toastSuccess, error: state.toastError, warning: vi.fn() } }))
 
 function renderPage(node: React.ReactNode) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
-  return render(<QueryClientProvider client={client}>{node}</QueryClientProvider>)
+  return render(<QueryClientProvider client={client}><TooltipProvider>{node}</TooltipProvider></QueryClientProvider>)
 }
 
 function renderStrictPage(node: React.ReactNode) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
-  return render(<StrictMode><QueryClientProvider client={client}>{node}</QueryClientProvider></StrictMode>)
+  return render(<StrictMode><QueryClientProvider client={client}><TooltipProvider>{node}</TooltipProvider></QueryClientProvider></StrictMode>)
 }
 
 const source = { id: "source-1", name: "生产库", type: "mysql", host: "db.internal", port: 3306, database: "orders", username: "reader", ssl: true, status: "error", error_message: "连接超时", has_password: true }
@@ -48,6 +50,7 @@ const datasets = [
 beforeEach(() => {
   vi.clearAllMocks()
   state.user = { id: "admin", login_name: "admin", display_name: "管理员", job_title: "运维", is_superuser: true, is_active: true }
+  state.canManage = true
   state.resources.datasets.list.mockResolvedValue(datasets)
   state.resources.datasources.list.mockResolvedValue([source])
   state.resources.accounts.list.mockResolvedValue([
@@ -62,6 +65,23 @@ beforeEach(() => {
 })
 
 describe("data pages", () => {
+  it("keeps dataset and datasource inventories read-only for an analyst", async () => {
+    state.canManage = false
+    const datasetView = renderPage(<DatasetsPage navigate={vi.fn()} />)
+
+    expect((await screen.findAllByText("订单明细")).length).toBeGreaterThan(0)
+    expect(screen.queryByRole("button", { name: "新建数据集" })).not.toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: "编辑 订单明细" })).not.toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: "删除 订单明细" })).not.toBeInTheDocument()
+
+    datasetView.unmount()
+    renderPage(<DatasourcesPage />)
+    expect((await screen.findAllByText("生产库")).length).toBeGreaterThan(0)
+    expect(screen.queryByRole("button", { name: "新建数据源" })).not.toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: "测试 生产库" })).not.toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: "编辑 生产库" })).not.toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: "删除 生产库" })).not.toBeInTheDocument()
+  })
   it("searches datasets and keeps a confirmed delete single-flight", async () => {
     let finishDelete: (() => void) | undefined
     state.resources.datasets.remove.mockImplementation(() => new Promise<void>((resolve) => { finishDelete = resolve }))
@@ -149,11 +169,12 @@ describe("data pages", () => {
     state.resources.datasources.test.mockImplementation(() => new Promise((resolve) => { finishTest = () => resolve({ ok: true }) }))
     renderPage(<DatasourcesPage />)
 
-    expect(await screen.findByText("连接超时")).toBeInTheDocument()
+    expect((await screen.findAllByText("连接超时")).length).toBeGreaterThan(0)
     fireEvent.change(screen.getByRole("searchbox", { name: "搜索数据源" }), { target: { value: "无匹配" } })
     expect(screen.queryByText("生产库")).not.toBeInTheDocument()
     fireEvent.change(screen.getByRole("searchbox", { name: "搜索数据源" }), { target: { value: "生产" } })
-    const test = screen.getByRole("button", { name: "测试 生产库" })
+    const row = screen.getByRole("row", { name: /生产库/ })
+    const test = within(row).getByRole("button", { name: "测试 生产库" })
     await userEvent.click(test)
     expect(test).toBeDisabled()
     fireEvent.click(test)
@@ -162,9 +183,46 @@ describe("data pages", () => {
     await waitFor(() => expect(test).not.toBeDisabled())
   })
 
+  it("offers readable mobile dataset and datasource cards with reachable actions", async () => {
+    const datasetView = renderPage(<DatasetsPage navigate={vi.fn()} />)
+    const datasetCards = await screen.findByRole("region", { name: "数据集卡片列表" })
+    expect(within(datasetCards).getByText("订单明细")).toBeInTheDocument()
+    expect(within(datasetCards).getByRole("button", { name: "编辑 订单明细" })).toBeInTheDocument()
+    datasetView.unmount()
+
+    renderPage(<DatasourcesPage />)
+    const sourceCards = await screen.findByRole("region", { name: "数据源卡片列表" })
+    expect(within(sourceCards).getByText("db.internal:3306")).toBeInTheDocument()
+    expect(within(sourceCards).getByRole("button", { name: "测试 生产库" })).toBeInTheDocument()
+  })
+
+  it("labels dataset and datasource icon actions with hover and focus tooltips", async () => {
+    const user = userEvent.setup()
+    const datasetView = renderPage(<DatasetsPage navigate={vi.fn()} />)
+    const datasetRow = await screen.findByRole("row", { name: /订单明细/ })
+    await user.hover(within(datasetRow).getByRole("button", { name: "编辑 订单明细" }))
+    expect(await screen.findByRole("tooltip", { name: "编辑 订单明细" })).toBeInTheDocument()
+    datasetView.unmount()
+
+    renderPage(<DatasourcesPage />)
+    const sourceRow = await screen.findByRole("row", { name: /生产库/ })
+    fireEvent.focus(within(sourceRow).getByRole("button", { name: "测试 生产库" }))
+    expect(await screen.findByRole("tooltip", { name: "测试 生产库" })).toBeInTheDocument()
+  })
+
+  it("restores datasource dialog focus to its edit trigger on Escape", async () => {
+    renderPage(<DatasourcesPage />)
+    const row = await screen.findByRole("row", { name: /生产库/ })
+    const edit = within(row).getByRole("button", { name: "编辑 生产库" })
+    await userEvent.click(edit)
+    expect(await screen.findByRole("dialog", { name: "编辑数据源" })).toBeInTheDocument()
+    await userEvent.keyboard("{Escape}")
+    await waitFor(() => expect(edit).toHaveFocus())
+  })
+
   it("offers only backend datasource literals and sends the selected create/test payload", async () => {
     renderPage(<DatasourcesPage />)
-    await screen.findByText("生产库")
+    await screen.findAllByText("生产库")
     await userEvent.click(screen.getByRole("button", { name: "新建数据源" }))
     await userEvent.click(screen.getByRole("combobox", { name: "数据库类型" }))
     expect(await screen.findByRole("option", { name: "MySQL" })).toBeInTheDocument()
@@ -184,8 +242,9 @@ describe("data pages", () => {
 
   it("keeps datasource dialogs and toast ownership live through StrictMode effect replay", async () => {
     renderStrictPage(<DatasourcesPage />)
-    await screen.findByText("生产库")
-    await userEvent.click(screen.getByRole("button", { name: "编辑 生产库" }))
+    await screen.findAllByText("生产库")
+    const row = screen.getByRole("row", { name: /生产库/ })
+    await userEvent.click(within(row).getByRole("button", { name: "编辑 生产库" }))
     expect(await screen.findByRole("dialog", { name: "编辑数据源" })).toBeInTheDocument()
     await userEvent.click(screen.getByRole("button", { name: "测试配置" }))
     await waitFor(() => expect(state.toastSuccess).toHaveBeenCalledWith("配置连接成功"))
@@ -194,6 +253,16 @@ describe("data pages", () => {
 })
 
 describe("overview and system pages", () => {
+  it("shows top rules without editor deep links to an analyst", async () => {
+    state.canManage = false
+    state.resources.overview.mockResolvedValue({ stats: {}, trend: [], recent_anomalies: [], top_rules: [{ id: "rule-1", name: "只读规则", dataset_name: "订单", anomaly_count: 2 }] })
+
+    renderPage(<OverviewPage />)
+
+    expect(await screen.findByText("只读规则")).toBeInTheDocument()
+    expect(screen.queryByRole("link", { name: /只读规则/ })).not.toBeInTheDocument()
+  })
+
   it("uses authoritative overview data with 7/30/90 ranges and zero-safe Beijing charts", async () => {
     state.resources.overview.mockImplementation((days: number) => Promise.resolve({
       days, timezone: "Asia/Shanghai",
@@ -269,6 +338,31 @@ describe("overview and system pages", () => {
 })
 
 describe("account pages", () => {
+  it("offers readable mobile account cards with reachable actions", async () => {
+    renderPage(<AccountsPage />)
+    const cards = await screen.findByRole("region", { name: "账号卡片列表" })
+    expect(within(cards).getByText("王小明")).toBeInTheDocument()
+    expect(within(cards).getByRole("button", { name: "重置密码 王小明" })).toBeInTheDocument()
+  })
+
+  it("shows account action tooltips and restores focus after editor and reset dialogs", async () => {
+    const user = userEvent.setup()
+    renderPage(<AccountsPage />)
+    const row = await screen.findByRole("row", { name: /王小明/ })
+    const edit = within(row).getByRole("button", { name: "编辑 王小明" })
+    await user.hover(edit)
+    expect(await screen.findByRole("tooltip", { name: "编辑 王小明" })).toBeInTheDocument()
+    await user.click(edit)
+    await user.keyboard("{Escape}")
+    await waitFor(() => expect(edit).toHaveFocus())
+
+    const reset = within(row).getByRole("button", { name: "重置密码 王小明" })
+    fireEvent.focus(reset)
+    expect(await screen.findByRole("tooltip", { name: "重置密码 王小明" })).toBeInTheDocument()
+    await user.click(reset)
+    await user.click(await screen.findByRole("button", { name: "取消" }))
+    await waitFor(() => expect(reset).toHaveFocus())
+  })
   it("updates profile and omits a blank credential password with separate pending guards", async () => {
     let finishProfile: ((value: unknown) => void) | undefined
     state.resources.account.profile.mockImplementation(() => new Promise((resolve) => { finishProfile = resolve }))

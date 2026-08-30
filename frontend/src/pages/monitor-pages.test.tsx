@@ -1,6 +1,8 @@
+import { StrictMode, useState } from "react"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { fireEvent, render, screen, waitFor } from "@testing-library/react"
-import { describe, expect, it, vi } from "vitest"
+import userEvent from "@testing-library/user-event"
+import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import { RecordsPage } from "./records"
 import { GroupsPage } from "./groups"
@@ -9,16 +11,19 @@ const records = vi.fn()
 const recordCounts = vi.fn()
 const recordDetail = vi.fn()
 const recordStatus = vi.fn()
-const { toastSuccess } = vi.hoisted(() => ({ toastSuccess: vi.fn() }))
+const recordBulkStatus = vi.fn()
+const { toastSuccess, capability } = vi.hoisted(() => ({ toastSuccess: vi.fn(), capability: { canManage: true } }))
 const groups = vi.fn()
+const groupDetail = vi.fn()
 
 vi.mock("@/app/context", () => ({
   useApp: () => ({
     resources: {
-      records: { list: records, count: recordCounts, detail: recordDetail, status: recordStatus, bulkStatus: vi.fn(), export: vi.fn() },
-      groups: { list: groups, detail: vi.fn() },
+      records: { list: records, count: recordCounts, detail: recordDetail, status: recordStatus, bulkStatus: recordBulkStatus, export: vi.fn() },
+      groups: { list: groups, detail: groupDetail },
       rules: { list: vi.fn().mockResolvedValue([{ id: "rule-1", name: "订单金额监控" }]) },
     },
+    canManage: capability.canManage,
   }),
 }))
 
@@ -28,6 +33,13 @@ function renderPage(page: React.ReactNode) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(<QueryClientProvider client={client}>{page}</QueryClientProvider>)
 }
+
+beforeEach(() => {
+  vi.clearAllMocks()
+  capability.canManage = true
+  records.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 20 })
+  recordCounts.mockResolvedValue(0)
+})
 
 describe("monitor pages", () => {
   it("renders readable record business data in the dense operational table", async () => {
@@ -48,6 +60,52 @@ describe("monitor pages", () => {
     await waitFor(() => expect(records).toHaveBeenCalledWith(expect.objectContaining({ sortKey: "occurredAt" }), expect.anything()))
   })
 
+  it("keeps record lists and details read-only for an analyst", async () => {
+    const item = { id: "rec-reader", business_key_summary: "order_id: READ-1", rule_name: "订单金额监控", severity: "high", status: "ignored", detected_at: "2026-08-30T01:00:00Z", data: { amount: 9 } }
+    capability.canManage = false
+    records.mockResolvedValue({ items: [item], total: 1, page: 1, page_size: 20 })
+    recordDetail.mockResolvedValue({ ...item, validation_requests: [], deliveries: [], delivery_diagnostics: [], push_jobs: [] })
+
+    renderPage(<RecordsPage detailId="rec-reader" navigate={vi.fn()} />)
+
+    expect((await screen.findAllByText("order_id: READ-1")).length).toBeGreaterThan(0)
+    expect(screen.getAllByText("已忽略").length).toBeGreaterThan(0)
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: "处理中" })).not.toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: "已解决" })).not.toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: "忽略" })).not.toBeInTheDocument()
+  })
+
+  it("keeps approved bulk-status effects live through StrictMode replay", async () => {
+    const item = { id: "rec-active", business_key_summary: "order_id: ACTIVE-1", rule_name: "订单金额监控", severity: "high", status: "pending", detected_at: "2026-08-30T01:00:00Z", data: { amount: 9 } }
+    records.mockResolvedValue({ items: [item], total: 1, page: 1, page_size: 20 })
+    let finish: ((value: unknown) => void) | undefined
+    recordBulkStatus.mockImplementation(() => new Promise((resolve) => { finish = resolve }))
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
+    const invalidateQueries = vi.spyOn(client, "invalidateQueries")
+
+    render(<StrictMode><QueryClientProvider client={client}><RecordsPage navigate={vi.fn()} /></QueryClientProvider></StrictMode>)
+
+    const selection = await screen.findByRole("checkbox", { name: "选择 rec-active" })
+    await waitFor(() => expect(records).toHaveBeenCalled())
+    await new Promise((resolve) => window.setTimeout(resolve, 275))
+    await userEvent.click(selection)
+    await waitFor(() => expect(selection).toBeChecked())
+    await userEvent.click(await screen.findByRole("combobox", { name: "批量处置" }))
+    expect(screen.queryByRole("option", { name: "标记已忽略" })).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole("option", { name: "标记已解决" }))
+    expect(recordBulkStatus).toHaveBeenCalledWith(["rec-active"], "resolved")
+
+    finish?.({ updated: 1 })
+    await waitFor(() => {
+      expect(invalidateQueries).toHaveBeenCalledWith({ queryKey: ["records"] })
+      expect(invalidateQueries).toHaveBeenCalledWith({ queryKey: ["record-counts"] })
+      expect(toastSuccess).toHaveBeenCalledWith("批量状态已更新")
+    })
+    expect(screen.getByRole("checkbox", { name: "选择 rec-active" })).not.toBeChecked()
+    expect(screen.queryByRole("combobox", { name: "批量处置" })).not.toBeInTheDocument()
+  })
+
   it("opens a group from the complete keyboard-operable row and shows its operational summary", async () => {
     groups.mockResolvedValue({
       items: [{ id: "group-1", rule_name: "订单金额监控", scanned_rows: 120, matched_rows: 8, new_anomalies: 3, pending_count: 2, processing_count: 1, resolved_count: 4, timed_out_count: 1, timeout_waiting_count: 5, timeout_waiting_delivery_count: 6, situation_broadcast_status: "sent", timeout_broadcast_status: "waiting", last_detected_at: "2026-08-30T01:00:00Z" }],
@@ -63,6 +121,23 @@ describe("monitor pages", () => {
     expect(screen.getAllByText(/超时待播报 5 · 超时待投递 6/).length).toBeGreaterThan(0)
     fireEvent.keyDown(row, { key: "Enter" })
     expect(navigate).toHaveBeenCalledWith("#anomaly-groups/group-1")
+  })
+
+  it("restores focus to the group trigger after closing its detail sheet", async () => {
+    const item = { id: "group-1", rule_name: "订单金额监控", scanned_rows: 120, matched_rows: 8, new_anomalies: 3, pending_count: 2, processing_count: 1, resolved_count: 4, timed_out_count: 1, deliveries: [], records: [] }
+    groups.mockResolvedValue({ items: [item], total: 1, page: 1, page_size: 20 })
+    groupDetail.mockResolvedValue(item)
+    function Harness() {
+      const [detailId, setDetailId] = useState<string>()
+      return <GroupsPage detailId={detailId} navigate={(hash) => setDetailId(hash.startsWith("#anomaly-groups/") ? "group-1" : undefined)} />
+    }
+    renderPage(<Harness />)
+
+    const [trigger] = await screen.findAllByRole("button", { name: /查看 订单金额监控 记录组/ })
+    await userEvent.click(trigger)
+    expect(await screen.findByRole("dialog", { name: "异常记录组详情" })).toBeInTheDocument()
+    await userEvent.keyboard("{Escape}")
+    await waitFor(() => expect(trigger).toHaveFocus())
   })
 
   it("refreshes shared record caches but not the old detail after its route is replaced", async () => {

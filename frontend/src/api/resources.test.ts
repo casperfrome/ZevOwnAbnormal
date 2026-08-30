@@ -11,6 +11,10 @@ describe("API resource mappings", () => {
     )
   })
 
+  it("encodes the backend-approved record status filter literal", () => {
+    expect(recordQuery({ status: "resolved" })).toBe("status_filter=resolved")
+  })
+
   it("keeps the datasource type immutable and preserves an existing password", () => {
     expect(datasourceUpdatePayload({
       name: "生产库", type: "mysql", host: "db", port: 3306, database: "app", username: "root", password: "", ssl: true,
@@ -36,6 +40,24 @@ describe("API resource mappings", () => {
     vi.spyOn(client, "request").mockResolvedValue({ items: [], total: 0, page: 1, page_size: 20 })
     await createResources(client).records.list({ page: 1, pageSize: 20 })
     expect(client.request).toHaveBeenCalledWith("/anomalies?page=1&page_size=20", { signal: undefined })
+  })
+
+  it("sends only backend-approved record status payload literals", async () => {
+    const client = new ApiClient()
+    vi.spyOn(client, "request").mockResolvedValue({})
+    const resources = createResources(client)
+
+    await resources.records.status("record-1", "resolved", "owner-1")
+    await resources.records.bulkStatus(["record-1", "record-2"], "processing")
+
+    expect(client.request).toHaveBeenNthCalledWith(1, "/anomalies/record-1/status", {
+      method: "PATCH",
+      body: { status: "resolved", assignee: "owner-1" },
+    })
+    expect(client.request).toHaveBeenNthCalledWith(2, "/anomalies/bulk-status", {
+      method: "POST",
+      body: { ids: ["record-1", "record-2"], status: "processing" },
+    })
   })
 
   it("uses the backend username field for login", async () => {
