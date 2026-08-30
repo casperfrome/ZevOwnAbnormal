@@ -1,8 +1,9 @@
-import { render, screen, waitFor } from "@testing-library/react"
+import { fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import App from "./App"
+import { StatusBadge } from "./components/shared"
 
 const json = (body: unknown, status = 200) => Promise.resolve(new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } }))
 
@@ -45,5 +46,28 @@ describe("application shell", () => {
     expect(await screen.findByText("值班员")).toBeInTheDocument()
     expect(await screen.findByText("3")).toBeInTheDocument()
     expect(screen.queryByText("•")).not.toBeInTheDocument()
+  })
+
+  it("shows tooltips for icon-only shell controls", async () => {
+    const user = userEvent.setup()
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      if (String(input).endsWith("/auth/me")) return json({ id: "u4", login_name: "operator", display_name: "值班员", is_superuser: false })
+      if (String(input).includes("/anomalies?page=1&page_size=1&status_filter=pending")) return json({ items: [], total: 0, page: 1, page_size: 1 })
+      return json([])
+    }))
+    render(<App />)
+    await screen.findByText("值班员")
+    await user.hover(screen.getByRole("button", { name: "打开导航" }))
+    expect(await screen.findByRole("tooltip", { name: "打开导航" })).toBeInTheDocument()
+    fireEvent.focus(screen.getByRole("button", { name: "打开全局搜索" }))
+    expect(await screen.findByRole("tooltip", { name: "打开全局搜索" })).toBeInTheDocument()
+  })
+
+  it("renders Chinese labels for current delivery statuses", () => {
+    render(<div>{["in_transit", "waiting", "waiting_delivery", "none"].map((value) => <StatusBadge key={value} value={value} />)}</div>)
+    expect(screen.getByText("传输中")).toBeInTheDocument()
+    expect(screen.getByText("等待处理")).toBeInTheDocument()
+    expect(screen.getByText("等待投递")).toBeInTheDocument()
+    expect(screen.getByText("未推送")).toBeInTheDocument()
   })
 })

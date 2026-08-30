@@ -56,6 +56,16 @@ describe("API resource mappings", () => {
     expect(mapOverview({ stats: { pending_records: 4 }, recent_anomalies: [{ id: "a1" }] })).toMatchObject({ stats: { pending_records: 4 }, recent_anomalies: [{ id: "a1" }] })
   })
 
+  it("maps backend group status_counts into explicit summary counts", () => {
+    expect(mapAnomalyGroup({ group_id: "run-1", status_counts: { pending: 4, processing: 3, resolved: 2, timed_out: 1 } })).toMatchObject({ pending_count: 4, processing_count: 3, resolved_count: 2, timed_out_count: 1 })
+  })
+
+  it("keeps notification deliveries without a backend id identifiable without an empty id", () => {
+    const detail = mapRecordDetail({ id: "a1", deliveries: [{ status: "sent", channel: "feishu" }] })
+    expect(detail.deliveries[0]).toMatchObject({ status: "sent" })
+    expect(detail.deliveries[0].id).toBeUndefined()
+  })
+
   it("restores snake-case rule configuration into the editor model", () => {
     const model = ruleToEditorModel({ id: "r1", name: "规则", dataset_id: "ds", severity: "high", logic: "AND", conditions: [], enabled: true, schedule: { frequency: "daily", interval: 1, start_date: "2026-08-01" }, group_broadcast: { webhook_url: "https://example.test/hook", situation: { enabled: true, message_template: "异常" } } })
     expect(model.schedule.start).toBe("2026-08-01")

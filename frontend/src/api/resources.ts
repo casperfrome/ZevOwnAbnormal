@@ -42,7 +42,8 @@ export function mapRecord(value: Record<string, unknown>): AnomalyRecord {
 const records = (value: unknown) => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}
 
 export function mapBroadcastDelivery(value: Record<string, unknown>): BroadcastDelivery {
-  return { ...value, id: String(value.id ?? ""), kind: String(value.broadcast_kind ?? value.kind ?? "situation"), status: String(value.status ?? "pending"), attempts: Number(value.attempts ?? value.delivery_attempts ?? 0), error: typeof (value.error_message ?? value.last_error) === "string" ? String(value.error_message ?? value.last_error) : undefined, sent_at: typeof (value.sent_at ?? value.delivered_at) === "string" ? String(value.sent_at ?? value.delivered_at) : undefined }
+  const id = value.id == null || value.id === "" ? {} : { id: String(value.id) }
+  return { ...value, ...id, kind: String(value.broadcast_kind ?? value.kind ?? "situation"), status: String(value.status ?? "pending"), attempts: Number(value.attempts ?? value.delivery_attempts ?? 0), error: typeof (value.error_message ?? value.last_error) === "string" ? String(value.error_message ?? value.last_error) : undefined, sent_at: typeof (value.sent_at ?? value.delivered_at) === "string" ? String(value.sent_at ?? value.delivered_at) : undefined }
 }
 
 export function mapRecordDetail(value: Record<string, unknown>): AnomalyRecordDetail {
@@ -52,6 +53,7 @@ export function mapRecordDetail(value: Record<string, unknown>): AnomalyRecordDe
 }
 
 export function mapAnomalyGroup(value: Record<string, unknown>): AnomalyGroup {
+  const statusCounts = records(value.status_counts)
   return {
     ...value,
     id: String(value.group_id ?? value.id ?? ""),
@@ -60,6 +62,10 @@ export function mapAnomalyGroup(value: Record<string, unknown>): AnomalyGroup {
     last_detected_at: String(value.detected_at ?? value.last_detected_at ?? ""),
     first_detected_at: String(value.detected_at ?? value.first_detected_at ?? ""),
     status: String(value.broadcast_status ?? value.status ?? ""),
+    pending_count: Number(statusCounts.pending ?? value.pending_count ?? 0),
+    processing_count: Number(statusCounts.processing ?? value.processing_count ?? 0),
+    resolved_count: Number(statusCounts.resolved ?? value.resolved_count ?? 0),
+    timed_out_count: Number(statusCounts.timed_out ?? value.timed_out_count ?? 0),
   }
 }
 
