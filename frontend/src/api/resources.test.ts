@@ -131,6 +131,53 @@ describe("API resource mappings", () => {
     })
   })
 
+  it("round-trips the complete rule contract against a literal payload oracle", () => {
+    const backendRule: Rule = {
+      id: "r-literal", name: "订单区间规则", description: "覆盖完整规则契约", dataset_id: "ds-orders", dataset_name: "订单明细",
+      severity: "medium", logic: "OR", enabled: true,
+      conditions: [{ field: "amount", operator: "between", value: 12.5, upper_value: 88.75, baseline: null, value_source: "literal", value_field: null, upper_value_source: "literal", upper_value_field: null }],
+      anomaly_key_fields: ["order_id", "shop_id"], repeat_push_enabled: true,
+      schedule: { frequency: "day", interval: 1, time: "08:30", start_date: "2026-09-01", end_date: "2026-12-31" },
+      notification_targets: [{ receive_id_type: "user_id", source: "literal", value: "owner-1" }, { receive_id_type: "open_id", source: "field", field: "reviewer_open_id" }],
+      private_message_template: "订单 {order_id}\n[查看异常]({异常记录链接})",
+      validation_enabled: true,
+      validation_targets: [{ source: "literal", value: "validator-1" }, { source: "field", field: "validator_id" }],
+      deadline_seconds: 3661,
+      validation_method: "pseudo",
+      sql_validation_config: null,
+      group_broadcast: {
+        webhook_url: "https://open.feishu.cn/open-apis/bot/v2/hook/literal-token",
+        situation: { enabled: true, mention_targets: [{ source: "literal", value: "situation-owner" }], message_template: "异常订单 {order_id列表}" },
+        timeout: { enabled: true, mention_targets: [{ source: "field", field: "timeout_owner_id" }], message_template: "超时订单 {order_id列表}\n[查看分组]({异常记录组链接})" },
+      },
+    }
+
+    expect(rulePayload(ruleToEditorModel(backendRule))).toEqual({
+      name: "订单区间规则",
+      description: "覆盖完整规则契约",
+      dataset_id: "ds-orders",
+      severity: "medium",
+      logic: "OR",
+      conditions: [{ field: "amount", operator: "between", value: 12.5, upper_value: 88.75, baseline: null, value_source: "literal", value_field: null, upper_value_source: "literal", upper_value_field: null }],
+      anomaly_key_fields: ["order_id", "shop_id"],
+      repeat_push_enabled: true,
+      schedule: { frequency: "day", interval: 1, time: "08:30", start_date: "2026-09-01", end_date: "2026-12-31" },
+      notification_targets: [{ receive_id_type: "user_id", source: "literal", value: "owner-1" }, { receive_id_type: "open_id", source: "field", field: "reviewer_open_id" }],
+      private_message_template: "订单 {order_id}\n[查看异常]({异常记录链接})",
+      validation_enabled: true,
+      validation_targets: [{ source: "literal", value: "validator-1" }, { source: "field", field: "validator_id" }],
+      deadline_seconds: 3661,
+      validation_method: "pseudo",
+      sql_validation_config: null,
+      group_broadcast: {
+        webhook_url: "https://open.feishu.cn/open-apis/bot/v2/hook/literal-token",
+        situation: { enabled: true, mention_targets: [{ source: "literal", value: "situation-owner" }], message_template: "异常订单 {order_id列表}" },
+        timeout: { enabled: true, mention_targets: [{ source: "field", field: "timeout_owner_id" }], message_template: "超时订单 {order_id列表}\n[查看分组]({异常记录组链接})" },
+      },
+      enabled: true,
+    })
+  })
+
   it("does not silently discard incomplete configured target rows", () => {
     const model = ruleToEditorModel({
       id: "r-targets", name: "目标草稿", dataset_id: "ds-1", severity: "medium", logic: "AND", enabled: false,

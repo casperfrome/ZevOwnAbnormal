@@ -108,15 +108,47 @@ describe("rule pages", () => {
     await waitFor(() => expect(toggle).not.toBeDisabled())
   })
 
-  it("deletes only after confirmation", async () => {
-    removeRule.mockResolvedValue(undefined)
+  it("guards duplicate synchronization while leaving unrelated rule actions available", async () => {
+    let finishSync: ((value: unknown) => void) | undefined
+    syncRule.mockImplementation(() => new Promise((resolve) => { finishSync = resolve }))
     renderPage(<RulesPage navigate={vi.fn()} />)
 
     const row = await screen.findByRole("row", { name: /订单金额监控/ })
-    await userEvent.click(within(row).getByRole("button", { name: "删除 订单金额监控" }))
+    const sync = within(row).getByRole("button", { name: "同步调度 订单金额监控" })
+    const execute = within(row).getByRole("button", { name: "立即执行 订单金额监控" })
+    const remove = within(row).getByRole("button", { name: "删除 订单金额监控" })
+
+    await userEvent.click(sync)
+    expect(sync).toBeDisabled()
+    expect(execute).not.toBeDisabled()
+    expect(remove).not.toBeDisabled()
+    fireEvent.click(sync)
+    expect(syncRule).toHaveBeenCalledTimes(1)
+    expect(syncRule).toHaveBeenCalledWith("rule-1")
+
+    finishSync?.({ ...rules[0], sync_status: "synced" })
+    await waitFor(() => expect(sync).not.toBeDisabled())
+  })
+
+  it("guards duplicate deletion while the confirmed request is pending", async () => {
+    let finishDelete: ((value: unknown) => void) | undefined
+    removeRule.mockImplementation(() => new Promise((resolve) => { finishDelete = resolve }))
+    renderPage(<RulesPage navigate={vi.fn()} />)
+
+    const row = await screen.findByRole("row", { name: /订单金额监控/ })
+    const remove = within(row).getByRole("button", { name: "删除 订单金额监控" })
+    const execute = within(row).getByRole("button", { name: "立即执行 订单金额监控" })
+    await userEvent.click(remove)
     await userEvent.click(await screen.findByRole("button", { name: "确认删除" }))
 
-    await waitFor(() => expect(removeRule).toHaveBeenCalledWith("rule-1"))
+    await waitFor(() => expect(remove).toBeDisabled())
+    expect(execute).not.toBeDisabled()
+    fireEvent.click(remove)
+    expect(removeRule).toHaveBeenCalledTimes(1)
+    expect(removeRule).toHaveBeenCalledWith("rule-1")
+
+    finishDelete?.(undefined)
+    await waitFor(() => expect(remove).not.toBeDisabled())
   })
 
   it("localizes every current rule synchronization status", async () => {
