@@ -71,7 +71,7 @@ const rule = {
   sync_status: "synced",
   sync_error: null,
   ds_workflow_code: "workflow-1",
-  ds_schedule_id: "schedule-1",
+  ds_schedule_id: 101,
   created_at: "2026-08-01T00:00:00Z",
   updated_at: "2026-08-30T00:30:00Z",
 }
@@ -238,14 +238,53 @@ async function assertRecordNavigationHasNoDecorativeDot(page: Page, expectedCoun
 
   const decorativeDots = await navItem.evaluate((item) => {
     const forbidden = /[•·●]|(?:^|[\s"'(])dot(?:$|[\s"')])/i
+    const isTransparent = (color: string) => color === "transparent" || /rgba\([^)]*,\s*0(?:\.0+)?\)$/.test(color) || /\/\s*0(?:\.0+)?\)$/.test(color)
+    const radiusPixels = (value: string, size: number) => {
+      const token = value.split(/[ /]/)[0]
+      return token.endsWith("%") ? Number.parseFloat(token) * size / 100 : Number.parseFloat(token)
+    }
+    const paintedRoundShape = (style: CSSStyleDeclaration, width: number, height: number) => {
+      if (!Number.isFinite(width) || !Number.isFinite(height) || width < 2 || height < 2 || width > 12 || height > 12) return false
+      const ratio = width / height
+      if (ratio < 0.75 || ratio > 1.33 || style.visibility === "hidden" || style.display === "none" || Number.parseFloat(style.opacity || "1") <= 0.05) return false
+      const size = Math.min(width, height)
+      const rounded = Math.max(
+        radiusPixels(style.borderTopLeftRadius, size),
+        radiusPixels(style.borderTopRightRadius, size),
+        radiusPixels(style.borderBottomRightRadius, size),
+        radiusPixels(style.borderBottomLeftRadius, size),
+      ) >= size * 0.35
+      const hasBackground = !isTransparent(style.backgroundColor)
+      const hasBorder = ["Top", "Right", "Bottom", "Left"].some((side) =>
+        Number.parseFloat(style[`border${side}Width` as keyof CSSStyleDeclaration] as string) > 0
+        && !isTransparent(style[`border${side}Color` as keyof CSSStyleDeclaration] as string),
+      )
+      return rounded && (hasBackground || hasBorder)
+    }
     const textNodes: string[] = []
     const walker = document.createTreeWalker(item, NodeFilter.SHOW_TEXT)
     while (walker.nextNode()) {
       const value = walker.currentNode.textContent ?? ""
       if (forbidden.test(value)) textNodes.push(`${walker.currentNode.parentElement?.tagName.toLowerCase() ?? "text"} text: ${value}`)
     }
+    const shapeDecorations: string[] = []
     const elementDecorations = [item, ...item.querySelectorAll("*")].flatMap((node) => {
       const element = node as HTMLElement
+      const tag = element.tagName.toLowerCase()
+      const isSvgIcon = tag === "svg" || Boolean(element.closest("svg"))
+      const elementStyle = getComputedStyle(element)
+      const rect = element.getBoundingClientRect()
+      const isEmptyElement = !element.textContent?.trim() && !element.getAttribute("aria-label")
+      if (!isSvgIcon && isEmptyElement && paintedRoundShape(elementStyle, rect.width, rect.height)) {
+        shapeDecorations.push(`${tag} element shape: ${rect.width}x${rect.height}`)
+      }
+      for (const pseudo of ["::before", "::after"] as const) {
+        const pseudoStyle = getComputedStyle(element, pseudo)
+        const generatedEmptyContent = pseudoStyle.content === '""' || pseudoStyle.content === "''"
+        if (!isSvgIcon && generatedEmptyContent && paintedRoundShape(pseudoStyle, Number.parseFloat(pseudoStyle.width), Number.parseFloat(pseudoStyle.height))) {
+          shapeDecorations.push(`${tag} ${pseudo} shape: ${pseudoStyle.width}x${pseudoStyle.height}`)
+        }
+      }
       const candidates = [
         ["aria-label", element.getAttribute("aria-label") ?? ""],
         ["::before", getComputedStyle(element, "::before").content],
@@ -255,7 +294,7 @@ async function assertRecordNavigationHasNoDecorativeDot(page: Page, expectedCoun
         .filter(([, value]) => forbidden.test(value))
         .map(([source, value]) => `${element.tagName.toLowerCase()} ${source}: ${value}`)
     })
-    return [...textNodes, ...elementDecorations]
+    return [...textNodes, ...elementDecorations, ...shapeDecorations]
   })
   expect(decorativeDots).toEqual([])
 }
