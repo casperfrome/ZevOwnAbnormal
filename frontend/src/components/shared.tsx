@@ -1,0 +1,17 @@
+import type { ReactNode } from "react"
+import { AlertCircle, Inbox, Search } from "lucide-react"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
+import { Input } from "@/components/ui/input"
+import { Spinner } from "@/components/ui/spinner"
+
+export function PageHeader({ title, description, actions }: { title: string; description?: string; actions?: ReactNode }) { return <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between"><div><h1 className="text-2xl font-semibold tracking-tight">{title}</h1>{description && <p className="mt-1 text-sm text-muted-foreground">{description}</p>}</div>{actions && <div className="flex flex-wrap gap-2">{actions}</div>}</div> }
+export function LoadingState({ label = "正在加载" }: { label?: string }) { return <div className="flex min-h-48 items-center justify-center gap-2 text-sm text-muted-foreground"><Spinner />{label}</div> }
+export function ErrorState({ error, retry }: { error: unknown; retry?: () => void }) { return <Alert variant="destructive"><AlertCircle data-icon="inline-start" /><AlertTitle>加载失败</AlertTitle><AlertDescription>{error instanceof Error ? error.message : "发生未知错误"}{retry && <Button className="ml-3" size="sm" variant="outline" onClick={retry}>重试</Button>}</AlertDescription></Alert> }
+export function EmptyState({ title = "暂无数据", description = "调整筛选条件或创建第一条记录。", action }: { title?: string; description?: string; action?: ReactNode }) { return <Empty><EmptyHeader><EmptyMedia variant="icon"><Inbox /></EmptyMedia><EmptyTitle>{title}</EmptyTitle><EmptyDescription>{description}</EmptyDescription></EmptyHeader>{action && <EmptyContent>{action}</EmptyContent>}</Empty> }
+export function SearchInput({ value, onChange, placeholder = "搜索…" }: { value: string; onChange: (value: string) => void; placeholder?: string }) { return <div className="relative w-full sm:w-72"><Search className="absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" data-icon="inline-start" /><Input className="pl-8" value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} aria-label={placeholder} /></div> }
+export function StatusBadge({ value }: { value?: string }) { const variants: Record<string, string> = { resolved: "bg-success-subtle text-success", online: "bg-success-subtle text-success", enabled: "bg-success-subtle text-success", pending: "bg-warning-subtle text-warning-foreground", processing: "bg-info-subtle text-info", timed_out: "bg-coral-subtle text-coral", high: "bg-coral-subtle text-coral", critical: "bg-destructive text-destructive-foreground", medium: "bg-warning-subtle text-warning-foreground", low: "bg-info-subtle text-info", offline: "bg-muted text-muted-foreground", ignored: "bg-muted text-muted-foreground" }; return <Badge variant="secondary" className={variants[value ?? ""]}>{value || "未知"}</Badge> }
+export function MetricCard({ title, value, description }: { title: string; value: ReactNode; description?: string }) { return <Card><CardHeader className="pb-2"><CardDescription>{title}</CardDescription><CardTitle className="metric-number">{value}</CardTitle></CardHeader>{description && <CardContent className="text-xs text-muted-foreground">{description}</CardContent>}</Card> }

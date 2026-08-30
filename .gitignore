@@ -28,6 +28,8 @@ build/
 .npm/
 .yarn/
 *.tsbuildinfo
+test-results/
+playwright-report/
 
 # IDE and OS
 .idea/
