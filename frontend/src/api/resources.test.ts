@@ -49,11 +49,25 @@ describe("API resource mappings", () => {
     expect(mapAnomalyGroup({ group_id: "run-1", rule_name: "订单规则", matched_rows: 3, detected_at: "2026-08-30T01:00:00Z" })).toMatchObject({ id: "run-1", rule_name: "订单规则", record_count: 3, last_detected_at: "2026-08-30T01:00:00Z" })
   })
 
+  it("keeps backend-approved record sorting on list and export requests", async () => {
+    expect(recordQuery({ sortKey: "occurredAt", sortOrder: "asc" })).toBe("sort_key=occurredAt&sort_order=asc")
+    const client = new ApiClient()
+    vi.spyOn(client, "request").mockResolvedValue(new Blob())
+    await createResources(client).records.export({ sortKey: "occurredAt", sortOrder: "desc" })
+    expect(client.request).toHaveBeenCalledWith("/anomalies/export?sort_key=occurredAt&sort_order=desc", { responseType: "blob" })
+  })
+
   it("normalizes anomaly detail, group delivery and overview contracts", () => {
     const detail = mapRecordDetail({ id: "a1", business_key: { order_id: "A-42" }, row_details: { amount: 9 }, validation_requests: [{ status: "sent" }], deliveries: [{ id: "d1", status: "failed", error_message: "network" }] })
     expect(detail).toMatchObject({ id: "a1", business_key: { order_id: "A-42" }, data: { amount: 9 }, validation_requests: [{ status: "sent" }] })
     expect(mapBroadcastDelivery({ id: "d1", broadcast_kind: "timeout", status: "failed", error_message: "network" })).toMatchObject({ id: "d1", kind: "timeout", status: "failed", error: "network" })
     expect(mapOverview({ stats: { pending_records: 4 }, recent_anomalies: [{ id: "a1" }] })).toMatchObject({ stats: { pending_records: 4 }, recent_anomalies: [{ id: "a1" }] })
+  })
+
+  it("keeps push-job diagnostics distinct from notification deliveries", () => {
+    const detail = mapRecordDetail({ id: "a1", deliveries: [{ status: "sent", recipient: "ou_1" }], push_jobs: [{ id: "job-1", kind: "group_broadcast", status: "partial_failed", publish_attempts: 2, dispatch_attempts: 1, last_error: "timeout" }] })
+    expect(detail.deliveries).toHaveLength(1)
+    expect(detail.push_jobs).toEqual([expect.objectContaining({ id: "job-1", kind: "group_broadcast", status: "partial_failed", attempts: 3, error: "timeout" })])
   })
 
   it("maps backend group status_counts into explicit summary counts", () => {

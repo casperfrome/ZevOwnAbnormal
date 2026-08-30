@@ -1,5 +1,5 @@
 import type { ApiClient } from "./client"
-import type { AnomalyGroup, AnomalyGroupDetail, AnomalyRecord, AnomalyRecordDetail, BroadcastDelivery, Dataset, DatasetExecution, DatasetInput, Datasource, DatasourceInput, Overview, Paginated, RecordFilters, Rule, RuleEditorModel, User } from "./types"
+import type { AnomalyGroup, AnomalyGroupDetail, AnomalyRecord, AnomalyRecordDetail, BroadcastDelivery, Dataset, DatasetExecution, DatasetInput, Datasource, DatasourceInput, Overview, Paginated, PushJobDiagnostic, RecordFilters, Rule, RuleEditorModel, User } from "./types"
 import { businessKeyText } from "@/lib/format"
 
 const clean = <T extends Record<string, unknown>>(value: T) => Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined)) as T
@@ -51,10 +51,15 @@ export function mapBroadcastDelivery(value: Record<string, unknown>): BroadcastD
   return { ...value, ...id, kind: String(value.broadcast_kind ?? value.kind ?? "situation"), status: String(value.status ?? "pending"), attempts: Number(value.attempts ?? value.delivery_attempts ?? 0), error: typeof (value.error_message ?? value.last_error) === "string" ? String(value.error_message ?? value.last_error) : undefined, sent_at: typeof (value.sent_at ?? value.delivered_at) === "string" ? String(value.sent_at ?? value.delivered_at) : undefined }
 }
 
+export function mapPushJobDiagnostic(value: Record<string, unknown>): PushJobDiagnostic {
+  const publish_attempts = Number(value.publish_attempts ?? 0); const dispatch_attempts = Number(value.dispatch_attempts ?? 0)
+  return { ...value, id: String(value.id ?? ""), kind: String(value.kind ?? "notification"), status: String(value.status ?? "pending"), publish_attempts, dispatch_attempts, attempts: publish_attempts + dispatch_attempts, next_attempt_at: typeof value.next_attempt_at === "string" ? value.next_attempt_at : undefined, error: typeof value.last_error === "string" ? value.last_error : undefined, updated_at: typeof value.updated_at === "string" ? value.updated_at : undefined }
+}
+
 export function mapRecordDetail(value: Record<string, unknown>): AnomalyRecordDetail {
   const base = mapRecord(value)
   const rawDeliveries = Array.isArray(value.deliveries) ? value.deliveries : []
-  return { ...base, validation_requests: Array.isArray(value.validation_requests) ? value.validation_requests.map(records) : [], deliveries: rawDeliveries.map(records).map(mapBroadcastDelivery), delivery_diagnostics: rawDeliveries.map(records).map(mapBroadcastDelivery) }
+  return { ...base, validation_requests: Array.isArray(value.validation_requests) ? value.validation_requests.map(records) : [], deliveries: rawDeliveries.map(records).map(mapBroadcastDelivery), delivery_diagnostics: rawDeliveries.map(records).map(mapBroadcastDelivery), push_jobs: Array.isArray(value.push_jobs) ? value.push_jobs.map(records).map(mapPushJobDiagnostic) : [] }
 }
 
 export function mapAnomalyGroup(value: Record<string, unknown>): AnomalyGroup {
@@ -152,6 +157,7 @@ export function createResources(client: ApiClient) {
       list: async (filters: RecordFilters = {}, signal?: AbortSignal) => { const payload = await client.request<Paginated<Record<string, unknown>>>(`/anomalies${recordQuery(filters) ? `?${recordQuery(filters)}` : ""}`, { signal }); return { ...payload, items: payload.items.map(mapRecord) } },
       detail: async (id: string, signal?: AbortSignal) => mapRecordDetail(await client.request<Record<string, unknown>>(`/anomalies/${id}`, { signal })),
       pendingCount: async (signal?: AbortSignal) => (await client.request<Paginated<Record<string, unknown>>>("/anomalies?page=1&page_size=1&status_filter=pending", { signal })).total,
+      count: async (filters: RecordFilters = {}, signal?: AbortSignal) => (await client.request<Paginated<Record<string, unknown>>>(`/anomalies?${recordQuery({ ...filters, page: 1, pageSize: 1 })}`, { signal })).total,
       status: (id: string, status: string, assignee?: string) => client.request<AnomalyRecord>(`/anomalies/${id}/status`, { method: "PATCH", body: { status, assignee } }),
       bulkStatus: (ids: string[], status: string) => client.request<Record<string, unknown>>("/anomalies/bulk-status", { method: "POST", body: { ids, status } }),
       export: (filters: RecordFilters = {}) => client.request<Blob>(`/anomalies/export${recordQuery(filters) ? `?${recordQuery(filters)}` : ""}`, { responseType: "blob" }),

@@ -64,10 +64,11 @@ describe("application shell", () => {
   })
 
   it("renders Chinese labels for current delivery statuses", () => {
-    render(<div>{["in_transit", "waiting", "waiting_delivery", "none"].map((value) => <StatusBadge key={value} value={value} />)}</div>)
+    render(<div>{["in_transit", "waiting", "waiting_delivery", "none", "partial_failed"].map((value) => <StatusBadge key={value} value={value} />)}</div>)
     expect(screen.getByText("传输中")).toBeInTheDocument()
     expect(screen.getByText("等待处理")).toBeInTheDocument()
     expect(screen.getByText("等待投递")).toBeInTheDocument()
     expect(screen.getByText("未推送")).toBeInTheDocument()
+    expect(screen.getByText("部分失败")).toBeInTheDocument()
   })
 })
