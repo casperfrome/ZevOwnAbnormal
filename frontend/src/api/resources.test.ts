@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest"
 
 import { ApiClient } from "./client"
+import type { Rule } from "./types"
 import { createResources, datasourceUpdatePayload, mapAnomalyGroup, mapBroadcastDelivery, mapOverview, mapRecord, mapRecordDetail, recordQuery, rulePayload, ruleToEditorModel } from "./resources"
 
 describe("API resource mappings", () => {
@@ -84,6 +85,50 @@ describe("API resource mappings", () => {
     const model = ruleToEditorModel({ id: "r1", name: "规则", dataset_id: "ds", severity: "high", logic: "AND", conditions: [], enabled: true, schedule: { frequency: "daily", interval: 1, start_date: "2026-08-01" }, group_broadcast: { webhook_url: "https://example.test/hook", situation: { enabled: true, message_template: "异常" } } })
     expect(model.schedule.start).toBe("2026-08-01")
     expect(model.groupBroadcast).toMatchObject({ webhookUrl: "https://example.test/hook", situation: { enabled: true, messageTemplate: "异常" } })
+  })
+
+  it("round-trips every structured rule field without flattening nested backend contracts", () => {
+    const backendRule: Rule = {
+      id: "r-full", name: "完整规则", description: "保留所有配置", dataset_id: "ds-1", dataset_name: "订单",
+      severity: "high", logic: "OR" as const, enabled: true,
+      conditions: [{ field: "amount", operator: "between", value: "10", upper_value: "20", value_source: "literal", upper_value_source: "field", upper_value_field: "limit", baseline: null }],
+      anomaly_key_fields: ["order_id"], repeat_push_enabled: true,
+      schedule: { frequency: "hour", interval: 2, time: null, start_date: "2026-08-01", end_date: "2026-09-01" },
+      notification_targets: [
+        { receive_id_type: "user_id", source: "literal", value: "owner" },
+        { receive_id_type: "open_id", source: "field", field: "reviewer_id" },
+      ],
+      private_message_template: "异常 {order_id}\n[查看]({异常记录链接})",
+      validation_enabled: true,
+      validation_targets: [{ source: "literal", value: "validator" }, { source: "field", field: "reviewer_id" }],
+      deadline_seconds: 93784,
+      validation_method: "sql",
+      sql_validation_config: {
+        datasource_id: "source-2",
+        query_template: "SELECT status, low, high FROM repair WHERE order_id={id}",
+        parameters: [{ name: "id", field: "order_id" }],
+        true_condition: { field: "status", operator: "between", value: null, upper_value: null, value_source: "field", value_field: "low", upper_value_source: "field", upper_value_field: "high" },
+      },
+      group_broadcast: {
+        webhook_url: "https://open.feishu.cn/open-apis/bot/v2/hook/example",
+        situation: { enabled: true, mention_targets: [{ source: "field", field: "reviewer_id" }], message_template: "异常 {order_id列表}" },
+        timeout: { enabled: true, mention_targets: [{ source: "literal", value: "backup" }], message_template: "超时 {order_id列表}" },
+      },
+    }
+
+    const payload = rulePayload(ruleToEditorModel(backendRule))
+
+    expect(payload).toMatchObject({
+      dataset_id: "ds-1", anomaly_key_fields: ["order_id"], repeat_push_enabled: true, deadline_seconds: 93784,
+      validation_targets: backendRule.validation_targets,
+      sql_validation_config: backendRule.sql_validation_config,
+      notification_targets: backendRule.notification_targets,
+      group_broadcast: {
+        webhook_url: (backendRule.group_broadcast as Record<string, unknown>).webhook_url,
+        situation: { enabled: true, mention_targets: [{ source: "field", field: "reviewer_id" }], message_template: "异常 {order_id列表}" },
+        timeout: { enabled: true, mention_targets: [{ source: "literal", value: "backup" }], message_template: "超时 {order_id列表}" },
+      },
+    })
   })
 
   it("loads the actual pending record count through the paginated anomalies endpoint", async () => {

@@ -9,8 +9,8 @@ test.beforeEach(async ({ page }) => {
     const path = url.pathname
     let body: unknown = {}
     if (path.endsWith("/auth/me") || path.endsWith("/auth/login")) body = user
-    else if (path === "/api/v1/rules") body = [{ id: "rule-1", name: "订单金额监控", dataset_id: "ds-1", dataset_name: "订单", severity: "high", logic: "AND", conditions: [], enabled: true }]
-    else if (path === "/api/v1/datasets") body = [{ id: "ds-1", name: "订单", datasource_id: "source-1", datasource_name: "生产库", sql: "select * from orders" }]
+    else if (path === "/api/v1/rules") body = [{ id: "rule-1", name: "订单金额监控", description: "检查高金额订单", dataset_id: "ds-1", dataset_name: "订单", severity: "high", logic: "AND", conditions: [{ field: "amount", operator: "gt", value: 100, value_source: "literal" }], anomaly_key_fields: ["order_id"], repeat_push_enabled: true, schedule: { frequency: "day", interval: 1, time: "09:00", start_date: "2026-08-30" }, notification_targets: [{ receive_id_type: "user_id", source: "literal", value: "owner" }], validation_enabled: false, validation_targets: [], deadline_seconds: 86400, validation_method: "pseudo", group_broadcast: { webhook_url: "https://open.feishu.cn/open-apis/bot/v2/hook/example", situation: { enabled: true, mention_targets: [{ source: "field", field: "reviewer_id" }], message_template: "异常 {order_id列表}" }, timeout: { enabled: false, mention_targets: [], message_template: null } }, enabled: true, sync_status: "synced" }]
+    else if (path === "/api/v1/datasets") body = [{ id: "ds-1", name: "订单", datasource_id: "source-1", datasource_name: "生产库", sql: "select * from orders", fields: [{ name: "order_id", type: "VARCHAR" }, { name: "amount", type: "DECIMAL" }, { name: "reviewer_id", type: "VARCHAR" }] }]
     else if (path === "/api/v1/datasources") body = [{ id: "source-1", name: "生产库", type: "mysql", host: "db", port: 3306, database: "app", username: "reader", ssl: false, status: "online" }]
     else if (path === "/api/v1/anomalies/rec-1") body = record
     else if (path === "/api/v1/anomalies") body = { items: [record], total: 1, page: 1, page_size: 20 }
@@ -62,6 +62,27 @@ test("aligns each rule switch with the rule title", async ({ page }) => {
   expect(switchBox).not.toBeNull()
   expect(titleBox).not.toBeNull()
   expect(Math.abs(switchBox!.y - titleBox!.y)).toBeLessThanOrEqual(1)
+})
+
+test("keeps complete rule drafts, mobile tabs, actions and tooltips reachable", async ({ page }) => {
+  await page.goto("/#rules/rule-1/edit")
+  const description = page.getByLabel("描述")
+  await description.fill("尚未保存的跨分区草稿")
+  await page.getByRole("tab", { name: "2 触发条件" }).click()
+  await expect(page.getByLabel("条件 1 字段")).toContainText("amount")
+  await page.getByRole("tab", { name: "4 异常键" }).click()
+  await expect(page.getByRole("checkbox", { name: /order_id/ })).toBeChecked()
+  await expect(page.getByText("允许重复推送")).toBeVisible()
+  await page.getByRole("tab", { name: "1 基本信息" }).click()
+  await expect(description).toHaveValue("尚未保存的跨分区草稿")
+  await expect(page.getByRole("button", { name: "保存规则" })).toBeVisible()
+  await page.getByRole("tab", { name: "7 群广播" }).click()
+  await expect(page.getByLabel("群机器人 Webhook")).toHaveValue(/open\.feishu\.cn/)
+
+  await page.goto("/#rules")
+  const sync = page.getByRole("button", { name: "同步调度 订单金额监控" })
+  await sync.hover()
+  await expect(page.getByRole("tooltip")).toContainText("同步调度")
 })
 
 test("restores readable anomaly operations and keyboard-operable record groups", async ({ page }, testInfo) => {

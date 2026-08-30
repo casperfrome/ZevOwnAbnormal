@@ -1,5 +1,5 @@
 import type { ApiClient } from "./client"
-import type { AnomalyGroup, AnomalyGroupDetail, AnomalyRecord, AnomalyRecordDetail, BroadcastDelivery, Dataset, DatasetExecution, DatasetInput, Datasource, DatasourceInput, Overview, Paginated, PushJobDiagnostic, RecordFilters, Rule, RuleEditorModel, User } from "./types"
+import type { AnomalyGroup, AnomalyGroupDetail, AnomalyRecord, AnomalyRecordDetail, BroadcastDelivery, Dataset, DatasetExecution, DatasetInput, Datasource, DatasourceInput, NotificationTarget, Overview, Paginated, PushJobDiagnostic, RecordFilters, Rule, RuleEditorModel, SqlValidationConfigEditor, User, ValidationTarget } from "./types"
 import { businessKeyText } from "@/lib/format"
 
 const clean = <T extends Record<string, unknown>>(value: T) => Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined)) as T
@@ -93,17 +93,29 @@ export function mapOverview(value: Record<string, unknown>): Overview {
 export function ruleToEditorModel(rule: Rule): RuleEditorModel {
   const schedule = (rule.schedule ?? {}) as Record<string, unknown>
   const group = (rule.group_broadcast ?? {}) as Record<string, unknown>
-  const section = (value: unknown) => { const item = value && typeof value === "object" ? value as Record<string, unknown> : {}; return { enabled: Boolean(item.enabled), mentionTargets: Array.isArray(item.mention_targets) ? item.mention_targets as Array<Record<string, unknown>> : [], messageTemplate: typeof item.message_template === "string" ? item.message_template : "" } }
+  const section = (value: unknown) => { const item = value && typeof value === "object" ? value as Record<string, unknown> : {}; return { enabled: Boolean(item.enabled), mentionTargets: Array.isArray(item.mention_targets) ? item.mention_targets as ValidationTarget[] : [], messageTemplate: typeof item.message_template === "string" ? item.message_template : "" } }
+  const rawSql = rule.sql_validation_config && typeof rule.sql_validation_config === "object" ? rule.sql_validation_config as Record<string, unknown> : undefined
+  const rawTrue = rawSql?.true_condition && typeof rawSql.true_condition === "object" ? rawSql.true_condition as Record<string, unknown> : {}
+  const sqlValidationConfig: SqlValidationConfigEditor | undefined = rawSql ? {
+    datasourceId: String(rawSql.datasource_id ?? ""), queryTemplate: String(rawSql.query_template ?? ""),
+    parameters: Array.isArray(rawSql.parameters) ? rawSql.parameters as SqlValidationConfigEditor["parameters"] : [],
+    trueCondition: {
+      field: String(rawTrue.field ?? ""), operator: String(rawTrue.operator ?? "eq"), value: rawTrue.value, upperValue: rawTrue.upper_value,
+      valueSource: rawTrue.value_source === "field" ? "field" : "literal", valueField: typeof rawTrue.value_field === "string" ? rawTrue.value_field : null,
+      upperValueSource: rawTrue.upper_value_source === "field" ? "field" : "literal", upperValueField: typeof rawTrue.upper_value_field === "string" ? rawTrue.upper_value_field : null,
+    },
+  } : undefined
   return {
     name: rule.name, description: rule.description ?? "", datasetId: rule.dataset_id, severity: rule.severity, logic: rule.logic === "OR" ? "OR" : "AND", conditions: rule.conditions ?? [], enabled: rule.enabled,
     anomalyKeyFields: Array.isArray(rule.anomaly_key_fields) ? rule.anomaly_key_fields as string[] : [], repeatPushEnabled: Boolean(rule.repeat_push_enabled),
-    schedule: { frequency: String(schedule.frequency ?? "daily"), interval: Number(schedule.interval ?? 1), time: typeof schedule.time === "string" ? schedule.time : undefined, start: String(schedule.start_date ?? schedule.start ?? new Date().toISOString().slice(0, 10)), end: typeof (schedule.end_date ?? schedule.end) === "string" ? String(schedule.end_date ?? schedule.end) : undefined },
-    notificationTargets: Array.isArray(rule.notification_targets) ? rule.notification_targets as Array<Record<string, unknown>> : [], privateMessageTemplate: typeof rule.private_message_template === "string" ? rule.private_message_template : "", validationEnabled: Boolean(rule.validation_enabled), validationTargets: Array.isArray(rule.validation_targets) ? rule.validation_targets as string[] : [], deadlineSeconds: Number(rule.deadline_seconds ?? 86400), validationMethod: typeof rule.validation_method === "string" ? rule.validation_method : "pseudo", sqlValidationConfig: rule.sql_validation_config && typeof rule.sql_validation_config === "object" ? rule.sql_validation_config as Record<string, unknown> : undefined,
+    schedule: { frequency: String(schedule.frequency ?? "day"), interval: Number(schedule.interval ?? 1), time: typeof schedule.time === "string" ? schedule.time : undefined, start: String(schedule.start_date ?? schedule.start ?? new Date().toISOString().slice(0, 10)), end: typeof (schedule.end_date ?? schedule.end) === "string" ? String(schedule.end_date ?? schedule.end) : undefined },
+    notificationTargets: Array.isArray(rule.notification_targets) ? rule.notification_targets as NotificationTarget[] : [], privateMessageTemplate: typeof rule.private_message_template === "string" ? rule.private_message_template : "", validationEnabled: Boolean(rule.validation_enabled), validationTargets: Array.isArray(rule.validation_targets) ? rule.validation_targets as ValidationTarget[] : [], deadlineSeconds: Number(rule.deadline_seconds ?? 86400), validationMethod: typeof rule.validation_method === "string" ? rule.validation_method : "pseudo", sqlValidationConfig,
     groupBroadcast: { webhookUrl: typeof group.webhook_url === "string" ? group.webhook_url : "", situation: section(group.situation ?? group), timeout: section(group.timeout) },
   }
 }
 
-const broadcastSection = (section: Record<string, unknown> = {}) => ({ enabled: Boolean(section.enabled), mention_targets: Array.isArray(section.mentionTargets) ? section.mentionTargets : [], message_template: typeof section.messageTemplate === "string" ? section.messageTemplate.trim() || null : null })
+const validTarget = (target: unknown) => { const item = target && typeof target === "object" ? target as Record<string, unknown> : {}; return item.source === "field" ? Boolean(String(item.field ?? "").trim()) : Boolean(String(item.value ?? "").trim()) }
+const broadcastSection = (section: Record<string, unknown> = {}) => ({ enabled: Boolean(section.enabled), mention_targets: Array.isArray(section.mentionTargets) ? section.mentionTargets.filter(validTarget) : [], message_template: typeof section.messageTemplate === "string" ? section.messageTemplate.trim() || null : null })
 export function rulePayload(data: RuleEditorModel) {
   const group = data.groupBroadcast ?? {}
   const situation = (group.situation ?? group) as Record<string, unknown>
@@ -113,8 +125,8 @@ export function rulePayload(data: RuleEditorModel) {
     conditions: data.conditions.map((condition) => ({ field: condition.field, operator: condition.operator, value: condition.value === "" ? null : condition.value ?? null, upper_value: condition.upper_value ?? null, baseline: condition.baseline ?? null, value_source: condition.value_source ?? "literal", value_field: condition.value_field ?? null, upper_value_source: condition.upper_value_source ?? "literal", upper_value_field: condition.upper_value_field ?? null })),
     anomaly_key_fields: data.anomalyKeyFields ?? [], repeat_push_enabled: Boolean(data.repeatPushEnabled),
     schedule: { frequency: data.schedule.frequency, interval: Number(data.schedule.interval || 1), time: data.schedule.time || null, start_date: data.schedule.start || new Date().toISOString().slice(0, 10), end_date: data.schedule.end || null },
-    notification_targets: data.notificationTargets ?? [], private_message_template: data.privateMessageTemplate?.trim() || null,
-    validation_enabled: Boolean(data.validationEnabled), validation_targets: data.validationTargets ?? [], deadline_seconds: Number(data.deadlineSeconds ?? (data.validationTimeoutMinutes ?? 1440) * 60), validation_method: data.validationMethod ?? "pseudo", sql_validation_config: data.validationMethod === "sql" ? data.sqlValidationConfig ?? null : null,
+    notification_targets: (data.notificationTargets ?? []).filter(validTarget), private_message_template: data.privateMessageTemplate?.trim() || null,
+    validation_enabled: Boolean(data.validationEnabled), validation_targets: (data.validationTargets ?? []).filter(validTarget), deadline_seconds: Number(data.deadlineSeconds ?? (data.validationTimeoutMinutes ?? 1440) * 60), validation_method: data.validationMethod ?? "pseudo", sql_validation_config: data.validationMethod === "sql" && data.sqlValidationConfig ? { datasource_id: data.sqlValidationConfig.datasourceId, query_template: data.sqlValidationConfig.queryTemplate, parameters: data.sqlValidationConfig.parameters, true_condition: { field: data.sqlValidationConfig.trueCondition.field, operator: data.sqlValidationConfig.trueCondition.operator, value: data.sqlValidationConfig.trueCondition.value ?? null, upper_value: data.sqlValidationConfig.trueCondition.upperValue ?? null, value_source: data.sqlValidationConfig.trueCondition.valueSource, value_field: data.sqlValidationConfig.trueCondition.valueField ?? null, upper_value_source: data.sqlValidationConfig.trueCondition.upperValueSource, upper_value_field: data.sqlValidationConfig.trueCondition.upperValueField ?? null } } : null,
     group_broadcast: { situation: broadcastSection(situation), timeout: broadcastSection(timeout), webhook_url: typeof group.webhookUrl === "string" ? group.webhookUrl : null }, enabled: Boolean(data.enabled),
   }
 }
