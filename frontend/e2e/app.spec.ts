@@ -47,3 +47,18 @@ test("keeps administrator routes reachable on narrow screens", async ({ page }, 
   await page.screenshot({ path: testInfo.outputPath("accounts.png"), fullPage: true })
   expect(errors).toEqual([])
 })
+
+test("aligns each rule switch with the rule title", async ({ page }) => {
+  await page.goto("/#rules")
+
+  const ruleRow = page.getByRole("row").filter({ hasText: "订单金额监控" })
+  const ruleSwitch = ruleRow.getByRole("switch", { name: "启用/停用 订单金额监控" })
+  const ruleTitle = ruleRow.getByRole("button", { name: "订单金额监控", exact: true })
+
+  await expect(ruleSwitch).toBeVisible()
+  const switchBox = await ruleSwitch.boundingBox()
+  const titleBox = await ruleTitle.boundingBox()
+  expect(switchBox).not.toBeNull()
+  expect(titleBox).not.toBeNull()
+  expect(Math.abs(switchBox!.y - titleBox!.y)).toBeLessThanOrEqual(1)
+})
