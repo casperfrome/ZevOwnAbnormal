@@ -461,6 +461,23 @@ test("uses cards with reachable management actions for every management inventor
   }
 })
 
+test("lets Pixel 7 administrators disable rules from the mobile card", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "mobile", "Responsive rule-card assertions target the Pixel 7 project")
+  await page.route("**/api/v1/rules/rule-1/disable", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ...rule, enabled: false }) })
+  })
+  await page.goto("/#rules")
+
+  const cards = page.getByRole("region", { name: "规则卡片列表" })
+  const toggle = cards.getByRole("switch", { name: "启用/停用 订单金额监控" })
+  await expect(toggle).toBeVisible()
+  await expect(toggle).toBeChecked()
+
+  const request = page.waitForRequest((candidate) => new URL(candidate.url()).pathname === "/api/v1/rules/rule-1/disable")
+  await toggle.click()
+  expect((await request).method()).toBe("POST")
+})
+
 test("shows hover and focus tooltips for dataset, datasource and account icon actions", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name === "mobile", "Mobile cards expose visible text labels")
   const cases = [

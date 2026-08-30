@@ -126,11 +126,22 @@ describe("rule pages", () => {
   })
 
   it("offers readable mobile rule cards with reachable management actions", async () => {
+    enableRule.mockResolvedValue({ ...rules[0], enabled: false })
     renderPage(<RulesPage navigate={vi.fn()} />)
     const cards = await screen.findByRole("region", { name: "规则卡片列表" })
     expect(within(cards).getByText("订单金额监控")).toBeInTheDocument()
     expect(within(cards).getByText("每日 09:00")).toBeInTheDocument()
     expect(within(cards).getByRole("button", { name: "立即执行 订单金额监控" })).toBeInTheDocument()
+
+    const enabledToggle = within(cards).getByRole("switch", { name: "启用/停用 订单金额监控" })
+    const disabledToggle = within(cards).getByRole("switch", { name: "启用/停用 库存阈值" })
+    expect(enabledToggle).toBeChecked()
+    expect(disabledToggle).not.toBeChecked()
+
+    await userEvent.click(enabledToggle)
+    expect(enableRule).toHaveBeenCalledWith("rule-1", false)
+    await userEvent.click(disabledToggle)
+    expect(enableRule).toHaveBeenCalledWith("rule-2", true)
   })
 
   it("restores focus to the rule delete button after cancellation", async () => {
