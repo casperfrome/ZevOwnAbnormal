@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest"
 
 import { ApiClient } from "./client"
-import { createResources, datasourceUpdatePayload, mapAnomalyGroup, mapRecord, recordQuery, rulePayload, ruleToEditorModel } from "./resources"
+import { createResources, datasourceUpdatePayload, mapAnomalyGroup, mapBroadcastDelivery, mapOverview, mapRecord, mapRecordDetail, recordQuery, rulePayload, ruleToEditorModel } from "./resources"
 
 describe("API resource mappings", () => {
   it("encodes record filters and repeated ids", () => {
@@ -49,9 +49,23 @@ describe("API resource mappings", () => {
     expect(mapAnomalyGroup({ group_id: "run-1", rule_name: "订单规则", matched_rows: 3, detected_at: "2026-08-30T01:00:00Z" })).toMatchObject({ id: "run-1", rule_name: "订单规则", record_count: 3, last_detected_at: "2026-08-30T01:00:00Z" })
   })
 
+  it("normalizes anomaly detail, group delivery and overview contracts", () => {
+    const detail = mapRecordDetail({ id: "a1", business_key: { order_id: "A-42" }, row_details: { amount: 9 }, validation_requests: [{ status: "sent" }], deliveries: [{ id: "d1", status: "failed", error_message: "network" }] })
+    expect(detail).toMatchObject({ id: "a1", business_key: { order_id: "A-42" }, data: { amount: 9 }, validation_requests: [{ status: "sent" }] })
+    expect(mapBroadcastDelivery({ id: "d1", broadcast_kind: "timeout", status: "failed", error_message: "network" })).toMatchObject({ id: "d1", kind: "timeout", status: "failed", error: "network" })
+    expect(mapOverview({ stats: { pending_records: 4 }, recent_anomalies: [{ id: "a1" }] })).toMatchObject({ stats: { pending_records: 4 }, recent_anomalies: [{ id: "a1" }] })
+  })
+
   it("restores snake-case rule configuration into the editor model", () => {
     const model = ruleToEditorModel({ id: "r1", name: "规则", dataset_id: "ds", severity: "high", logic: "AND", conditions: [], enabled: true, schedule: { frequency: "daily", interval: 1, start_date: "2026-08-01" }, group_broadcast: { webhook_url: "https://example.test/hook", situation: { enabled: true, message_template: "异常" } } })
     expect(model.schedule.start).toBe("2026-08-01")
     expect(model.groupBroadcast).toMatchObject({ webhookUrl: "https://example.test/hook", situation: { enabled: true, messageTemplate: "异常" } })
+  })
+
+  it("loads the actual pending record count through the paginated anomalies endpoint", async () => {
+    const client = new ApiClient()
+    vi.spyOn(client, "request").mockResolvedValue({ items: [], total: 3, page: 1, page_size: 1 })
+    await createResources(client).records.pendingCount()
+    expect(client.request).toHaveBeenCalledWith("/anomalies?page=1&page_size=1&status_filter=pending", { signal: undefined })
   })
 })

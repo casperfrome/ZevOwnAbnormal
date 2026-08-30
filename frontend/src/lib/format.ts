@@ -25,6 +25,26 @@ export function downloadBlob(blob: Blob, filename: string) {
 
 export function valueText(value: unknown) {
   if (value == null || value === "") return "—"
-  if (typeof value === "object") return JSON.stringify(value)
+  if (typeof value === "object") return jsonText(value)
   return String(value)
+}
+
+export function jsonText(value: unknown) {
+  const seen = new WeakSet<object>()
+  try {
+    const text = JSON.stringify(value, (_key, current) => {
+      if (typeof current === "object" && current !== null) {
+        if (seen.has(current)) return "[循环引用]"
+        seen.add(current)
+      }
+      return current
+    })
+    return text ?? "—"
+  } catch { return "[不可序列化数据]" }
+}
+
+export function businessKeyText(value: unknown) {
+  if (value == null || value === "") return "—"
+  if (typeof value !== "object" || Array.isArray(value)) return valueText(value)
+  return Object.keys(value as Record<string, unknown>).sort().map((key) => `${key}: ${valueText((value as Record<string, unknown>)[key])}`).join(" · ") || "—"
 }

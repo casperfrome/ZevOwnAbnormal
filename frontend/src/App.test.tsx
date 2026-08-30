@@ -33,4 +33,17 @@ describe("application shell", () => {
     await waitFor(() => expect(screen.getByText("分析师")).toBeInTheDocument())
     expect(screen.queryByRole("link", { name: /账号管理/ })).not.toBeInTheDocument()
   })
+
+  it("shows a real pending-record count and never a decorative dot", async () => {
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path.endsWith("/auth/me")) return json({ id: "u3", login_name: "operator", display_name: "值班员", is_superuser: false })
+      if (path.includes("/anomalies?page=1&page_size=1&status_filter=pending")) return json({ items: [], total: 3, page: 1, page_size: 1 })
+      return json([])
+    }))
+    render(<App />)
+    expect(await screen.findByText("值班员")).toBeInTheDocument()
+    expect(await screen.findByText("3")).toBeInTheDocument()
+    expect(screen.queryByText("•")).not.toBeInTheDocument()
+  })
 })

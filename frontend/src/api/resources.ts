@@ -1,5 +1,6 @@
 import type { ApiClient } from "./client"
-import type { AnomalyGroup, AnomalyRecord, Dataset, DatasetExecution, DatasetInput, Datasource, DatasourceInput, Overview, Paginated, RecordFilters, Rule, RuleEditorModel, User } from "./types"
+import type { AnomalyGroup, AnomalyGroupDetail, AnomalyRecord, AnomalyRecordDetail, BroadcastDelivery, Dataset, DatasetExecution, DatasetInput, Datasource, DatasourceInput, Overview, Paginated, RecordFilters, Rule, RuleEditorModel, User } from "./types"
+import { businessKeyText } from "@/lib/format"
 
 const clean = <T extends Record<string, unknown>>(value: T) => Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined)) as T
 
@@ -21,11 +22,14 @@ export const datasourceUpdatePayload = (data: DatasourceInput) => {
 export const datasetPayload = (data: DatasetInput) => ({ name: data.name, datasource_id: data.datasourceId, description: data.description ?? "", sql: data.sql })
 
 export function mapRecord(value: Record<string, unknown>): AnomalyRecord {
+  const businessKey = value.business_key ?? value.anomaly_key ?? ""
   return {
     ...value,
     id: String(value.id ?? ""),
-    anomaly_key: String(value.business_key ?? value.anomaly_key ?? ""),
-    title: String(value.description ?? value.business_key ?? value.id ?? ""),
+    anomaly_key: businessKeyText(businessKey),
+    business_key: businessKey as AnomalyRecord["business_key"],
+    business_key_summary: businessKeyText(businessKey),
+    title: String(value.description ?? businessKeyText(businessKey) ?? value.id ?? ""),
     severity: String(value.severity ?? "medium"),
     status: String(value.status ?? "pending"),
     detected_at: String(value.first_seen_at ?? value.detected_at ?? value.created_at ?? ""),
@@ -33,6 +37,18 @@ export function mapRecord(value: Record<string, unknown>): AnomalyRecord {
     push_status: String(value.delivery_status ?? value.push_status ?? "none"),
     data: (value.row_details ?? value.data ?? {}) as Record<string, unknown>,
   }
+}
+
+const records = (value: unknown) => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}
+
+export function mapBroadcastDelivery(value: Record<string, unknown>): BroadcastDelivery {
+  return { ...value, id: String(value.id ?? ""), kind: String(value.broadcast_kind ?? value.kind ?? "situation"), status: String(value.status ?? "pending"), attempts: Number(value.attempts ?? value.delivery_attempts ?? 0), error: typeof (value.error_message ?? value.last_error) === "string" ? String(value.error_message ?? value.last_error) : undefined, sent_at: typeof (value.sent_at ?? value.delivered_at) === "string" ? String(value.sent_at ?? value.delivered_at) : undefined }
+}
+
+export function mapRecordDetail(value: Record<string, unknown>): AnomalyRecordDetail {
+  const base = mapRecord(value)
+  const rawDeliveries = Array.isArray(value.deliveries) ? value.deliveries : []
+  return { ...base, validation_requests: Array.isArray(value.validation_requests) ? value.validation_requests.map(records) : [], deliveries: rawDeliveries.map(records).map(mapBroadcastDelivery), delivery_diagnostics: rawDeliveries.map(records).map(mapBroadcastDelivery) }
 }
 
 export function mapAnomalyGroup(value: Record<string, unknown>): AnomalyGroup {
@@ -45,6 +61,10 @@ export function mapAnomalyGroup(value: Record<string, unknown>): AnomalyGroup {
     first_detected_at: String(value.detected_at ?? value.first_detected_at ?? ""),
     status: String(value.broadcast_status ?? value.status ?? ""),
   }
+}
+
+export function mapOverview(value: Record<string, unknown>): Overview {
+  return { ...value, stats: records(value.stats) as Record<string, number>, trends: Array.isArray(value.trends) ? value.trends.map(records) : [], severity_distribution: Array.isArray(value.severity_distribution) ? value.severity_distribution.map(records) : [], recent_anomalies: Array.isArray(value.recent_anomalies) ? value.recent_anomalies.map(records).map(mapRecord) : [], top_rules: Array.isArray(value.top_rules) ? value.top_rules.map(records) : [] }
 }
 
 export function ruleToEditorModel(rule: Rule): RuleEditorModel {
@@ -83,7 +103,7 @@ export function createResources(client: ApiClient) {
       login: (login_name: string, password: string) => client.request<User>("/auth/login", { method: "POST", body: { username: login_name, password } }),
       logout: () => client.request<void>("/auth/logout", { method: "POST" }),
     },
-    overview: (days = 30, signal?: AbortSignal) => client.request<Overview>(`/overview?days=${days}`, { signal }),
+    overview: async (days = 30, signal?: AbortSignal) => mapOverview(await client.request<Record<string, unknown>>(`/overview?days=${days}`, { signal })),
     datasources: {
       list: (signal?: AbortSignal) => client.request<Datasource[]>("/datasources", { signal }),
       create: (data: DatasourceInput) => client.request<Datasource>("/datasources", { method: "POST", body: datasourcePayload(data) }),
@@ -112,14 +132,15 @@ export function createResources(client: ApiClient) {
     },
     records: {
       list: async (filters: RecordFilters = {}, signal?: AbortSignal) => { const payload = await client.request<Paginated<Record<string, unknown>>>(`/anomalies${recordQuery(filters) ? `?${recordQuery(filters)}` : ""}`, { signal }); return { ...payload, items: payload.items.map(mapRecord) } },
-      detail: async (id: string, signal?: AbortSignal) => mapRecord(await client.request<Record<string, unknown>>(`/anomalies/${id}`, { signal })),
+      detail: async (id: string, signal?: AbortSignal) => mapRecordDetail(await client.request<Record<string, unknown>>(`/anomalies/${id}`, { signal })),
+      pendingCount: async (signal?: AbortSignal) => (await client.request<Paginated<Record<string, unknown>>>("/anomalies?page=1&page_size=1&status_filter=pending", { signal })).total,
       status: (id: string, status: string, assignee?: string) => client.request<AnomalyRecord>(`/anomalies/${id}/status`, { method: "PATCH", body: { status, assignee } }),
       bulkStatus: (ids: string[], status: string) => client.request<Record<string, unknown>>("/anomalies/bulk-status", { method: "POST", body: { ids, status } }),
       export: (filters: RecordFilters = {}) => client.request<Blob>(`/anomalies/export${recordQuery(filters) ? `?${recordQuery(filters)}` : ""}`, { responseType: "blob" }),
     },
     groups: {
       list: async (filters: { page?: number; pageSize?: number; search?: string; ruleId?: string } = {}, signal?: AbortSignal) => { const q = new URLSearchParams(); const values = { page: filters.page, page_size: filters.pageSize, search: filters.search, rule_id: filters.ruleId }; Object.entries(values).forEach(([key, value]) => { if (value !== undefined && value !== "") q.set(key, String(value)) }); const payload = await client.request<Paginated<Record<string, unknown>>>(`/anomaly-groups${q.size ? `?${q}` : ""}`, { signal }); return { ...payload, items: payload.items.map(mapAnomalyGroup) } },
-      detail: async (id: string, signal?: AbortSignal) => { const payload = await client.request<{ group: Record<string, unknown>; items: Array<Record<string, unknown>>; deliveries?: unknown[] }>(`/anomaly-groups/${id}`, { signal }); return { ...mapAnomalyGroup(payload.group), records: payload.items.map(mapRecord), deliveries: payload.deliveries ?? [] } },
+      detail: async (id: string, signal?: AbortSignal): Promise<AnomalyGroupDetail> => { const payload = await client.request<{ group: Record<string, unknown>; items: Array<Record<string, unknown>>; deliveries?: Array<Record<string, unknown>>; total?: number; page?: number; page_size?: number }>(`/anomaly-groups/${id}`, { signal }); return { ...mapAnomalyGroup(payload.group), records: payload.items.map(mapRecord), deliveries: (payload.deliveries ?? []).map(mapBroadcastDelivery), total: payload.total, page: payload.page, page_size: payload.page_size } },
     },
     accounts: {
       list: (signal?: AbortSignal) => client.request<User[]>("/accounts", { signal }),
