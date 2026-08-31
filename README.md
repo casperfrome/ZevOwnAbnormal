@@ -8,7 +8,6 @@ Sentinel 是基于 FastAPI 的数据异常监控平台。平台元数据保存�
 
 - Windows 与 Docker Desktop
 - Python：`D:\PythonVenv\Scripts\python.exe`
-- Node.js 20+
 
 ```powershell
 & 'D:\PythonVenv\Scripts\python.exe' -m pip install -r backend\requirements.txt
@@ -246,16 +245,7 @@ docker compose down -v
 ```powershell
 $env:SENTINEL_API_BASE_URL='http://127.0.0.1:8000'
 & 'D:\PythonVenv\Scripts\python.exe' -m pytest backend\tests tests -q
-Push-Location frontend
-npm ci
-npx playwright install chromium
-npm test
-npm run typecheck
-npm run lint
-npm run test:e2e
-npm run build
-Pop-Location
 docker compose config --quiet
 ```
 
-测试使用 Node.js 20+。统一启动脚本仅在 `frontend/node_modules` 已存在时自动执行生产构建，依赖缺失时请先运行 `npm ci`。FastAPI 托管 `frontend/dist`，构建产物不会提交。登录会话由服务端校验 24 小时有效期；升级前不含过期时间的旧会话需要重新登录。
+前端是由 FastAPI 直接托管的 HTML、CSS 和原生 JavaScript，无需安装前端依赖或执行构建。登录会话由服务端校验 24 小时有效期；升级前不含过期时间的旧会话需要重新登录。

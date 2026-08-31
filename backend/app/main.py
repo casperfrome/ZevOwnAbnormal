@@ -307,7 +307,7 @@ def create_app(testing: bool = False) -> FastAPI:
                 raise HTTPException(502, run.error_message or "规则执行失败")
             return {"run_id": run.id, "status": run.status, "new_anomalies": run.new_anomalies}
 
-    frontend = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+    frontend = Path(__file__).resolve().parents[2] / "frontend"
     if frontend.exists() and not testing:
         app.mount("/", StaticFiles(directory=frontend, html=True), name="frontend")
     return app

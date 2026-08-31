@@ -129,20 +129,10 @@ Invoke-RestMethod 'http://127.0.0.1:8000/api/v1/health'
 
 ```powershell
 & 'D:\PythonVenv\Scripts\python.exe' -m pytest backend\tests tests -q
-
-Push-Location frontend
-npm ci
-npm run typecheck
-npm run lint
-npm test
-npm run test:e2e
-npm run build
-Pop-Location
-
 & 'D:\PythonVenv\Scripts\python.exe' -m compileall -q backend tests 飞书长连接启动
 ```
 
-不要把 Codex 用户名、runtime hash 或绝对 `node_modules` 路径写入项目文档，也不要联网安装未锁定的临时版本。
+不要把 Codex 用户名、runtime hash 或本机绝对依赖路径写入项目文档，也不要联网安装未锁定的临时版本。
 
 回归覆盖索引：
 
@@ -157,7 +147,7 @@ Pop-Location
 | 超时幂等、迟交、超时/提交竞态 | `test_timeout_is_idempotent_and_late_submission_resolves`、`test_expiration_cannot_overwrite_a_concurrent_resolution` |
 | 管理员解决与竞态保护 | `test_named_admin_can_manually_resolve`、`backend/tests/test_validation_api.py::test_manual_resolution_uses_authenticated_admin_not_forged_assignee` |
 | 卡片关闭失败重试与收敛 | `test_card_patch_failure_is_retryable_and_does_not_rollback_resolution`、`test_timed_out_card_reconciliation_converges_after_one_success` |
-| 有效深链实际拉取并打开详情、桌面/窄屏路由与零运行时错误 | `frontend/e2e/app.spec.ts` 的 Playwright 深链回归 |
+| 有效深链实际拉取并打开详情、桌面/窄屏路由与零运行时错误 | 启动服务后按本文件真实消息 smoke 流程进行浏览器人工验收 |
 | 长连接订阅、标准化与错误隔离 | `tests/test_feishu_long_connection.py` |
 
 ## 5. 真实消息人工 smoke（必须再次授权）
