@@ -176,11 +176,13 @@ window.RulesModule = (function () {
           <tbody>
             ${pageItems.map((r, i) => `
               <tr class="animate-fade" style="animation-delay:${i * 30}ms;${r.anomalyCount > 0 && r.enabled ? 'background: rgba(249, 112, 102, 0.04);' : ''}">
-                <td>
-                  <label class="switch" style="display:inline-flex;">
-                    <input type="checkbox" ${r.enabled ? 'checked' : ''} data-action="toggle" data-id="${r.id}" aria-label="启用/停用" />
-                    <span class="switch-slider"></span>
-                  </label>
+                <td class="rule-toggle-cell">
+                  <div class="rule-toggle-align">
+                    <label class="switch">
+                      <input type="checkbox" ${r.enabled ? 'checked' : ''} data-action="toggle" data-id="${r.id}" aria-label="启用/停用" />
+                      <span class="switch-slider"></span>
+                    </label>
+                  </div>
                 </td>
                 <td>
                   <div class="cell-strong">${escapeHtml(r.name)}</div>

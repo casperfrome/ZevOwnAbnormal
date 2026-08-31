@@ -684,6 +684,12 @@
   vertical-align: middle;
 }
 
+.data-table .rule-toggle-align {
+  display: flex;
+  align-items: center;
+  min-height: 22px;
+}
+
 .data-table tbody tr {
   transition: background var(--duration-fast) var(--ease-out);
 }
