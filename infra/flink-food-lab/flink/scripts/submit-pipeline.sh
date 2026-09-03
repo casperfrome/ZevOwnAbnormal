@@ -15,10 +15,20 @@ prepared_sql=/tmp/flink-food-lab-pipeline.sql
 submitted_job_id=""
 
 prepare_sql() {
-    local label_suffix
+    local label_suffix topic database username password
     label_suffix="${FLINK_LAB_SINK_LABEL_SUFFIX:-$(date -u +%Y%m%d%H%M%S%N)-$$}"
     label_suffix=$(printf '%s' "${label_suffix}" | tr -cd '[:alnum:]_-')
-    sed "s/__SINK_LABEL_SUFFIX__/${label_suffix}/g" /opt/flink/sql/pipeline.sql > "${prepared_sql}"
+    topic=$(printf '%s' "${FLINK_LAB_KAFKA_TOPIC}" | sed -e "s/'/''/g" -e 's/[\\&|]/\\&/g')
+    database=$(printf '%s' "${FLINK_LAB_STARROCKS_DATABASE}" | sed -e "s/'/''/g" -e 's/[\\&|]/\\&/g')
+    username=$(printf '%s' "${STARROCKS_USER}" | sed -e "s/'/''/g" -e 's/[\\&|]/\\&/g')
+    password=$(printf '%s' "${STARROCKS_PASSWORD}" | sed -e "s/'/''/g" -e 's/[\\&|]/\\&/g')
+    sed \
+        -e "s|__SINK_LABEL_SUFFIX__|${label_suffix}|g" \
+        -e "s|__KAFKA_TOPIC__|${topic}|g" \
+        -e "s|__STARROCKS_DATABASE__|${database}|g" \
+        -e "s|__STARROCKS_USER__|${username}|g" \
+        -e "s|__STARROCKS_PASSWORD__|${password}|g" \
+        /opt/flink/sql/pipeline.sql > "${prepared_sql}"
 }
 
 wait_for_healthy_job() {
@@ -68,21 +78,26 @@ submit() {
     wait_for_healthy_job "${submitted_job_id}"
 }
 if [ -n "${savepoint}" ]; then
-    if submit -Dexecution.state-recovery.path="${savepoint}"; then
-        exit 0
+    savepoint_path=${savepoint#file:}
+    if [ "${savepoint_path}" != "${savepoint}" ] && [ ! -e "${savepoint_path}" ]; then
+        echo "Recorded savepoint is absent from the persistent volume; rebuilding only Flink Food Lab tables."
+        mysql --protocol=tcp --host=mysql --user=root --password="${MYSQL_ROOT_PASSWORD}" \
+            --database="${FLINK_LAB_MYSQL_DATABASE}" \
+            --execute="UPDATE lab_runs r JOIN generator_state g ON g.run_id=r.id SET r.status='REBUILDING', r.savepoint_path=NULL WHERE g.id=1"
+        for table in ods_order_events dwd_order_current dws_store_metrics dws_minute_metrics ads_run_metrics; do
+            mysql --protocol=tcp --host=starrocks --port=9030 --user="${STARROCKS_USER}" --password="${STARROCKS_PASSWORD}" \
+                --database="${FLINK_LAB_STARROCKS_DATABASE}" --execute="TRUNCATE TABLE ${table}"
+        done
+    else
+        if submit -Dexecution.state-recovery.path="${savepoint}"; then
+            exit 0
+        fi
+        if [ -n "${submitted_job_id}" ]; then
+            curl --fail --silent --request PATCH "http://flink-jobmanager:8081/jobs/${submitted_job_id}?mode=cancel" >/dev/null || true
+        fi
+        echo "Savepoint restore failed while the savepoint still exists; warehouse data was preserved. Use the confirmed rebuild API after diagnosis." >&2
+        exit 1
     fi
-
-    echo "Savepoint restore failed; rebuilding only Flink Food Lab tables from earliest Kafka offsets."
-    if [ -n "${submitted_job_id}" ]; then
-        curl --silent --request PATCH "http://flink-jobmanager:8081/jobs/${submitted_job_id}?mode=cancel" >/dev/null || true
-    fi
-    mysql --protocol=tcp --host=mysql --user=root --password="${MYSQL_ROOT_PASSWORD}" \
-        --database="${FLINK_LAB_MYSQL_DATABASE}" \
-        --execute="UPDATE lab_runs r JOIN generator_state g ON g.run_id=r.id SET r.status='REBUILDING', r.savepoint_path=NULL WHERE g.id=1"
-    for table in ods_order_events dwd_order_current dws_store_metrics dws_minute_metrics ads_run_metrics; do
-        mysql --protocol=tcp --host=starrocks --port=9030 --user="${STARROCKS_USER}" --password="${STARROCKS_PASSWORD}" \
-            --database=flink_food_lab_warehouse --execute="TRUNCATE TABLE ${table}"
-    done
 fi
 
 submit

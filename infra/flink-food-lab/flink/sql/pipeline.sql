@@ -2,6 +2,7 @@ SET 'execution.runtime-mode' = 'streaming';
 SET 'execution.checkpointing.interval' = '5s';
 SET 'execution.checkpointing.mode' = 'EXACTLY_ONCE';
 SET 'execution.checkpointing.externalized-checkpoint-retention' = 'RETAIN_ON_CANCELLATION';
+SET 'table.local-time-zone' = 'Asia/Shanghai';
 SET 'table.dml-sync' = 'false';
 SET 'pipeline.name' = 'flink-food-lab-realtime-warehouse';
 SET 'parallelism.default' = '3';
@@ -13,7 +14,7 @@ CREATE TABLE orders_raw (
     kafka_timestamp TIMESTAMP_LTZ(3) METADATA FROM 'timestamp' VIRTUAL
 ) WITH (
     'connector' = 'kafka',
-    'topic' = 'flink-food-lab-orders-cdc',
+    'topic' = '__KAFKA_TOPIC__',
     'properties.bootstrap.servers' = 'kafka:29092',
     'properties.group.id' = 'flink-food-lab-ods-v1',
     'scan.startup.mode' = 'earliest-offset',
@@ -36,7 +37,7 @@ CREATE TABLE orders_cdc (
     PRIMARY KEY (id) NOT ENFORCED
 ) WITH (
     'connector' = 'kafka',
-    'topic' = 'flink-food-lab-orders-cdc',
+    'topic' = '__KAFKA_TOPIC__',
     'properties.bootstrap.servers' = 'kafka:29092',
     'properties.group.id' = 'flink-food-lab-current-v1',
     'scan.startup.mode' = 'earliest-offset',
@@ -61,10 +62,10 @@ CREATE TABLE ods_order_events (
     'connector' = 'starrocks',
     'jdbc-url' = 'jdbc:mysql://starrocks:9030',
     'load-url' = 'starrocks:8030',
-    'database-name' = 'flink_food_lab_warehouse',
+    'database-name' = '__STARROCKS_DATABASE__',
     'table-name' = 'ods_order_events',
-    'username' = 'root',
-    'password' = '',
+    'username' = '__STARROCKS_USER__',
+    'password' = '__STARROCKS_PASSWORD__',
     'sink.semantic' = 'exactly-once',
     'sink.label-prefix' = 'flink_food_lab_ods_v1___SINK_LABEL_SUFFIX__'
 );
@@ -85,10 +86,10 @@ CREATE TABLE dwd_order_current (
     'connector' = 'starrocks',
     'jdbc-url' = 'jdbc:mysql://starrocks:9030',
     'load-url' = 'starrocks:8030',
-    'database-name' = 'flink_food_lab_warehouse',
+    'database-name' = '__STARROCKS_DATABASE__',
     'table-name' = 'dwd_order_current',
-    'username' = 'root',
-    'password' = '',
+    'username' = '__STARROCKS_USER__',
+    'password' = '__STARROCKS_PASSWORD__',
     'sink.semantic' = 'exactly-once',
     'sink.label-prefix' = 'flink_food_lab_dwd_v1___SINK_LABEL_SUFFIX__'
 );
@@ -105,10 +106,10 @@ CREATE TABLE dws_store_metrics (
     'connector' = 'starrocks',
     'jdbc-url' = 'jdbc:mysql://starrocks:9030',
     'load-url' = 'starrocks:8030',
-    'database-name' = 'flink_food_lab_warehouse',
+    'database-name' = '__STARROCKS_DATABASE__',
     'table-name' = 'dws_store_metrics',
-    'username' = 'root',
-    'password' = '',
+    'username' = '__STARROCKS_USER__',
+    'password' = '__STARROCKS_PASSWORD__',
     'sink.semantic' = 'exactly-once',
     'sink.label-prefix' = 'flink_food_lab_dws_store_v1___SINK_LABEL_SUFFIX__'
 );
@@ -124,10 +125,10 @@ CREATE TABLE dws_minute_metrics (
     'connector' = 'starrocks',
     'jdbc-url' = 'jdbc:mysql://starrocks:9030',
     'load-url' = 'starrocks:8030',
-    'database-name' = 'flink_food_lab_warehouse',
+    'database-name' = '__STARROCKS_DATABASE__',
     'table-name' = 'dws_minute_metrics',
-    'username' = 'root',
-    'password' = '',
+    'username' = '__STARROCKS_USER__',
+    'password' = '__STARROCKS_PASSWORD__',
     'sink.semantic' = 'exactly-once',
     'sink.label-prefix' = 'flink_food_lab_dws_minute_v1___SINK_LABEL_SUFFIX__'
 );
@@ -143,10 +144,10 @@ CREATE TABLE ads_run_metrics (
     'connector' = 'starrocks',
     'jdbc-url' = 'jdbc:mysql://starrocks:9030',
     'load-url' = 'starrocks:8030',
-    'database-name' = 'flink_food_lab_warehouse',
+    'database-name' = '__STARROCKS_DATABASE__',
     'table-name' = 'ads_run_metrics',
-    'username' = 'root',
-    'password' = '',
+    'username' = '__STARROCKS_USER__',
+    'password' = '__STARROCKS_PASSWORD__',
     'sink.semantic' = 'exactly-once',
     'sink.label-prefix' = 'flink_food_lab_ads_v1___SINK_LABEL_SUFFIX__'
 );

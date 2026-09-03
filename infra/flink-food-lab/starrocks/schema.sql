@@ -1,5 +1,5 @@
-CREATE DATABASE IF NOT EXISTS flink_food_lab_warehouse;
-USE flink_food_lab_warehouse;
+CREATE DATABASE IF NOT EXISTS __STARROCKS_DATABASE__;
+USE __STARROCKS_DATABASE__;
 
 CREATE TABLE IF NOT EXISTS ods_order_events (
     event_date DATE NOT NULL,

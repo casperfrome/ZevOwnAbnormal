@@ -9,6 +9,7 @@ config=$(printf '%s' "{
     \"database.user\": \"${FLINK_LAB_MYSQL_CDC_USER}\",
     \"database.password\": \"${FLINK_LAB_MYSQL_CDC_PASSWORD}\",
     \"database.server.id\": \"1849\",
+    \"driver.connectionTimeZone\": \"Asia/Shanghai\",
     \"topic.prefix\": \"flink-food-lab\",
     \"database.include.list\": \"${FLINK_LAB_MYSQL_DATABASE}\",
     \"table.include.list\": \"${FLINK_LAB_MYSQL_DATABASE}.orders\",
@@ -25,7 +26,7 @@ config=$(printf '%s' "{
     \"transforms\": \"route\",
     \"transforms.route.type\": \"org.apache.kafka.connect.transforms.RegexRouter\",
     \"transforms.route.regex\": \".*\",
-    \"transforms.route.replacement\": \"flink-food-lab-orders-cdc\"
+    \"transforms.route.replacement\": \"${FLINK_LAB_KAFKA_TOPIC}\"
 }")
 payload=$(printf '{"name":"flink-food-lab-orders","config":%s}' "${config}")
 

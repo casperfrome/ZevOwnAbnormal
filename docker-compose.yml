@@ -142,7 +142,7 @@ services:
         /opt/kafka/bin/kafka-topics.sh
         --bootstrap-server kafka:29092
         --create --if-not-exists
-        --topic flink-food-lab-orders-cdc
+        --topic ${FLINK_LAB_KAFKA_TOPIC:-flink-food-lab-orders-cdc}
         --partitions 3
         --replication-factor 1
         --config retention.ms=604800000
@@ -162,6 +162,7 @@ services:
     environment:
       STARROCKS_USER: ${STARROCKS_USER:-root}
       STARROCKS_PASSWORD: ${STARROCKS_PASSWORD:-}
+      FLINK_LAB_STARROCKS_DATABASE: ${FLINK_LAB_STARROCKS_DATABASE:-flink_food_lab_warehouse}
     depends_on:
       starrocks:
         condition: service_healthy
@@ -192,6 +193,8 @@ services:
       HEAP_OPTS: -Xms128M -Xmx512M
       ENABLE_DEBEZIUM_SCRIPTING: "false"
     ports:
+      # Docker Desktop and the local proxy share 8084 on this workstation;
+      # keep the existing host binding so the requested fixed port remains usable.
       - "${DEBEZIUM_CONNECT_PORT:-8084}:8083"
     depends_on:
       flink-lab-mysql-init:
@@ -218,6 +221,7 @@ services:
       FLINK_LAB_MYSQL_DATABASE: ${FLINK_LAB_MYSQL_DATABASE:-flink_food_lab}
       FLINK_LAB_MYSQL_CDC_USER: ${FLINK_LAB_MYSQL_CDC_USER:-flink_food_cdc}
       FLINK_LAB_MYSQL_CDC_PASSWORD: ${FLINK_LAB_MYSQL_CDC_PASSWORD:-flink_food_cdc_dev}
+      FLINK_LAB_KAFKA_TOPIC: ${FLINK_LAB_KAFKA_TOPIC:-flink-food-lab-orders-cdc}
     depends_on:
       debezium-connect:
         condition: service_healthy
@@ -265,7 +269,7 @@ services:
         state.savepoints.dir: file:///opt/flink/savepoints
         jobmanager.execution.failover-strategy: region
     ports:
-      - "${FLINK_REST_PORT:-8081}:8081"
+      - "127.0.0.1:${FLINK_REST_PORT:-8081}:8081"
     depends_on:
       flink-lab-storage-init:
         condition: service_completed_successfully
@@ -324,7 +328,7 @@ services:
         -Drest.address=flink-jobmanager
     environment: *flink-environment
     ports:
-      - "${FLINK_SQL_GATEWAY_PORT:-8083}:8083"
+      - "127.0.0.1:${FLINK_SQL_GATEWAY_PORT:-8083}:8083"
     depends_on:
       flink-jobmanager:
         condition: service_healthy
@@ -349,6 +353,8 @@ services:
       <<: *flink-environment
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD must be set in the ignored .env file}
       FLINK_LAB_MYSQL_DATABASE: ${FLINK_LAB_MYSQL_DATABASE:-flink_food_lab}
+      FLINK_LAB_KAFKA_TOPIC: ${FLINK_LAB_KAFKA_TOPIC:-flink-food-lab-orders-cdc}
+      FLINK_LAB_STARROCKS_DATABASE: ${FLINK_LAB_STARROCKS_DATABASE:-flink_food_lab_warehouse}
       STARROCKS_USER: ${STARROCKS_USER:-root}
       STARROCKS_PASSWORD: ${STARROCKS_PASSWORD:-}
     depends_on:

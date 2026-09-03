@@ -9,7 +9,14 @@ sr_mysql=(
     --batch --skip-column-names
 )
 
-"${sr_mysql[@]}" < /opt/flink-food-lab/starrocks/schema.sql
+if [[ ! "${FLINK_LAB_STARROCKS_DATABASE}" =~ ^[A-Za-z0-9_]+$ ]]; then
+    echo "FLINK_LAB_STARROCKS_DATABASE must contain only letters, digits, and underscores" >&2
+    exit 1
+fi
+prepared_schema=/tmp/flink-food-lab-starrocks-schema.sql
+sed "s/__STARROCKS_DATABASE__/${FLINK_LAB_STARROCKS_DATABASE}/g" \
+    /opt/flink-food-lab/starrocks/schema.sql > "${prepared_schema}"
+"${sr_mysql[@]}" < "${prepared_schema}"
 
 wait_for_schema_change() {
     local table_name="$1"
@@ -18,7 +25,7 @@ wait_for_schema_change() {
 
     while (( attempt < 120 )); do
         state=$("${sr_mysql[@]}" --execute="
-            SHOW ALTER TABLE COLUMN FROM flink_food_lab_warehouse
+            SHOW ALTER TABLE COLUMN FROM ${FLINK_LAB_STARROCKS_DATABASE}
             WHERE TableName = '${table_name}'
             ORDER BY CreateTime DESC LIMIT 1;" | cut -f10)
         case "${state}" in
@@ -42,13 +49,13 @@ ensure_nullable() {
     non_nullable=$("${sr_mysql[@]}" --execute="
         SELECT COUNT(*)
         FROM information_schema.columns
-        WHERE TABLE_SCHEMA = 'flink_food_lab_warehouse'
+        WHERE TABLE_SCHEMA = '${FLINK_LAB_STARROCKS_DATABASE}'
           AND TABLE_NAME = '${table_name}'
           AND COLUMN_NAME IN (${column_names})
           AND IS_NULLABLE = 'NO';")
 
     if [[ "${non_nullable}" != "0" ]]; then
-        "${sr_mysql[@]}" --execute="ALTER TABLE flink_food_lab_warehouse.${table_name} ${alter_clauses};"
+        "${sr_mysql[@]}" --execute="ALTER TABLE ${FLINK_LAB_STARROCKS_DATABASE}.${table_name} ${alter_clauses};"
         wait_for_schema_change "${table_name}"
     fi
 }
@@ -57,11 +64,12 @@ ensure_nullable() {
 # tables receiving a changelog therefore need to be nullable. These checks
 # make an existing, non-empty learning volume converge without dropping data.
 ensure_nullable dwd_order_current \
-    "'run_id','order_no','store_id','channel','amount','status','event_time','processed_at'" \
+    "'run_id','order_no','store_id','channel','items','amount','status','event_time','processed_at'" \
     "MODIFY COLUMN run_id VARCHAR(64) NULL,
      MODIFY COLUMN order_no VARCHAR(40) NULL,
      MODIFY COLUMN store_id VARCHAR(16) NULL,
      MODIFY COLUMN channel VARCHAR(16) NULL,
+     MODIFY COLUMN items STRING NULL,
      MODIFY COLUMN amount DECIMAL(12,2) NULL,
      MODIFY COLUMN status VARCHAR(20) NULL,
      MODIFY COLUMN event_time DATETIME NULL,
