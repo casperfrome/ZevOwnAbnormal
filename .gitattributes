@@ -1,0 +1,5 @@
+# Container entrypoints and SQL templates must keep Unix line endings on Windows hosts.
+infra/flink-food-lab/*.sh text eol=lf
+infra/flink-food-lab/**/*.sh text eol=lf
+infra/flink-food-lab/*.sql text eol=lf
+infra/flink-food-lab/**/*.sql text eol=lf
