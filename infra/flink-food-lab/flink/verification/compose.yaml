@@ -1,0 +1,62 @@
+name: flink23-verification
+services:
+  storage-init:
+    image: zev-own-abnormal/flink-food-lab:2.3.0
+    user: root
+    entrypoint: ['/bin/bash', '-ec', 'chown -R 9999:9999 /opt/flink/checkpoints /opt/flink/savepoints']
+    volumes:
+      - checkpoint:/opt/flink/checkpoints
+      - savepoint:/opt/flink/savepoints
+  jobmanager:
+    image: zev-own-abnormal/flink-food-lab:2.3.0
+    command: jobmanager
+    depends_on:
+      storage-init:
+        condition: service_completed_successfully
+    environment: &flink-environment
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink23-jobmanager
+        rest.address: flink23-jobmanager
+        rest.bind-address: 0.0.0.0
+        taskmanager.numberOfTaskSlots: 6
+        jobmanager.memory.process.size: 768m
+        taskmanager.memory.process.size: 2048m
+        parallelism.default: 1
+        execution.checkpointing.interval: 5s
+        execution.checkpointing.mode: EXACTLY_ONCE
+        execution.checkpointing.dir: file:///opt/flink/checkpoints
+        execution.checkpointing.savepoint-dir: file:///opt/flink/savepoints
+        execution.checkpointing.externalized-checkpoint-retention: RETAIN_ON_CANCELLATION
+    ports: ['127.0.0.1:18081:8081']
+    networks:
+      infra:
+        aliases: [flink23-jobmanager]
+    volumes:
+      - checkpoint:/opt/flink/checkpoints
+      - savepoint:/opt/flink/savepoints
+    mem_limit: 1024m
+  taskmanager:
+    image: zev-own-abnormal/flink-food-lab:2.3.0
+    command: ['/bin/bash', '-ec', 'socat TCP-LISTEN:8040,bind=127.0.0.1,reuseaddr,fork TCP:starrocks:8040 & socat TCP-LISTEN:9060,bind=127.0.0.1,reuseaddr,fork TCP:starrocks:9060 & exec /docker-entrypoint.sh taskmanager']
+    environment: *flink-environment
+    depends_on: [jobmanager]
+    networks: [infra]
+    volumes:
+      - checkpoint:/opt/flink/checkpoints
+      - savepoint:/opt/flink/savepoints
+    mem_limit: 2560m
+  sql-gateway:
+    image: zev-own-abnormal/flink-food-lab:2.3.0
+    command: ['/opt/flink/bin/sql-gateway.sh', 'start-foreground', '-Dsql-gateway.endpoint.rest.address=0.0.0.0', '-Dsql-gateway.endpoint.rest.bind-address=0.0.0.0', '-Dsql-gateway.endpoint.rest.port=8083', '-Drest.address=flink23-jobmanager']
+    environment: *flink-environment
+    depends_on: [jobmanager, taskmanager]
+    ports: ['127.0.0.1:18083:8083']
+    networks: [infra]
+    mem_limit: 768m
+networks:
+  infra:
+    external: true
+    name: project-infra
+volumes:
+  checkpoint:
+  savepoint:

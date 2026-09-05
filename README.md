@@ -1,6 +1,6 @@
 # 异常监控平台
 
-Sentinel 是基于 FastAPI 的数据异常监控平台。平台元数据保存在容器 MySQL 的 `zev_abnormal_app`，车辆温度业务数据保存在 `test_260828`；Kafka 承接推送任务，DolphinScheduler 负责编排，StarRocks 保留为空的数据服务供后续使用。
+Sentinel 是基于 FastAPI 的数据异常监控平台。平台元数据保存在容器 MySQL 的 `zev_abnormal_app`，车辆温度业务数据保存在 `test_260828`；Kafka 承接推送任务，DolphinScheduler 负责编排。共享基础设施还提供 Flink 2.3.0 Food Lab，使用独立的 MySQL 数据库、Kafka topic 和 StarRocks 结果表运行实时数仓及门店统计作业。
 
 本文档面向 Windows 本地开发环境，所有命令均在项目根目录执行。
 
@@ -8,6 +8,7 @@ Sentinel 是基于 FastAPI 的数据异常监控平台。平台元数据保存�
 
 - Windows 与 Docker Desktop
 - Python：`D:\PythonVenv\Scripts\python.exe`
+- Flink 本机构建：JDK 25.0.2（`D:\jdk25`）与 Maven 3.9.12；编译目标 Java 17，Flink 2.3.0 容器使用 Java 17。IDEA 保持 JDK 25。
 
 ```powershell
 & 'D:\PythonVenv\Scripts\python.exe' -m pip install -r backend\requirements.txt
@@ -41,7 +42,7 @@ DATABASE_URL=mysql+pymysql://sentinel_app:<本机密码>@127.0.0.1:3306/zev_abno
 | --- | --- | --- | --- |
 | MySQL `127.0.0.1:3306` | `zev_abnormal_app` | `sentinel_app` | 平台元数据，可读写 |
 | MySQL `127.0.0.1:3306` | `test_260828` | `sentinel_app` | 车辆温度业务数据，只读 |
-| StarRocks `127.0.0.1:9030` | 无预置业务库 | `root` | 保留服务能力 |
+| StarRocks `127.0.0.1:9030` | `flink_food_lab_warehouse` | `root` | Flink 学习台与门店练习结果 |
 | PostgreSQL（Docker 网络） | `dolphinscheduler` | `dolphinscheduler` | DolphinScheduler 元数据 |
 
 平台仅保留 `test_260828` 数据源、`配送车辆温度` 数据集和同名规则。旧塔斯汀演示造数及平台种子入口默认停用，避免重新创建已删除的数据。
@@ -52,6 +53,7 @@ Compose 项目名固定为 `zev-own-abnormal`，MySQL 是默认服务。Kafka、
 
 ```powershell
 docker compose config --quiet
+& .\infra\flink-food-lab\flink\build.ps1
 docker compose up -d --wait --wait-timeout 600
 & 'D:\PythonVenv\Scripts\python.exe' backend\scripts\bootstrap_host_mysql.py
 Push-Location backend
@@ -60,6 +62,8 @@ Pop-Location
 ```
 
 初始化脚本幂等创建 `zev_abnormal_app`、`test_260828` 和 `sentinel_app` 权限，不会造数或输出凭据。
+
+Flink 连接器源码构建、数仓初始化、日常启动、保存点恢复和对账命令见 [Flink Food Lab 使用说明](infra/flink-food-lab/README.md)。已有实验应按该说明恢复状态，避免把首次初始化当成日常启动。
 
 ## 部署验收
 
@@ -76,7 +80,7 @@ Pop-Location
 验收标准：
 
 - 所有常驻容器名称以 `zev-own-abnormal-` 开头且为 `healthy`，schema initializer 为 `Exited (0)`。
-- MySQL 仅有 `zev_abnormal_app`、`test_260828` 和系统库。
+- MySQL 保留 `zev_abnormal_app`、`test_260828`、Flink 实验库 `flink_food_lab` 及其他已配置服务数据库。
 - `sentinel_app` 可读写系统库、可查询 `test_260828.car_temperature`，但不能写业务库。
 - StarRocks 中不存在旧 `tastien_ads`。
 - Alembic current 与 head 一致，车辆温度数据源、数据集、规则和历史记录可用。
@@ -245,6 +249,7 @@ docker compose down -v
 ```powershell
 $env:SENTINEL_API_BASE_URL='http://127.0.0.1:8000'
 & 'D:\PythonVenv\Scripts\python.exe' -m pytest backend\tests tests -q
+& .\infra\flink-food-lab\flink\build.ps1
 docker compose config --quiet
 ```
 

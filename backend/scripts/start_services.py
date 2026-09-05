@@ -25,7 +25,7 @@ install_break_handler()
 
 
 def report(message: str) -> None:
-    print(f'[Sentinel] {message}', flush=True)
+    print(f'[ZevOwnAbnormal] {message}', flush=True)
 
 
 def check_port(port: int = 8000) -> None:

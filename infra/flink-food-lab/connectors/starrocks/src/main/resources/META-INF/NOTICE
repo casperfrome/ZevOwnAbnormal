@@ -1,0 +1,14 @@
+Self-maintained StarRocks connector for Apache Flink 2.3
+
+This product includes software developed by StarRocks, Inc.
+Copyright 2021-present StarRocks, Inc. All rights reserved.
+
+Derived from StarRocks/starrocks-connector-for-apache-flink v1.2.15,
+commit 9cfffceff54750a11e8504f26f78e4da8744eb1a, including its bundled
+starrocks-stream-load-sdk source, under the Apache License 2.0.
+Local modifications adapt the sink to Apache Flink 2.3 public Sink V2 APIs
+and repair checkpoint state restoration, serialization, and commit failures.
+Local code also provides bounded JDBC table scans through the Flink 2.3 Source API.
+
+The upstream checkout did not contain a top-level NOTICE file. Original
+copyright and license headers are preserved in vendored source files.

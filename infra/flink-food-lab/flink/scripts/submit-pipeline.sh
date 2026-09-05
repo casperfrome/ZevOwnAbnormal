@@ -1,10 +1,28 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-running_jobs=$(curl --fail --silent http://flink-jobmanager:8081/jobs/overview || true)
-if echo "${running_jobs}" | grep -Eq '"name":"flink-food-lab-realtime-warehouse"[^}]*"state":"RUNNING"'; then
-    echo "Flink Food Lab job is already running."
-    exit 0
+if ! running_jobs=$(curl --fail --silent http://flink-jobmanager:8081/jobs/overview); then
+    echo "Cannot inspect existing Flink jobs; refusing a potentially duplicate submission." >&2
+    exit 1
+fi
+if ! active_states=$(printf '%s' "${running_jobs}" | jq -er '
+    if (.jobs | type) != "array" then error("invalid jobs overview") else
+    [.jobs[] | select(.name == "flink-food-lab-realtime-warehouse") |
+        .state | select(. != "FINISHED" and . != "FAILED" and . != "CANCELED" and . != "SUSPENDED")]
+    | if length == 0 then "NONE" else join(",") end end'); then
+    echo "Invalid Flink jobs overview; refusing submission." >&2
+    exit 1
+fi
+case "${active_states}" in
+    NONE) ;;
+    RUNNING) echo "Flink Food Lab job is already running."; exit 0 ;;
+    *) echo "A Flink Food Lab job is transitioning or multiple jobs exist; retry after it settles." >&2; exit 1 ;;
+esac
+
+flink_home=${FLINK_HOME:-/opt/flink}
+if [ ! -x "${flink_home}/bin/sql-client.sh" ]; then
+    echo "Flink SQL client is unavailable." >&2
+    exit 1
 fi
 
 savepoint=$(mysql --protocol=tcp --host=mysql --user=root --password="${MYSQL_ROOT_PASSWORD}" \
@@ -28,7 +46,7 @@ prepare_sql() {
         -e "s|__STARROCKS_DATABASE__|${database}|g" \
         -e "s|__STARROCKS_USER__|${username}|g" \
         -e "s|__STARROCKS_PASSWORD__|${password}|g" \
-        /opt/flink/sql/pipeline.sql > "${prepared_sql}"
+        "${flink_home}/sql/pipeline.sql" > "${prepared_sql}"
 }
 
 wait_for_healthy_job() {
@@ -64,7 +82,7 @@ submit() {
     local log_file=/tmp/flink-food-lab-submit.log
     prepare_sql
     set +e
-    /opt/flink/bin/sql-client.sh -Dexecution.target=remote -Drest.address=flink-jobmanager "$@" -f "${prepared_sql}" 2>&1 | tee "${log_file}"
+    "${flink_home}/bin/sql-client.sh" -Dexecution.target=remote -Drest.address=flink-jobmanager "$@" -f "${prepared_sql}" 2>&1 | tee "${log_file}"
     local sql_client_status=${PIPESTATUS[0]}
     set -e
     if [ "${sql_client_status}" -ne 0 ] || grep -q '\[ERROR\]' "${log_file}"; then
@@ -80,14 +98,8 @@ submit() {
 if [ -n "${savepoint}" ]; then
     savepoint_path=${savepoint#file:}
     if [ "${savepoint_path}" != "${savepoint}" ] && [ ! -e "${savepoint_path}" ]; then
-        echo "Recorded savepoint is absent from the persistent volume; rebuilding only Flink Food Lab tables."
-        mysql --protocol=tcp --host=mysql --user=root --password="${MYSQL_ROOT_PASSWORD}" \
-            --database="${FLINK_LAB_MYSQL_DATABASE}" \
-            --execute="UPDATE lab_runs r JOIN generator_state g ON g.run_id=r.id SET r.status='REBUILDING', r.savepoint_path=NULL WHERE g.id=1"
-        for table in ods_order_events dwd_order_current dws_store_metrics dws_minute_metrics ads_run_metrics; do
-            mysql --protocol=tcp --host=starrocks --port=9030 --user="${STARROCKS_USER}" --password="${STARROCKS_PASSWORD}" \
-                --database="${FLINK_LAB_STARROCKS_DATABASE}" --execute="TRUNCATE TABLE ${table}"
-        done
+        echo "Recorded savepoint is absent; metadata and warehouse data were preserved. Restore the state volume or use the confirmed rebuild API after diagnosis." >&2
+        exit 1
     else
         if submit -Dexecution.state-recovery.path="${savepoint}"; then
             exit 0
@@ -98,6 +110,24 @@ if [ -n "${savepoint}" ]; then
         echo "Savepoint restore failed while the savepoint still exists; warehouse data was preserved. Use the confirmed rebuild API after diagnosis." >&2
         exit 1
     fi
+fi
+
+# Only a fresh empty warehouse or the API's explicitly confirmed rebuild may
+# start without state. An ordinary restart must never silently replay into
+# existing tables, especially when Kafka no longer retains the full history.
+run_status=$(mysql --protocol=tcp --host=mysql --user=root --password="${MYSQL_ROOT_PASSWORD}" \
+    --database="${FLINK_LAB_MYSQL_DATABASE}" --batch --skip-column-names \
+    --execute="SELECT r.status FROM lab_runs r JOIN generator_state g ON g.run_id=r.id WHERE g.id=1" | tail -n 1)
+if [ "${run_status}" != "REBUILDING" ]; then
+    for table in ods_order_events dwd_order_current dws_store_metrics dws_minute_metrics ads_run_metrics; do
+        existing_row=$(mysql --protocol=tcp --host=starrocks --port=9030 --user="${STARROCKS_USER}" --password="${STARROCKS_PASSWORD}" \
+            --database="${FLINK_LAB_STARROCKS_DATABASE}" --batch --skip-column-names \
+            --execute="SELECT 1 FROM ${table} LIMIT 1")
+        if [ -n "${existing_row}" ]; then
+            echo "No saved recovery state but warehouse data exists; data was preserved. Use the confirmed rebuild API after diagnosis." >&2
+            exit 1
+        fi
+    done
 fi
 
 submit

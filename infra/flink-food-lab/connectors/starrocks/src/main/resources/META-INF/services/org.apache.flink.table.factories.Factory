@@ -1,0 +1,2 @@
+com.starrocks.connector.flink.table.sink.StarRocksDynamicTableSinkFactory
+com.starrocks.connector.flink.table.source.StarRocksDynamicTableSourceFactory

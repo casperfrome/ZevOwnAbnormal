@@ -1,0 +1,5 @@
+*
+!Dockerfile
+!lib/
+!lib/*.jar
+!lib/SHA256SUMS

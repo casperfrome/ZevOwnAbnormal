@@ -1,0 +1,570 @@
+{
+  "repository": "https://github.com/StarRocks/starrocks-connector-for-apache-flink",
+  "tag": "v1.2.15",
+  "commit": "9cfffceff54750a11e8504f26f78e4da8744eb1a",
+  "license": "Apache-2.0",
+  "bundled_sdk": "starrocks-stream-load-sdk at the same commit, compiled directly; no snapshot dependency",
+  "files": [
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/connection/StarRocksJdbcConnectionIProvider.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/connection/StarRocksJdbcConnectionIProvider.java",
+      "upstream_sha256": "466affe64363d4605a513d121d04c5295cf757baf00d654a7c9bfd89dcb141e3"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/connection/StarRocksJdbcConnectionOptions.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/connection/StarRocksJdbcConnectionOptions.java",
+      "upstream_sha256": "b7e0b55ca7522631c2c36c673d4ee7b6110bbcd9494030a913ca99d777f92562"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/connection/StarRocksJdbcConnectionProvider.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/connection/StarRocksJdbcConnectionProvider.java",
+      "upstream_sha256": "4328ae93fdff9871921230c73273300a70c5cbe5919fdfcc070d8893f3ce3f24"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/manager/StarRocksQueryVisitor.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/manager/StarRocksQueryVisitor.java",
+      "upstream_sha256": "361a10bdf212bc10b8629897b3bb69ea69bda3d1fff7e386662b768b9b350960"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/manager/StarRocksSinkTable.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/manager/StarRocksSinkTable.java",
+      "upstream_sha256": "5340b326d3b820db56d9f335ed6e5f8fea06684926e6cadf6ae436c25270b728"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/manager/StarRocksStreamLoadListener.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/manager/StarRocksStreamLoadListener.java",
+      "upstream_sha256": "f44af43a95953d9d2f791e92b6b3e7a0b1c70b3de8b997724d17955ee8a3cf3a"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/row/sink/StarRocksCsvSerializer.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/row/sink/StarRocksCsvSerializer.java",
+      "upstream_sha256": "43eb8acac75b8fde83edbc1f7188145a0bbe9763d8928ecd8113e599c2cb4cad"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/row/sink/StarRocksDelimiterParser.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/row/sink/StarRocksDelimiterParser.java",
+      "upstream_sha256": "714c3663fa0716975486ce4dea2597dda791a2192be99860dbd6b00cf2f9490b"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/row/sink/StarRocksGenericRowTransformer.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/row/sink/StarRocksGenericRowTransformer.java",
+      "upstream_sha256": "0c97ea4c26b398af9e979dd612af4848dd15b624fdc24a10b15b691b10cb9b1a"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/row/sink/StarRocksIRowTransformer.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/row/sink/StarRocksIRowTransformer.java",
+      "upstream_sha256": "c4fb106c3ee786aa34fdd9df6dd91fc88c84a534a8c94412986f09ed86d4b5e0"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/row/sink/StarRocksISerializer.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/row/sink/StarRocksISerializer.java",
+      "upstream_sha256": "459e6252bab1ecee34056fa7760c9418a4d02b3980ee6a1a25a03d0351edd31f"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/row/sink/StarRocksJsonSerializer.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/row/sink/StarRocksJsonSerializer.java",
+      "upstream_sha256": "25dbdbd43423f1737412ccb3bca9433b411188de9f461f2e4f465613de88b7ac"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/row/sink/StarRocksSerializerFactory.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/row/sink/StarRocksSerializerFactory.java",
+      "upstream_sha256": "2147c982a39ebf9482d167ac84d00add167b35899e0f0fc90e787602189040cc"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/row/sink/StarRocksSinkOP.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/row/sink/StarRocksSinkOP.java",
+      "upstream_sha256": "3eb6b1adc5205b009637b738354e17ea9d947f14f65c8e57076e2409d871251c"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/row/sink/StarRocksSinkRowBuilder.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/row/sink/StarRocksSinkRowBuilder.java",
+      "upstream_sha256": "39a1c7e39d6fa1fcbcf8a964e51b11f01510f5988d874fa081e79bbb94e512f8"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/row/sink/StarRocksTableRowTransformer.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/row/sink/StarRocksTableRowTransformer.java",
+      "upstream_sha256": "60cfea656ca2a21e09d054293034b23596b5ab244dcc726aa0bce962d353759a"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/StarRocksSink.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/StarRocksSink.java",
+      "upstream_sha256": "e221eb8c729c1f65d82df0431861faa3434699e5fe32497d3825fe98ce166951"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/table/data/DefaultStarRocksRowData.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/table/data/DefaultStarRocksRowData.java",
+      "upstream_sha256": "8e2439bd0b7d351d823e60b2e79f8cb5db3379a91c855a42c1fcf2ba8bfd4232"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/table/data/StarRocksRowData.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/table/data/StarRocksRowData.java",
+      "upstream_sha256": "ff921e74f42071bffaf4b4102319f6cf23ce35f65cd0af26dd0152e9e8402227"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/table/sink/ExactlyOnceLabelGenerator.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/table/sink/ExactlyOnceLabelGenerator.java",
+      "upstream_sha256": "ef4eef1f77112167f0741c7dd856c224c228827c065051b3b278435aa42d9b48"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/table/sink/ExactlyOnceLabelGeneratorFactory.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/table/sink/ExactlyOnceLabelGeneratorFactory.java",
+      "upstream_sha256": "00a383d0607128f03abd559f7069946429877b1281bab1ffcc9c1893a317e3b9"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/table/sink/ExactlyOnceLabelGeneratorSnapshot.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/table/sink/ExactlyOnceLabelGeneratorSnapshot.java",
+      "upstream_sha256": "f535836731edfa3a2cd79c0dfd9dcaf03c96a0372ceb3aabb63efffd26755ce2"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/table/sink/LingeringTransactionAborter.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/table/sink/LingeringTransactionAborter.java",
+      "upstream_sha256": "d69f7e4eddde4531de37237e62a3d954c32bae59b5f7fca36eaa81e75bd7a010"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/table/sink/MergeCommitOptions.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/table/sink/MergeCommitOptions.java",
+      "upstream_sha256": "f953db612a04098b4805f173b7fae76644f3e062299b2a3674dd96233dc7d600"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/table/sink/StarRocksSinkFactory.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/table/sink/SinkFunctionFactory.java",
+      "upstream_sha256": "d2b74e40030f13e0a3d8d73206f26baff03837297aa363775ff2baa68abad7b6"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/table/sink/StarRocksDynamicTableSink.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/table/sink/StarRocksDynamicTableSink.java",
+      "upstream_sha256": "fac6c3be370dc6d53dd60bdaccd8d8d5423598eacecbf575bc42aeb127b1fb98"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/table/sink/StarRocksDynamicTableSinkFactory.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/table/sink/StarRocksDynamicTableSinkFactory.java",
+      "upstream_sha256": "98d2110dc4add8b32c98a232442b4814759980a2c74de407a8c10b792ddcbc4e"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/table/sink/StarRocksSinkOptions.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/table/sink/StarRocksSinkOptions.java",
+      "upstream_sha256": "47ca8b5e05356d6df18934f7e7b7f6861650912715ac33b3de54bdf44bb8c090"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/table/sink/StarRocksSinkSemantic.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/table/sink/StarRocksSinkSemantic.java",
+      "upstream_sha256": "5a84d847e929d029b8b15b3c0a6fd35941d39a797226f2ed1d63e1a814a60656"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/table/sink/v2/DefaultStarRocksSinkContext.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/table/sink/v2/DefaultStarRocksSinkContext.java",
+      "upstream_sha256": "d3f10df51cbe0d4dea18886951f7b31f36c6349caa2593e7937b71d1e17f7841"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/table/sink/v2/RecordSerializationSchema.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/table/sink/v2/RecordSerializationSchema.java",
+      "upstream_sha256": "374a08992c60fd52276567367328891bb8480be5d631bc2b4e6c215ee75227d8"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/table/sink/v2/RowDataSerializationSchema.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/table/sink/v2/RowDataSerializationSchema.java",
+      "upstream_sha256": "421bbd4d00ad28aca2e3ef4e1f0b7c81eca1d4db8d108eaf92a892c8bba37047"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/table/sink/v2/StarRocksCommittable.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/table/sink/v2/StarRocksCommittable.java",
+      "upstream_sha256": "2dda2b5afce930e3b69dce228f8353dbc73b7c3cea203e2f2be1de514d43eb63"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/table/sink/v2/StarRocksCommittableSerializer.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/table/sink/v2/StarRocksCommittableSerializer.java",
+      "upstream_sha256": "e6a1681325ab33ed6128ef1417531ead789d6c0faa57ce9eada32f8b7ddcba2c"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/table/sink/v2/StarRocksCommitter.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/table/sink/v2/StarRocksCommitter.java",
+      "upstream_sha256": "bb682d50e2947ce08ec932bd8a399b98694dd98f82aab059f97d3de5584cbdff"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/table/sink/v2/StarRocksSink.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/table/sink/v2/StarRocksSink.java",
+      "upstream_sha256": "eabf0ef6de28b14c5ad613a1e9226110bdad690a2e36609af1af3784c3e01ba6"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/table/sink/v2/StarRocksSinkContext.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/table/sink/v2/StarRocksSinkContext.java",
+      "upstream_sha256": "9957d75420b5027d2ee2ed790142487b31b8b3e0024ca58eef9af4efbb4cd798"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/table/sink/v2/StarRocksWriter.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/table/sink/v2/StarRocksWriter.java",
+      "upstream_sha256": "875a789b77ede579db007a40c6435b2acd8fdd04cadc32bfa289302c2f3690af"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/table/sink/v2/StarRocksWriterState.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/table/sink/v2/StarRocksWriterState.java",
+      "upstream_sha256": "ff14c33365f74df9abb452be489de14bab086d1669c9eb67b715a919ed3c4bd4"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/table/sink/v2/StarRocksWriterStateSerializer.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/table/sink/v2/StarRocksWriterStateSerializer.java",
+      "upstream_sha256": "c1fbd2316f04540c6fdbdff92f0cb38b9a19b2dfddab929f46cf12db67afdf05"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/table/StarRocksDataType.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/table/StarRocksDataType.java",
+      "upstream_sha256": "157aee8453a1d847b3bf8764a1b1851d8e560ae12b1e3e2d0848b8c35621d3ee"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/tools/ClassUtils.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/tools/ClassUtils.java",
+      "upstream_sha256": "2dbaef41feecff91fe5fe44c9d1e4bafbe97a9825b41ce9b0dc86720aa69fdc2"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/tools/ConnectionUtils.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/tools/ConnectionUtils.java",
+      "upstream_sha256": "b900ff3b1e8e761cbe953daf355475c17b186c75a565c3b0a84d66b4e2ebc4c1"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/tools/EnvUtils.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/tools/EnvUtils.java",
+      "upstream_sha256": "384a359798abe52c1947428566c3f7c394a7e13e99484dd036fafd9b50ff1601"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/tools/IOUtils.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/tools/IOUtils.java",
+      "upstream_sha256": "e566cd45f7f1d122b1af9480b25ea771110ff9fb15a1c56b21bd13c67f26b07d"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/tools/JsonWrapper.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/tools/JsonWrapper.java",
+      "upstream_sha256": "7e90d3f8d7e224855305e569f7d3377cd3c739df64d72c94c16c568e03f70208"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/annotation/Evolving.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/annotation/Evolving.java",
+      "upstream_sha256": "68386300a5660ff3f7d04f83fcf9d94b43cd19fa3a145de6be51f92e1af94807"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/BatchTableRegion.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/BatchTableRegion.java",
+      "upstream_sha256": "bf4ff7d8820da058e484f092bb6022956b579dff747f3271e3fc278ac4ba93bf"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/Chunk.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/Chunk.java",
+      "upstream_sha256": "bf9d5b5049cae5ea57931aa41d3355e48f76c595ce3e13ef65d24242db4e2f88"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/compress/CompressionCodec.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/compress/CompressionCodec.java",
+      "upstream_sha256": "3ae2cf426503134282b95dcd42f03e5cac3578bb539a3ad63d8616190bc88f0f"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/compress/CompressionHttpEntity.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/compress/CompressionHttpEntity.java",
+      "upstream_sha256": "2530b999b2a7a321c52eb0ed6577055f5e385fabe7323eb22f811d00184d659d"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/compress/CompressionOptions.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/compress/CompressionOptions.java",
+      "upstream_sha256": "dd90791726e4501f2b6f574127f7c692d361589a0d2d4ccb2661e3b1309ba97f"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/compress/CountingOutputStream.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/compress/CountingOutputStream.java",
+      "upstream_sha256": "9fc2096ce74d7de14af391a657455ccd7b8ebd15d255277b68251b2922856a7c"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/compress/LZ4FrameCompressionCodec.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/compress/LZ4FrameCompressionCodec.java",
+      "upstream_sha256": "c17e329644897f6f6738b5122157dd65f33c3d56a6c5f4a693d8b59090d695f7"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/compress/NoCompressCodec.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/compress/NoCompressCodec.java",
+      "upstream_sha256": "4dfaf5394ddf48ecf99536e789a275188f88e81fad2a8276175c872e66d41a4e"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/DefaultStreamLoader.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/DefaultStreamLoader.java",
+      "upstream_sha256": "33f191f08bf8492096827df4f8e71617c7dba551c6384c1a6a61956a16bc8771"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/DelimiterParser.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/DelimiterParser.java",
+      "upstream_sha256": "4a7d9711a42822b8bba3e5a0d87a1c77593d7d9ec01dce9546f2dcf84efb8c5f"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/EnvUtils.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/EnvUtils.java",
+      "upstream_sha256": "ab6e2e292b62bf1ec8278f8c569318dd927c9995f60144da4a06a3a9754664b6"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/exception/ErrorUtils.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/exception/ErrorUtils.java",
+      "upstream_sha256": "5909796fb3353d796b95251493450365a0f622066dfe5017d268b356b3eaf04a"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/exception/StreamLoadFailException.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/exception/StreamLoadFailException.java",
+      "upstream_sha256": "b1dce0a58ab17669883b453c399431df0b8849817735c8a170ee7671e728a685"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/http/StreamLoadEntity.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/http/StreamLoadEntity.java",
+      "upstream_sha256": "c419908d0b4147205de344d3d9189afa14c5a536f596c5650592bd83b734cff8"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/http/StreamLoadEntityMeta.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/http/StreamLoadEntityMeta.java",
+      "upstream_sha256": "426575ec0dd9c24522c5cbb1bf37ab4ed19c65261058fec2437edba37a280aac"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/io/StreamLoadStream.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/io/StreamLoadStream.java",
+      "upstream_sha256": "0c8dc6ab4ecce6c694d7a8a15b6f6b1f85c8a6257ae45643b628afe1c5498d23"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/LabelGenerator.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/LabelGenerator.java",
+      "upstream_sha256": "a9af1de37ddab634c2919ee251e146d447403691cd6348d25167373c618c143d"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/LabelGeneratorFactory.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/LabelGeneratorFactory.java",
+      "upstream_sha256": "a99bf08956d5f2fa005911f79cd8e28a730875c12eab830e14e982db77a1e03b"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/LoadMetrics.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/LoadMetrics.java",
+      "upstream_sha256": "b1177bfd87825aadf0de4392ef5ea544c6e830d9c829b7c23fddbdf3c7ae6471"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/mergecommit/be/BackendHttpService.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/mergecommit/be/BackendHttpService.java",
+      "upstream_sha256": "f40de56e572ee8ac80101406c9118b4d0aba3b312c3f72cd4b484edf6b667a7b"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/mergecommit/ChunkCompressUtil.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/mergecommit/ChunkCompressUtil.java",
+      "upstream_sha256": "a1cc8ff309f73772f267e3a8edd0525a5e72fdb9e5028c6fba40fdd1be233261"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/mergecommit/EmptyMetricListener.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/mergecommit/EmptyMetricListener.java",
+      "upstream_sha256": "cf47d3725982b9b29a547c658276ebf2966dfac687f959aa9d726d45ce1632c9"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/mergecommit/fe/DefaultFeHttpService.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/mergecommit/fe/DefaultFeHttpService.java",
+      "upstream_sha256": "2459ea541d93c73a4192ee6c330757e11e3a5a67acb7a65777eca216441d3766"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/mergecommit/fe/FeHttpService.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/mergecommit/fe/FeHttpService.java",
+      "upstream_sha256": "eab5b75525219ab1464c20a3abb6aca4856a925bb04ab06b230ef5eccac2ac2e"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/mergecommit/fe/FeMetaService.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/mergecommit/fe/FeMetaService.java",
+      "upstream_sha256": "33eb5abd2cc1272946eb19b241a05625e5a2a8c0233b3a49940f846e1ab38603"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/mergecommit/fe/LabelStateService.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/mergecommit/fe/LabelStateService.java",
+      "upstream_sha256": "772992d9c8daa5e2b3480de6ea601b6ddebbe7573c04beaee6c171af4d559581"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/mergecommit/fe/NodesStateService.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/mergecommit/fe/NodesStateService.java",
+      "upstream_sha256": "a5d3e1a2832e94c84c41ad42cfa1d78521dd73761a8ae487b82a1643fbc299ff"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/mergecommit/fe/RequestStat.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/mergecommit/fe/RequestStat.java",
+      "upstream_sha256": "83d7402460e5c132576edf556ffb1776697e3d690c7147964b8787063c6dd5d0"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/mergecommit/LoadParameters.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/mergecommit/LoadParameters.java",
+      "upstream_sha256": "b8df81b6e93f397700f4884c8dd6521f0e2daa0875523ccacae59baf43cf93e0"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/mergecommit/LoadRequest.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/mergecommit/LoadRequest.java",
+      "upstream_sha256": "6efb9f00de151d5c62edc549452c410b3935fe5095e7355b7c50499860456fa7"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/mergecommit/MergeCommitHttpLoader.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/mergecommit/MergeCommitHttpLoader.java",
+      "upstream_sha256": "af2031635dbb87e87f9204e6d38d0183331998bd55981765fe52d0c4d8a712db"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/mergecommit/MergeCommitLoader.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/mergecommit/MergeCommitLoader.java",
+      "upstream_sha256": "e16689a026d607698f98dac43c5c87b9ce291da7bcee229060ef475030059c9f"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/mergecommit/MergeCommitManager.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/mergecommit/MergeCommitManager.java",
+      "upstream_sha256": "5a13062090c4b3ece693643462a1a3f2cfc5086ef748e92ed793ece59c6373c6"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/mergecommit/MetricListener.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/mergecommit/MetricListener.java",
+      "upstream_sha256": "a5b68fd28c4213945c89808ea2e568013bd7802d5a68b652ef51409667a272e6"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/mergecommit/Pair.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/mergecommit/Pair.java",
+      "upstream_sha256": "db4f3e876b07af5aae9e1eb5e79353591df1db57d344321b32e09498ef09df9a"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/mergecommit/SharedService.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/mergecommit/SharedService.java",
+      "upstream_sha256": "3ae11066d98d566232dd3fadba08236fd46e441171be25d4ee541f26c398711c"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/mergecommit/Table.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/mergecommit/Table.java",
+      "upstream_sha256": "9091e5d619b24941d862a76c0b69d763cee2a5560c4e1c961279974fda0c6b90"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/mergecommit/TableId.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/mergecommit/TableId.java",
+      "upstream_sha256": "7c12d2e0cdfb3025f191432fe78356f7f7a135d4e5a849e948df1ac1765472f0"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/mergecommit/WorkerAddress.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/mergecommit/WorkerAddress.java",
+      "upstream_sha256": "cd02c223c8d4f74850231ac7da3cd1605aef89f0027995158dd4ad8e6a2e2a32"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/properties/StreamLoadProperties.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/properties/StreamLoadProperties.java",
+      "upstream_sha256": "393a50c1ca74c8b75db63525e98b6a61da220d8a453f2b42e1da5bc1563d2dc0"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/properties/StreamLoadTableProperties.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/properties/StreamLoadTableProperties.java",
+      "upstream_sha256": "e641c80f796096af85f07ffeb3ce064af4b922d5c5bb8290c09e9ecb036643e1"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/StarRocksVersion.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/StarRocksVersion.java",
+      "upstream_sha256": "48595e97ac963278f7de3d4846f0b0bf746187ffb920ee06d39b167f77432b95"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/StreamLoadConstants.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/StreamLoadConstants.java",
+      "upstream_sha256": "0ca30fd790b510ed6cfcc63bb429379a65b71e895a93e85afcd1a33ed9ff6fcc"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/StreamLoadDataFormat.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/StreamLoadDataFormat.java",
+      "upstream_sha256": "7b6341218288777c88f44e6c09356bf21a0254bdb84240752c8de872cb4d3861"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/StreamLoader.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/StreamLoader.java",
+      "upstream_sha256": "0165e61ff288ffb5dc2137c60dba8841c2a147d1773ee7086d093804c99e0aea"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/StreamLoadManager.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/StreamLoadManager.java",
+      "upstream_sha256": "c0a6fc505c971791d949ea222405d96ac5e3ce8e194840d11fe1ede4bed8ce40"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/StreamLoadResponse.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/StreamLoadResponse.java",
+      "upstream_sha256": "dbe0f72d3ca6d8aa9bf137514b7d9a9ea37d8d5d513a75aee3429545c5b8afa3"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/StreamLoadSnapshot.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/StreamLoadSnapshot.java",
+      "upstream_sha256": "83e5268ab035678ad057cda5518a484687b86caa813621113eada461cbec6441"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/StreamLoadStrategy.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/StreamLoadStrategy.java",
+      "upstream_sha256": "f99c7ea68567f5537854cd60f85847610ec35c7d425daacbdfdaa2aa02f977a5"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/StreamLoadUtils.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/StreamLoadUtils.java",
+      "upstream_sha256": "8a915511809502ddc752a0b5211c902c66ab184708998aefb098a1b44673566a"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/StreamTableRegion.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/StreamTableRegion.java",
+      "upstream_sha256": "fd9921dd8bee93b02c21e542764cca5b66ee5b85465f84b7fbb163defd15f552"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/TableRegion.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/TableRegion.java",
+      "upstream_sha256": "ae2929c12e5f9a85bf2d300c7e783923d5da40f2ee005beca2b229163424ab29"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/TransactionStatus.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/TransactionStatus.java",
+      "upstream_sha256": "4cc714c18067578fb8edd3eabfbdace89ee72373677a05c3aa51199eccccb751"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/TransactionStreamLoader.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/TransactionStreamLoader.java",
+      "upstream_sha256": "570c4c1ed7a7ea4d884af5400d3a72fbdc9c065a2c04bc57be3b2e90ca957c13"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/v2/ChunkHttpEntity.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/v2/ChunkHttpEntity.java",
+      "upstream_sha256": "1b1c7cd55a264c9ad47aa2f54c4ec8f04da866bf0b2ad7f1a84ac6d90d2ba682"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/v2/ChunkInputStream.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/v2/ChunkInputStream.java",
+      "upstream_sha256": "91b55050d47e9f888f2a74f646c2a49c4f038fd37872d4013a88961f876996f1"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/v2/DefaultStreamLoadManager.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/v2/DefaultStreamLoadManager.java",
+      "upstream_sha256": "216f370f83e16675fef16d395ba7e628e26a2ec8aed2a7e925e805087f0c1fbb"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/v2/FlushAndCommitStrategy.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/v2/FlushAndCommitStrategy.java",
+      "upstream_sha256": "b934ea8f9f2b415ac1e027f3e933a6da02b052b9a68940f1c693cfd05bb66357"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/v2/FlushReason.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/v2/FlushReason.java",
+      "upstream_sha256": "0482d98bbb8d77a912b9b4be735cf4588b64c13ad14b33892a1a3dbda8dd4dba"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/v2/PartitionCommitTracker.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/v2/PartitionCommitTracker.java",
+      "upstream_sha256": "7a8231c62558f065b03356a325b7420fe60a6c0b5561d7f63fc8a5535e58e287"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/v2/SharedTransactionCoordinator.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/v2/SharedTransactionCoordinator.java",
+      "upstream_sha256": "2260e3ad5fa60480a95b8766dec495adfb03240c8425c90e13344229250f7d3e"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/v2/StreamLoadListener.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/v2/StreamLoadListener.java",
+      "upstream_sha256": "56eb1cbbd344ac743fc714cce01a87fecff189980caf4953ab340c1fe7004340"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/v2/StreamLoadManagerV2.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/v2/StreamLoadManagerV2.java",
+      "upstream_sha256": "a8f1d1ad0e71ee764b75269d4c4897334ae064463a075ee6df1458ae47175a19"
+    },
+    {
+      "vendored_path": "sdk/src/main/java/com/starrocks/data/load/stream/v2/TransactionTableRegion.java",
+      "upstream_path": "starrocks-stream-load-sdk/src/main/java/com/starrocks/data/load/stream/v2/TransactionTableRegion.java",
+      "upstream_sha256": "1f93e5644c9236daa5d0fc727215142fbb57d6b8e02ce33a627c55172ae24370"
+    },
+    {
+      "vendored_path": "src/main/java/com/starrocks/connector/flink/table/source/StarRocksSourceOptions.java",
+      "upstream_path": "src/main/java/com/starrocks/connector/flink/table/source/StarRocksSourceOptions.java",
+      "upstream_sha256": "9748153204e6ed08fe65b26d39be9d83f9ec68c5e164da94e3269b4dc9cc0786"
+    }
+  ],
+  "local_source": "Bounded JDBC SQL source is local code using Flink 2.3 public Source APIs. Source options are derived from pinned upstream and narrowed to the nine implemented configuration keys."
+}
